@@ -1,0 +1,29 @@
+[package]
+name = "dioxus-mcp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rmcp = { version = "1.6", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1.0"
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+toml = "0.9"
+cargo_toml = "0.22"
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "json"] }
+scraper = "0.20"
+moka = { version = "0.12", features = ["future"] }
+minijinja = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
+tower = "0.5"
+heck = "0.5"
