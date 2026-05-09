@@ -21,8 +21,10 @@ const READY_PATTERNS: &[&str] = &[
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOG_TAIL_LINES: usize = 80;
 
-fn project_dir(state: &Arc<State>) -> PathBuf {
-    state.project_root.clone()
+fn project_dir(state: &Arc<State>, override_root: Option<&str>) -> PathBuf {
+    override_root
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.project_root.clone())
 }
 
 // ---------- dx_serve ----------
@@ -35,6 +37,9 @@ pub struct DxServeParams {
     pub features: Vec<String>,
     #[serde(default)]
     pub release: bool,
+    /// Absolute path to the Dioxus project root. Required when the MCP server was not
+    /// started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,7 +61,7 @@ pub async fn dx_serve(state: &Arc<State>, p: DxServeParams) -> Result<DxServeRes
     if p.release {
         cmd.arg("--release");
     }
-    cmd.current_dir(project_dir(state))
+    cmd.current_dir(project_dir(state, p.project_root.as_deref()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -199,6 +204,9 @@ pub struct DxBundleParams {
     pub platform: String,
     #[serde(default)]
     pub release: bool,
+    /// Absolute path to the Dioxus project root. Required when the MCP server was not
+    /// started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,7 +225,7 @@ pub async fn dx_bundle(state: &Arc<State>, p: DxBundleParams) -> Result<DxBundle
     if p.release {
         cmd.arg("--release");
     }
-    cmd.current_dir(project_dir(state))
+    cmd.current_dir(project_dir(state, p.project_root.as_deref()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -269,6 +277,9 @@ pub struct DxCheckParams {
     /// Platform feature to enable (web, desktop, mobile, fullstack, server). Optional.
     #[serde(default)]
     pub platform: Option<String>,
+    /// Absolute path to the Dioxus project root. Required when the MCP server was not
+    /// started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -295,7 +306,7 @@ pub async fn dx_check(state: &Arc<State>, p: DxCheckParams) -> Result<DxCheckRes
     if let Some(plat) = p.platform.as_deref() {
         cmd.arg("--features").arg(plat);
     }
-    cmd.current_dir(project_dir(state))
+    cmd.current_dir(project_dir(state, p.project_root.as_deref()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

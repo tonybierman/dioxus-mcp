@@ -11,7 +11,11 @@ use crate::state::State;
 // ---------- audit_feature_flags ----------
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct AuditFeatureFlagsParams {}
+pub struct AuditFeatureFlagsParams {
+    /// Absolute path to the Dioxus project root to inspect.
+    /// Defaults to the path the MCP server was started in when omitted.
+    pub project_root: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct Finding {
@@ -34,8 +38,11 @@ const PLATFORM_FEATURES: &[&str] = &[
     "web", "desktop", "mobile", "fullstack", "server", "static-generation", "ssr",
 ];
 
-pub async fn audit_feature_flags(state: &Arc<State>, _p: AuditFeatureFlagsParams) -> AuditReport {
-    let project = state.project.lock().await.clone();
+pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams) -> AuditReport {
+    let project = match p.project_root.as_deref() {
+        Some(root) => crate::project::ProjectInfo::detect(std::path::Path::new(root)),
+        None => state.project.lock().await.clone(),
+    };
     let mut findings = Vec::new();
 
     let Some(manifest) = project.manifest_path.clone() else {
@@ -171,6 +178,9 @@ pub async fn audit_feature_flags(state: &Arc<State>, _p: AuditFeatureFlagsParams
 pub struct CheckRsxParams {
     /// Path to a Rust file to scan (absolute, or relative to the project root).
     pub file: String,
+    /// Absolute path to the Dioxus project root. Required when `file` is relative and the
+    /// server was not started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,7 +201,7 @@ pub async fn check_rsx(
     state: &Arc<State>,
     p: CheckRsxParams,
 ) -> Result<CheckRsxReport, String> {
-    let path = resolve_in_project(state, &p.file).await;
+    let path = resolve_in_project(state, &p.file, p.project_root.as_deref()).await;
     let src = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let file = syn::parse_file(&src).map_err(|e| {
@@ -336,6 +346,9 @@ pub struct ExplainSignalGraphParams {
     pub file: String,
     /// Optional component name. If omitted, every #[component] in the file is analyzed.
     pub component: Option<String>,
+    /// Absolute path to the Dioxus project root. Required when `file` is relative and the
+    /// server was not started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -363,7 +376,7 @@ pub async fn explain_signal_graph(
     state: &Arc<State>,
     p: ExplainSignalGraphParams,
 ) -> Result<ExplainSignalGraphReport, String> {
-    let path = resolve_in_project(state, &p.file).await;
+    let path = resolve_in_project(state, &p.file, p.project_root.as_deref()).await;
     let src = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let file = syn::parse_file(&src).map_err(|e| format!("rust parse error: {e}"))?;
@@ -486,14 +499,19 @@ fn lint_signal_graph(nodes: &[SignalNode]) -> Vec<String> {
     out
 }
 
-async fn resolve_in_project(state: &Arc<State>, file: &str) -> PathBuf {
+async fn resolve_in_project(state: &Arc<State>, file: &str, project_root: Option<&str>) -> PathBuf {
     let p = PathBuf::from(file);
     if p.is_absolute() {
         return p;
     }
-    let project = state.project.lock().await;
-    let base = project
-        .manifest_dir()
-        .unwrap_or_else(|| state.project_root.clone());
+    let base = if let Some(root) = project_root {
+        let info = crate::project::ProjectInfo::detect(std::path::Path::new(root));
+        info.manifest_dir().unwrap_or_else(|| PathBuf::from(root))
+    } else {
+        let project = state.project.lock().await;
+        project
+            .manifest_dir()
+            .unwrap_or_else(|| state.project_root.clone())
+    };
     base.join(p)
 }

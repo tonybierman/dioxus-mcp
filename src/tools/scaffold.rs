@@ -80,13 +80,16 @@ pub struct CreateComponentParams {
     pub props: Vec<PropSpec>,
     /// Optional override directory (relative to crate root). Defaults to `src/components`.
     pub path: Option<String>,
+    /// Absolute path to the Dioxus project root. Required when the MCP server was not
+    /// started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 pub async fn create_component(
     state: &Arc<State>,
     p: CreateComponentParams,
 ) -> Result<ScaffoldResult, String> {
-    let crate_root = crate_root(state).await?;
+    let crate_root = crate_root(state, p.project_root.as_deref()).await?;
     let components_dir = crate_root.join(p.path.as_deref().unwrap_or("src/components"));
     std::fs::create_dir_all(&components_dir).map_err(|e| e.to_string())?;
 
@@ -154,13 +157,16 @@ pub struct CreateRouteParams {
     pub component: String,
     /// File containing the `#[derive(Routable)]` enum. Defaults to `src/router.rs` then `src/main.rs`.
     pub router_file: Option<String>,
+    /// Absolute path to the Dioxus project root. Required when the MCP server was not
+    /// started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 pub async fn create_route(
     state: &Arc<State>,
     p: CreateRouteParams,
 ) -> Result<ScaffoldResult, String> {
-    let crate_root = crate_root(state).await?;
+    let crate_root = crate_root(state, p.project_root.as_deref()).await?;
     let router_file = match p.router_file.as_deref() {
         Some(rf) => crate_root.join(rf),
         None => find_routable(&crate_root)
@@ -292,13 +298,19 @@ pub struct CreateServerFnParams {
     pub args: Vec<ArgSpec>,
     /// Defaults to `String`.
     pub return_type: Option<String>,
+    /// Absolute path to the Dioxus project root. Required when the MCP server was not
+    /// started in the target project directory.
+    pub project_root: Option<String>,
 }
 
 pub async fn create_server_fn(
     state: &Arc<State>,
     p: CreateServerFnParams,
 ) -> Result<ScaffoldResult, String> {
-    let project = state.project.lock().await.clone();
+    let project = match p.project_root.as_deref() {
+        Some(root) => crate::project::ProjectInfo::detect(std::path::Path::new(root)),
+        None => state.project.lock().await.clone(),
+    };
     let active = &project.dioxus_features;
     let fullstack_capable = active.iter().any(|f| f == "fullstack")
         || (active.iter().any(|f| f == "server") && active.iter().any(|f| f == "web"));
@@ -371,9 +383,18 @@ pub async fn create_server_fn(
     })
 }
 
-async fn crate_root(state: &Arc<State>) -> Result<PathBuf, String> {
-    let project = state.project.lock().await;
-    project
-        .manifest_dir()
-        .ok_or_else(|| "no Cargo.toml found from project root".to_string())
+async fn crate_root(state: &Arc<State>, project_root: Option<&str>) -> Result<PathBuf, String> {
+    match project_root {
+        Some(root) => {
+            let info = crate::project::ProjectInfo::detect(std::path::Path::new(root));
+            info.manifest_dir()
+                .ok_or_else(|| format!("no Cargo.toml with a dioxus dep found under {root}"))
+        }
+        None => {
+            let project = state.project.lock().await;
+            project
+                .manifest_dir()
+                .ok_or_else(|| "no Cargo.toml found from project root".to_string())
+        }
+    }
 }
