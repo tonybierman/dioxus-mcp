@@ -27,7 +27,7 @@ In **your Dioxus app's** `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", tag = "probe-v0.1.1" }
+dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", tag = "probe-v0.1.2" }
 ```
 
 In `src/main.rs`:

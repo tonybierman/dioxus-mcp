@@ -116,7 +116,7 @@ that file.
 ```toml
 # in your Dioxus app's Cargo.toml
 [dev-dependencies]
-dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", tag = "probe-v0.1.1" }
+dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", tag = "probe-v0.1.2" }
 ```
 
 ```rust
