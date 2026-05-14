@@ -109,7 +109,7 @@ that file.
 ```toml
 # in your Dioxus app's Cargo.toml
 [dev-dependencies]
-dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp" }
+dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", rev = "f32892b" }
 ```
 
 ```rust
