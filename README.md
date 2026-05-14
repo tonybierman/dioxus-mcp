@@ -1,6 +1,7 @@
 # dioxus-mcp
 
 [![CI](https://github.com/tonybierman/dioxus-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/tonybierman/dioxus-mcp/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 An MCP server that gives Claude Code (and any other MCP client) deep static
 understanding of a Dioxus 0.7 project: route maps, component/server-fn
@@ -171,3 +172,8 @@ which tool(s) it exercises.
 --project-root PATH        pin a project root (default: CWD)
 --log LEVEL                tracing filter (default: info)
 ```
+
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE)
+at your option.
