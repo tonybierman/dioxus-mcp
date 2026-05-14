@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
 use schemars::JsonSchema;
-use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 
 use crate::state::{CachedDoc, State};
-
-const SITEMAP_URL: &str = "https://dioxuslabs.com/sitemap.xml";
 
 // ---------- search_docs ----------
 
@@ -43,54 +40,28 @@ pub async fn search_docs(
         None => detect_version(state).await,
     };
     let limit = p.limit.unwrap_or(5);
-    let urls = fetch_sitemap(state).await?;
-    let prefix = format!("https://dioxuslabs.com/learn/{version}/");
-    let candidates: Vec<String> = urls
-        .into_iter()
-        .filter(|u| u.starts_with(&prefix))
-        .collect();
 
     let qterms = tokenize(&p.query);
     if qterms.is_empty() {
         return Err("query is empty".into());
     }
 
-    // Cheap pass: rank by overlap between URL slug and query.
-    let mut url_ranked: Vec<(f32, String)> = candidates
-        .into_iter()
-        .map(|u| {
-            let slug_terms = tokenize(&u.replace('/', " ").replace('-', " ").replace('_', " "));
-            let score = score_terms(&qterms, &slug_terms) * 0.5;
-            (score, u)
-        })
-        .collect();
-    url_ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let corpus = fetch_llms_full(state, &version).await?;
+    let sections = split_sections(&corpus.body);
 
-    // Take top 12 by URL match, fetch each, rescore on body.
-    let to_fetch: Vec<String> = url_ranked
-        .into_iter()
-        .take(12)
-        .map(|(_, u)| u)
-        .collect();
-
-    let mut hits: Vec<DocHit> = Vec::new();
-    for url in to_fetch {
-        let doc = match fetch_doc(state, &url).await {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let body_terms = tokenize(&doc.body);
-        let title_terms = doc.title.as_deref().map(tokenize).unwrap_or_default();
-        let body_score = score_terms(&qterms, &body_terms);
-        let title_score = score_terms(&qterms, &title_terms) * 3.0;
-        let score = body_score + title_score;
+    let mut hits: Vec<DocHit> = Vec::with_capacity(sections.len());
+    for sec in &sections {
+        let head_terms = tokenize(&sec.heading);
+        let body_terms = tokenize(&sec.body);
+        let score = score_terms(&qterms, &head_terms) * 3.0
+            + score_terms(&qterms, &body_terms);
         if score <= 0.0 {
             continue;
         }
-        let snippet = best_snippet(&doc.body, &qterms);
+        let snippet = best_snippet(&sec.body, &qterms);
         hits.push(DocHit {
-            url: doc.url.clone(),
-            title: doc.title.clone(),
+            url: section_url(&version, &sec.heading),
+            title: Some(sec.heading.clone()),
             score,
             snippet,
         });
@@ -104,6 +75,103 @@ pub async fn search_docs(
         version,
         hits,
     })
+}
+
+struct Section {
+    heading: String,
+    body: String,
+}
+
+fn split_sections(md: &str) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    let mut cur_heading: Option<String> = None;
+    let mut cur_body = String::new();
+    let mut in_fence = false;
+
+    for line in md.lines() {
+        let trimmed = line.trim_start();
+        // Toggle on any fence of 3+ backticks (covers ``` and ````).
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            cur_body.push_str(line);
+            cur_body.push('\n');
+            continue;
+        }
+        if !in_fence {
+            let is_h1 = line.starts_with("# ");
+            let is_h2 = line.starts_with("## ");
+            if is_h1 || is_h2 {
+                if let Some(h) = cur_heading.take() {
+                    out.push(Section {
+                        heading: h,
+                        body: std::mem::take(&mut cur_body),
+                    });
+                }
+                let strip = if is_h1 { 2 } else { 3 };
+                cur_heading = Some(line[strip..].trim().to_string());
+                continue;
+            }
+        }
+        cur_body.push_str(line);
+        cur_body.push('\n');
+    }
+    if let Some(h) = cur_heading {
+        out.push(Section { heading: h, body: cur_body });
+    }
+    out
+}
+
+fn section_url(version: &str, heading: &str) -> String {
+    format!(
+        "https://dioxuslabs.com/learn/{}/#{}",
+        version,
+        slugify(heading)
+    )
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_dash = true;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+async fn fetch_llms_full(state: &Arc<State>, version: &str) -> Result<Arc<CachedDoc>, String> {
+    let url = format!("https://dioxuslabs.com/learn/{version}/llms-full.txt");
+    if let Some(cached) = state.doc_cache.get(&url).await {
+        return Ok(cached);
+    }
+    let resp = state
+        .http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("llms-full fetch: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "llms-full {} returned HTTP {}",
+            version,
+            resp.status()
+        ));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("llms-full body: {e}"))?;
+    let cached = Arc::new(CachedDoc { body });
+    state.doc_cache.insert(url, cached.clone()).await;
+    Ok(cached)
 }
 
 fn tokenize(s: &str) -> Vec<String> {
@@ -152,8 +220,8 @@ fn best_snippet(body: &str, qterms: &[String]) -> String {
     if best.0 == i64::MIN {
         return body.chars().take(200).collect();
     }
-    let start = best.1;
-    let end = (start + 240).min(body.len());
+    let start = floor_char_boundary(body, best.1);
+    let end = ceil_char_boundary(body, (start + 240).min(body.len()));
     let mut s = body[start..end].trim().replace('\n', " ");
     if start > 0 {
         s.insert_str(0, "… ");
@@ -164,84 +232,18 @@ fn best_snippet(body: &str, qterms: &[String]) -> String {
     s
 }
 
-async fn fetch_sitemap(state: &Arc<State>) -> Result<Vec<String>, String> {
-    if let Some(cached) = state.doc_cache.get(SITEMAP_URL).await {
-        return Ok(cached
-            .body
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|s| s.to_string())
-            .collect());
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
     }
-    let resp = state
-        .http
-        .get(SITEMAP_URL)
-        .send()
-        .await
-        .map_err(|e| format!("sitemap fetch: {e}"))?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("sitemap body: {e}"))?;
-    let urls: Vec<String> = text
-        .split("<loc>")
-        .skip(1)
-        .filter_map(|chunk| chunk.split("</loc>").next().map(|s| s.trim().to_string()))
-        .filter(|u| !u.is_empty())
-        .collect();
-    let cached = Arc::new(CachedDoc {
-        url: SITEMAP_URL.into(),
-        title: None,
-        body: urls.join("\n"),
-    });
-    state.doc_cache.insert(SITEMAP_URL.into(), cached).await;
-    Ok(urls)
+    i
 }
 
-async fn fetch_doc(state: &Arc<State>, url: &str) -> Result<Arc<CachedDoc>, String> {
-    if let Some(cached) = state.doc_cache.get(url).await {
-        return Ok(cached);
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
     }
-    let resp = state
-        .http
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch {url}: {e}"))?;
-    let html = resp
-        .text()
-        .await
-        .map_err(|e| format!("body {url}: {e}"))?;
-
-    // Parse + extract synchronously; drop `Html` before any await.
-    let (title, body) = parse_html(&html);
-
-    let cached = Arc::new(CachedDoc {
-        url: url.to_string(),
-        title,
-        body,
-    });
-    state.doc_cache.insert(url.to_string(), cached.clone()).await;
-    Ok(cached)
-}
-
-fn parse_html(html: &str) -> (Option<String>, String) {
-    let doc = Html::parse_document(html);
-    let title = Selector::parse("title")
-        .ok()
-        .and_then(|sel| doc.select(&sel).next())
-        .map(|n| n.text().collect::<String>().trim().to_string());
-    let body = ["article", "main", "body"]
-        .iter()
-        .find_map(|sel| {
-            Selector::parse(sel).ok().and_then(|s| {
-                doc.select(&s)
-                    .next()
-                    .map(|n| n.text().collect::<Vec<_>>().join(" "))
-            })
-        })
-        .unwrap_or_default();
-    (title, body)
+    i
 }
 
 async fn detect_version(state: &Arc<State>) -> String {
@@ -310,11 +312,7 @@ pub async fn find_example(
             .doc_cache
             .insert(
                 cache_key.clone(),
-                Arc::new(CachedDoc {
-                    url: api_url.clone(),
-                    title: None,
-                    body: body.clone(),
-                }),
+                Arc::new(CachedDoc { body: body.clone() }),
             )
             .await;
         body

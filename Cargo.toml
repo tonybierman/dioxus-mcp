@@ -21,7 +21,6 @@ syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "json"] }
-scraper = "0.20"
 moka = { version = "0.12", features = ["future"] }
 minijinja = "2"
 tracing = "0.1"

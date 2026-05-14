@@ -17,8 +17,6 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub struct CachedDoc {
-    pub url: String,
-    pub title: Option<String>,
     pub body: String,
 }
 

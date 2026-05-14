@@ -392,10 +392,15 @@ fn tool_create_server_fn() {
 #[ignore = "requires network access to dioxuslabs.com"]
 fn tool_search_docs() {
     let r = call_tool("search_docs", json!({"query": "use_resource"}));
-    assert!(
-        r.get("results").map(|v| v.is_array()).unwrap_or(false),
-        "expected results array, got: {r}"
-    );
+    let hits = r
+        .get("hits")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("expected hits array, got: {r}"));
+    assert!(!hits.is_empty(), "expected at least one hit, got: {r}");
+    let top = &hits[0];
+    assert!(top.get("title").is_some(), "hit missing title: {top}");
+    assert!(top.get("url").is_some(), "hit missing url: {top}");
+    assert!(top.get("snippet").is_some(), "hit missing snippet: {top}");
 }
 
 #[test]
