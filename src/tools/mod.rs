@@ -8,6 +8,7 @@ pub mod project_tour;
 pub mod prop_drill;
 pub mod props_lint;
 pub mod route_map;
+pub mod runtime_events;
 pub mod scaffold;
 pub mod scan;
 pub mod server_fn_call_graph;

@@ -247,6 +247,19 @@ impl DioxusMcp {
             Err(e) => Err(err(e)),
         }
     }
+
+    #[tool(
+        description = "Read runtime events captured by the dioxus-mcp-probe crate. Tails target/dioxus-mcp/events.jsonl and returns events matching the filters: kind (render | signal_write | signal_read | server_fn | route | panic | event), since (RFC 3339 cutoff, default last 5 min), component, signal, server_fn, limit (default 200, hard cap 2000). Returns an empty list with a clear note if the probe hasn't been installed yet."
+    )]
+    async fn runtime_events(
+        &self,
+        Parameters(p): Parameters<tools::runtime_events::RuntimeEventsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::runtime_events::runtime_events(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -261,7 +274,7 @@ impl ServerHandler for DioxusMcp {
              create_server_fn, check_rsx, audit_feature_flags, explain_signal_graph, \
              route_map, project_index, server_fn_call_graph, asset_audit, \
              dead_components, prop_drill, signal_lint, props_lint, project_tour, \
-             search_docs, find_example, openapi_spec."
+             search_docs, find_example, openapi_spec, runtime_events."
                 .to_string(),
         )
     }

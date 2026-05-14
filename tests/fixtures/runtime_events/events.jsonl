@@ -1,0 +1,9 @@
+{"v":1,"ts":"2099-01-01T00:00:01Z","kind":"render","component":"Home","trigger":"signal:count","duration_us":412}
+{"v":1,"ts":"2099-01-01T00:00:02Z","kind":"signal_write","signal":"count","writer":"Home","subscriber_count":3}
+{"v":1,"ts":"2099-01-01T00:00:03Z","kind":"render","component":"Home","trigger":"signal:count","duration_us":380}
+{"v":1,"ts":"2099-01-01T00:00:04Z","kind":"server_fn","name":"fetch_user","phase":"start","call_id":"abc"}
+{"v":1,"ts":"2099-01-01T00:00:05Z","kind":"render","component":"UserPage","trigger":"resource:fetch_user","duration_us":910}
+{"v":1,"ts":"2099-01-01T00:00:06Z","kind":"server_fn","name":"fetch_user","phase":"end","call_id":"abc","duration_us":12345,"ok":true}
+{"v":1,"ts":"2099-01-01T00:00:07Z","kind":"render","component":"NavBar","trigger":"parent","duration_us":120}
+{"v":1,"ts":"2099-01-01T00:00:08Z","kind":"signal_write","signal":"theme","writer":"NavBar","subscriber_count":12}
+{"v":1,"ts":"2099-01-01T00:00:09Z","kind":"panic","message":"index out of bounds: 5 of len 3","file":"src/components/home.rs","line":42}

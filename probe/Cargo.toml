@@ -1,0 +1,19 @@
+[package]
+name = "dioxus-mcp-probe"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime telemetry probe for Dioxus apps: captures renders, signal writes, server-fn timings, and panics into a JSONL log that dioxus-mcp's runtime_events tool reads."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tonybierman/dioxus-mcp"
+
+[features]
+# Force the probe to run even in release builds. By default the probe is a
+# no-op outside debug builds.
+force = []
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "macros"] }

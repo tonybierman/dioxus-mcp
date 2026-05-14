@@ -345,6 +345,37 @@ errors.
 
 ---
 
+## Runtime
+
+### `runtime_events`
+**Purpose:** Tail the JSON-lines event log written by the
+`dioxus-mcp-probe` crate and return events that match a filter
+(`kind`, `since`, `component`, `signal`, `server_fn`). When the log
+doesn't exist (the probe was never installed or the app hasn't been run
+yet) the tool returns an empty `events` array and a clear note rather
+than erroring. Up to one rotated file (`events.1.jsonl`) is read when
+the live file is newer than the `since` cutoff.
+
+**Args:** `kind?` (`render` | `signal_write` | `signal_read` |
+`server_fn` | `route` | `panic` | `event`), `since?` (RFC 3339, default
+last 5 minutes), `component?`, `signal?`, `server_fn?`, `limit?`
+(default 200, hard cap 2000), `log_path?` (override; default
+`target/dioxus-mcp/events.jsonl` under the crate root), `project_root?`.
+
+**Example call:**
+```json
+{
+  "name": "runtime_events",
+  "arguments": {"kind": "render", "component": "Home", "since": "2026-05-14T18:30:00Z"}
+}
+```
+
+**Ask Claude:** "Show me the last few renders of the Home component."
+
+**Demonstrated in:** [`tests/fixtures/runtime_events/events.jsonl`](tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
+
+---
+
 ## Docs
 
 ### `search_docs`

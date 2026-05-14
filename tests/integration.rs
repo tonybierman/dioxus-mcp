@@ -459,6 +459,89 @@ fn tool_openapi_spec() {
 }
 
 #[test]
+fn tool_runtime_events() {
+    // Absolute path to the hand-crafted fixture log. `since` is pinned to
+    // 1970 so the default-5-minute window doesn't filter the 2099 events out.
+    let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/runtime_events/events.jsonl");
+    let log_str = log.to_string_lossy().to_string();
+    let since = "1970-01-01T00:00:00Z";
+
+    // No kind filter -> every event in the fixture (9 lines).
+    let r = call_tool(
+        "runtime_events",
+        json!({"log_path": log_str, "since": since}),
+    );
+    let events = r["events"].as_array().unwrap();
+    assert_eq!(events.len(), 9, "events: {events:?}");
+    assert_eq!(r["truncated"], false);
+
+    // Kind filter.
+    let renders = call_tool(
+        "runtime_events",
+        json!({"log_path": log_str, "since": since, "kind": "render"}),
+    );
+    let render_events = renders["events"].as_array().unwrap();
+    assert_eq!(render_events.len(), 4);
+    assert!(render_events.iter().all(|e| e["kind"] == "render"));
+
+    // Component filter narrows further.
+    let home_renders = call_tool(
+        "runtime_events",
+        json!({"log_path": log_str, "since": since, "kind": "render", "component": "Home"}),
+    );
+    let hr = home_renders["events"].as_array().unwrap();
+    assert_eq!(hr.len(), 2);
+    assert!(hr.iter().all(|e| e["component"] == "Home"));
+
+    // server_fn name filter.
+    let sf = call_tool(
+        "runtime_events",
+        json!({"log_path": log_str, "since": since, "kind": "server_fn", "server_fn": "fetch_user"}),
+    );
+    let sf_events = sf["events"].as_array().unwrap();
+    assert_eq!(sf_events.len(), 2);
+
+    // Limit -> truncated flag set.
+    let capped = call_tool(
+        "runtime_events",
+        json!({"log_path": log_str, "since": since, "limit": 3}),
+    );
+    assert_eq!(capped["events"].as_array().unwrap().len(), 3);
+    assert_eq!(capped["truncated"], true);
+
+    // since cutoff in the future -> empty + a note.
+    let future = call_tool(
+        "runtime_events",
+        json!({"log_path": log_str, "since": "2999-01-01T00:00:00Z"}),
+    );
+    assert!(future["events"].as_array().unwrap().is_empty());
+    assert!(
+        future["notes"].as_array().unwrap().iter().any(|n| n
+            .as_str()
+            .unwrap_or("")
+            .contains("no events matched")),
+        "notes: {}",
+        future["notes"]
+    );
+
+    // Missing log path -> empty list + clear note (no error).
+    let missing = call_tool(
+        "runtime_events",
+        json!({"log_path": "/nonexistent/dioxus-mcp/events.jsonl"}),
+    );
+    assert!(missing["events"].as_array().unwrap().is_empty());
+    assert!(
+        missing["notes"].as_array().unwrap().iter().any(|n| n
+            .as_str()
+            .unwrap_or("")
+            .contains("install dioxus-mcp-probe")),
+        "notes: {}",
+        missing["notes"]
+    );
+}
+
+#[test]
 #[ignore = "requires network access to dioxuslabs.com"]
 fn tool_search_docs() {
     let r = call_tool("search_docs", json!({"query": "use_resource"}));

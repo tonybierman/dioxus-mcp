@@ -4,7 +4,9 @@ An MCP server that gives Claude Code (and any other MCP client) deep static
 understanding of a Dioxus 0.7 project: route maps, component/server-fn
 indexes, dead-code detection, prop-drilling reports, signal/props lints,
 asset audits, OpenAPI generation, and scaffolding helpers — all from the
-source tree, with no need to spawn `dx`.
+source tree, with no need to spawn `dx`. Pair it with the companion
+`dioxus-mcp-probe` crate to also read runtime events (renders, signal
+writes, server-fn timings, panics) captured while the app is running.
 
 ## Tools
 
@@ -54,6 +56,12 @@ natural-language prompt that Claude Code will route to it.
 - **`create_server_fn`** — new `#[server]` fn under `src/server/`,
   refuses if the project isn't fullstack-capable.
 
+### Runtime
+- **`runtime_events`** — filter the JSON-lines event log written by the
+  `dioxus-mcp-probe` crate (renders, signal writes, server-fn timings,
+  panics). Filters: `kind`, `since`, `component`, `signal`, `server_fn`,
+  `limit`.
+
 ### Docs
 - **`search_docs`** — live-search dioxuslabs.com, scoped to the project's
   Dioxus version, 15-min cached.
@@ -90,10 +98,36 @@ After a rebuild, restart Claude Code to pick up the new binary.
 - Targets Dioxus 0.7. Older versions will run but the audit/lints
   reflect 0.7 conventions.
 
+## Runtime probe
+
+The `dioxus-mcp-probe` workspace member is a tiny runtime companion. Add
+it to your Dioxus app and call `install()` once at startup; it spins up a
+background thread that writes a JSON-lines event log to
+`target/dioxus-mcp/events.jsonl`. The MCP `runtime_events` tool tails
+that file.
+
+```toml
+# in your Dioxus app's Cargo.toml
+[dev-dependencies]
+dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp" }
+```
+
+```rust
+fn main() {
+    let _probe = dioxus_mcp_probe::install();
+    // your dioxus app entry point
+}
+```
+
+The probe is a no-op outside `debug_assertions` (override with the
+`force` cargo feature). Capture is best-effort: a bounded queue drops
+events under load rather than blocking renders, and the log file rotates
+at 10 MiB.
+
 ## Tests
 
 ```
-cargo test                    # 16 offline integration tests
+cargo test --workspace        # 17 main tests + 4 probe unit tests
 cargo test -- --ignored       # also runs live-HTTP search_docs / find_example
 ```
 
