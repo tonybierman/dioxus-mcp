@@ -260,9 +260,10 @@ pub(crate) fn find_routable(crate_root: &Path) -> Option<PathBuf> {
     for cand in &["src/router.rs", "src/route.rs", "src/main.rs", "src/lib.rs"] {
         let p = crate_root.join(cand);
         if let Ok(s) = std::fs::read_to_string(&p)
-            && s.contains("Routable") {
-                return Some(p);
-            }
+            && s.contains("Routable")
+        {
+            return Some(p);
+        }
     }
     // fall back: walk src/
     for entry in walkdir::WalkDir::new(crate_root.join("src"))
@@ -273,9 +274,10 @@ pub(crate) fn find_routable(crate_root: &Path) -> Option<PathBuf> {
             continue;
         }
         if let Ok(s) = std::fs::read_to_string(entry.path())
-            && (s.contains("#[derive(Routable") || s.contains("derive(Routable")) {
-                return Some(entry.path().to_path_buf());
-            }
+            && (s.contains("#[derive(Routable") || s.contains("derive(Routable"))
+        {
+            return Some(entry.path().to_path_buf());
+        }
     }
     None
 }

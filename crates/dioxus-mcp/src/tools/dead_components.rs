@@ -148,9 +148,10 @@ fn scan_for_components(tokens: &[TokenTree], known: &HashSet<String>, used: &mut
             // Component invocation: `Ident {` (or `path::Ident {`).
             if known.contains(&name)
                 && let Some(TokenTree::Group(g)) = tokens.get(i + 1)
-                    && g.delimiter() == proc_macro2::Delimiter::Brace {
-                        used.insert(name);
-                    }
+                && g.delimiter() == proc_macro2::Delimiter::Brace
+            {
+                used.insert(name);
+            }
         }
         i += 1;
     }

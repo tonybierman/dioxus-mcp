@@ -93,9 +93,10 @@ pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMap
             let path = attr.path();
             if path.is_ident("layout") {
                 if let Ok(p) = attr.parse_args::<syn::Path>()
-                    && let Some(seg) = p.segments.last() {
-                        layout_stack.push(seg.ident.to_string());
-                    }
+                    && let Some(seg) = p.segments.last()
+                {
+                    layout_stack.push(seg.ident.to_string());
+                }
             } else if path.is_ident("end_layout") {
                 layout_stack.pop();
             } else if path.is_ident("nest") {
@@ -105,15 +106,16 @@ pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMap
             } else if path.is_ident("end_nest") {
                 nest_stack.pop();
             } else if path.is_ident("route")
-                && let Ok(lit) = attr.parse_args::<syn::LitStr>() {
-                    let line = attr
-                        .path()
-                        .segments
-                        .first()
-                        .map(|s| s.ident.span().start().line)
-                        .unwrap_or(0);
-                    route_for_variant = Some((lit.value(), line));
-                }
+                && let Ok(lit) = attr.parse_args::<syn::LitStr>()
+            {
+                let line = attr
+                    .path()
+                    .segments
+                    .first()
+                    .map(|s| s.ident.span().start().line)
+                    .unwrap_or(0);
+                route_for_variant = Some((lit.value(), line));
+            }
         }
 
         let Some((route_path, line)) = route_for_variant else {

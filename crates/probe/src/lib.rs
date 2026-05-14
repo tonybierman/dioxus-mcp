@@ -248,9 +248,10 @@ fn writer_loop(receiver: Receiver<LogRecord>, config: ProbeConfig, shutdown: Arc
                 return;
             };
             if let Some(w) = writer.as_mut()
-                && writeln!(w, "{line}").is_ok() {
-                    *bytes_in_file += (line.len() + 1) as u64;
-                }
+                && writeln!(w, "{line}").is_ok()
+            {
+                *bytes_in_file += (line.len() + 1) as u64;
+            }
         };
 
     loop {

@@ -216,25 +216,30 @@ fn matches_filters(v: &Value, p: &RuntimeEventsParams, since: &str) -> bool {
     };
 
     if let Some(ts) = obj.get("ts").and_then(|x| x.as_str())
-        && ts < since {
-            return false;
-        }
+        && ts < since
+    {
+        return false;
+    }
     if let Some(k) = &p.kind
-        && obj.get("kind").and_then(|x| x.as_str()) != Some(k.as_str()) {
-            return false;
-        }
+        && obj.get("kind").and_then(|x| x.as_str()) != Some(k.as_str())
+    {
+        return false;
+    }
     if let Some(c) = &p.component
-        && obj.get("component").and_then(|x| x.as_str()) != Some(c.as_str()) {
-            return false;
-        }
+        && obj.get("component").and_then(|x| x.as_str()) != Some(c.as_str())
+    {
+        return false;
+    }
     if let Some(s) = &p.signal
-        && obj.get("signal").and_then(|x| x.as_str()) != Some(s.as_str()) {
-            return false;
-        }
+        && obj.get("signal").and_then(|x| x.as_str()) != Some(s.as_str())
+    {
+        return false;
+    }
     if let Some(sf) = &p.server_fn
-        && obj.get("name").and_then(|x| x.as_str()) != Some(sf.as_str()) {
-            return false;
-        }
+        && obj.get("name").and_then(|x| x.as_str()) != Some(sf.as_str())
+    {
+        return false;
+    }
     true
 }
 

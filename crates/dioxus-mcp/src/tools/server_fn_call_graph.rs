@@ -137,22 +137,23 @@ impl<'a, 'ast> Visit<'ast> for CallVisitor<'a> {
     }
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
         if let syn::Expr::Path(p) = &*e.func
-            && let Some(seg) = p.path.segments.last() {
-                let name = seg.ident.to_string();
-                if self.known.contains(&name) {
-                    let line = seg.ident.span().start().line;
-                    let full_path = render_path(&p.path);
-                    let enclosing = enclosing_fn_name(&self.stack);
-                    self.seen.insert(name.clone());
-                    self.edges.push(CallEdge {
-                        server_fn: name,
-                        caller_file: self.file.to_path_buf(),
-                        caller_line: line,
-                        enclosing_fn: enclosing,
-                        full_path,
-                    });
-                }
+            && let Some(seg) = p.path.segments.last()
+        {
+            let name = seg.ident.to_string();
+            if self.known.contains(&name) {
+                let line = seg.ident.span().start().line;
+                let full_path = render_path(&p.path);
+                let enclosing = enclosing_fn_name(&self.stack);
+                self.seen.insert(name.clone());
+                self.edges.push(CallEdge {
+                    server_fn: name,
+                    caller_file: self.file.to_path_buf(),
+                    caller_line: line,
+                    enclosing_fn: enclosing,
+                    full_path,
+                });
             }
+        }
         syn::visit::visit_expr_call(self, e);
     }
 }

@@ -195,10 +195,11 @@ fn find_invocations(
             let name = id.to_string();
             if known.contains(&name)
                 && let Some(TokenTree::Group(g)) = tokens.get(i + 1)
-                    && g.delimiter() == proc_macro2::Delimiter::Brace {
-                        let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-                        analyze_invocation(&name, &inner, parent_props, parent_arg, out);
-                    }
+                && g.delimiter() == proc_macro2::Delimiter::Brace
+            {
+                let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+                analyze_invocation(&name, &inner, parent_props, parent_arg, out);
+            }
         }
         i += 1;
     }
@@ -260,12 +261,13 @@ fn split_top_level_commas(tokens: &[TokenTree]) -> Vec<Vec<TokenTree>> {
     let mut current: Vec<TokenTree> = Vec::new();
     for tt in tokens {
         if let TokenTree::Punct(p) = tt
-            && p.as_char() == ',' {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-                continue;
+            && p.as_char() == ','
+        {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
             }
+            continue;
+        }
         current.push(tt.clone());
     }
     if !current.is_empty() {
@@ -332,11 +334,13 @@ fn match_base(
     if tokens.len() == 3
         && let (TokenTree::Ident(a), TokenTree::Punct(dot), TokenTree::Ident(b)) =
             (&tokens[0], &tokens[1], &tokens[2])
-            && dot.as_char() == '.' && parent_arg == Some(&a.to_string()) {
-                let prop = b.to_string();
-                if parent_props.contains(&prop) {
-                    return Some(prop);
-                }
-            }
+        && dot.as_char() == '.'
+        && parent_arg == Some(&a.to_string())
+    {
+        let prop = b.to_string();
+        if parent_props.contains(&prop) {
+            return Some(prop);
+        }
+    }
     None
 }

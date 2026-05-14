@@ -68,9 +68,10 @@ fn find_manifest_with_dioxus(start: &Path) -> Option<PathBuf> {
         let candidate = cur.join("Cargo.toml");
         if candidate.exists() {
             if let Ok(m) = cargo_toml::Manifest::from_path(&candidate)
-                && m.dependencies.contains_key("dioxus") {
-                    return Some(candidate);
-                }
+                && m.dependencies.contains_key("dioxus")
+            {
+                return Some(candidate);
+            }
             // if we hit a non-dioxus manifest at the workspace root, still note it
             if cur.parent().is_none() {
                 return Some(candidate);

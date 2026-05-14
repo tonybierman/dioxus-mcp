@@ -147,22 +147,23 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
     // [features] default = ["web", "server"] footgun
     if let Ok(text) = std::fs::read_to_string(&manifest)
         && let Ok(parsed) = text.parse::<toml::Table>()
-            && let Some(features) = parsed.get("features").and_then(|v| v.as_table())
-                && let Some(default) = features.get("default").and_then(|v| v.as_array()) {
-                    let names: Vec<String> = default
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    let has_web = names.iter().any(|n| n == "web");
-                    let has_server = names.iter().any(|n| n == "server");
-                    if has_web && has_server {
-                        findings.push(Finding {
+        && let Some(features) = parsed.get("features").and_then(|v| v.as_table())
+        && let Some(default) = features.get("default").and_then(|v| v.as_array())
+    {
+        let names: Vec<String> = default
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        let has_web = names.iter().any(|n| n == "web");
+        let has_server = names.iter().any(|n| n == "server");
+        if has_web && has_server {
+            findings.push(Finding {
                             level: "warning",
                             message: "[features] default = [\"web\", \"server\"] activates both render targets at once — a common source of build confusion".into(),
                             fix: Some("set default = [\"web\"] (or [\"server\"]) and pass the other via --features when needed".into()),
                         });
-                    }
-                }
+        }
+    }
 
     let ok = !findings.iter().any(|f| f.level == "error");
     AuditReport {
@@ -258,17 +259,18 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
     while i < tokens.len() {
         if let TokenTree::Ident(id) = &tokens[i]
             && id == "for"
-                && let Some(brace_idx) = find_matching_brace(tokens, i) {
-                    let body_slice = &tokens[i + 1..=brace_idx];
-                    if !slice_has_key_attr(body_slice) {
-                        let s = id.span().start();
-                        issues.push(RsxIssue {
+            && let Some(brace_idx) = find_matching_brace(tokens, i)
+        {
+            let body_slice = &tokens[i + 1..=brace_idx];
+            if !slice_has_key_attr(body_slice) {
+                let s = id.span().start();
+                issues.push(RsxIssue {
                             line: s.line,
                             column: s.column,
                             message: "loop in rsx! is missing a `key: ...` attribute on its child element — Dioxus needs keys for stable diffing".into(),
                         });
-                    }
-                }
+            }
+        }
         i += 1;
     }
 
@@ -323,9 +325,11 @@ fn find_matching_brace(tokens: &[TokenTree], start_after: usize) -> Option<usize
 fn slice_has_key_attr(slice: &[TokenTree]) -> bool {
     for w in slice.windows(2) {
         if let (TokenTree::Ident(id), TokenTree::Punct(p)) = (&w[0], &w[1])
-            && id == "key" && p.as_char() == ':' {
-                return true;
-            }
+            && id == "key"
+            && p.as_char() == ':'
+        {
+            return true;
+        }
     }
     for tt in slice {
         if let TokenTree::Group(g) = tt {
@@ -395,9 +399,10 @@ pub async fn explain_signal_graph(
         }
         let name = f.sig.ident.to_string();
         if let Some(filter) = &p.component
-            && &name != filter {
-                continue;
-            }
+            && &name != filter
+        {
+            continue;
+        }
 
         let nodes = analyze_component_body(&f.block);
         let warnings = lint_signal_graph(&nodes);

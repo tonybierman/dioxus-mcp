@@ -129,9 +129,10 @@ fn referenced_matches_any_form(file_rel_from_root: &str, referenced: &HashSet<St
         return true;
     }
     if let Some(rest) = trimmed.split_once('/').map(|(_, r)| r)
-        && (referenced.contains(rest) || referenced.contains(&format!("/{rest}"))) {
-            return true;
-        }
+        && (referenced.contains(rest) || referenced.contains(&format!("/{rest}")))
+    {
+        return true;
+    }
     false
 }
 

@@ -125,9 +125,10 @@ pub async fn server_fn_summary(
             None => continue,
         };
         if let Some(only) = &p.server_fn
-            && &name != only {
-                continue;
-            }
+            && &name != only
+        {
+            continue;
+        }
         let phase = obj.get("phase").and_then(|x| x.as_str()).unwrap_or("");
         let call_id = obj
             .get("call_id")

@@ -363,31 +363,33 @@ impl TypeResolver {
                 let generics = generic_args(&last.arguments);
 
                 if ident == "Option"
-                    && let Some(inner) = generics.first() {
-                        let (inner_schema, _) = self.resolve_ty(inner, false);
-                        if top_level {
-                            return (inner_schema, true);
-                        }
-                        return (nullable(inner_schema), true);
+                    && let Some(inner) = generics.first()
+                {
+                    let (inner_schema, _) = self.resolve_ty(inner, false);
+                    if top_level {
+                        return (inner_schema, true);
                     }
+                    return (nullable(inner_schema), true);
+                }
 
                 if matches!(
                     ident.as_str(),
                     "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "LinkedList"
-                )
-                    && let Some(inner) = generics.first() {
-                        let (items, _) = self.resolve_ty(inner, false);
-                        return (json!({"type": "array", "items": items}), false);
-                    }
+                ) && let Some(inner) = generics.first()
+                {
+                    let (items, _) = self.resolve_ty(inner, false);
+                    return (json!({"type": "array", "items": items}), false);
+                }
 
                 if matches!(ident.as_str(), "HashMap" | "BTreeMap" | "IndexMap")
-                    && let Some(v) = generics.get(1) {
-                        let (inner, _) = self.resolve_ty(v, false);
-                        return (
-                            json!({"type": "object", "additionalProperties": inner}),
-                            false,
-                        );
-                    }
+                    && let Some(v) = generics.get(1)
+                {
+                    let (inner, _) = self.resolve_ty(v, false);
+                    return (
+                        json!({"type": "object", "additionalProperties": inner}),
+                        false,
+                    );
+                }
 
                 if matches!(
                     ident.as_str(),
@@ -656,11 +658,12 @@ fn primitive_schema(name: &str) -> Option<Value> {
 fn nullable(schema: Value) -> Value {
     // OpenAPI 3.1: prefer {"type": ["X", "null"]} when possible; otherwise oneOf.
     if let Value::Object(ref obj) = schema
-        && let Some(Value::String(t)) = obj.get("type") {
-            let mut next = obj.clone();
-            next.insert("type".into(), json!([t, "null"]));
-            return Value::Object(next);
-        }
+        && let Some(Value::String(t)) = obj.get("type")
+    {
+        let mut next = obj.clone();
+        next.insert("type".into(), json!([t, "null"]));
+        return Value::Object(next);
+    }
     json!({"oneOf": [schema, {"type": "null"}]})
 }
 
@@ -732,9 +735,10 @@ fn resolver_unresolved(spec: &Value) -> Vec<String> {
         match v {
             Value::Object(map) => {
                 if let Some(Value::String(d)) = map.get("description")
-                    && let Some(rest) = d.strip_prefix("unresolved type: ") {
-                        out.push(rest.to_string());
-                    }
+                    && let Some(rest) = d.strip_prefix("unresolved type: ")
+                {
+                    out.push(rest.to_string());
+                }
                 for (_, child) in map {
                     walk(child, out);
                 }

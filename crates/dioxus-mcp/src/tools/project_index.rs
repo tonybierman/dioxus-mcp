@@ -88,9 +88,10 @@ pub async fn project_index(
         let mut props_structs: HashMap<String, &syn::ItemStruct> = HashMap::new();
         for it in &file.items {
             if let syn::Item::Struct(s) = it
-                && s.attrs.iter().any(|a| has_derive(a, "Props")) {
-                    props_structs.insert(s.ident.to_string(), s);
-                }
+                && s.attrs.iter().any(|a| has_derive(a, "Props"))
+            {
+                props_structs.insert(s.ident.to_string(), s);
+            }
         }
 
         for it in &file.items {
@@ -102,10 +103,9 @@ pub async fn project_index(
             if want_components && has_component {
                 components.push(build_component(f, path, &props_structs));
             }
-            if want_server_fns
-                && let Some(attr) = server_attr {
-                    server_fns.push(build_server_fn(f, attr, path));
-                }
+            if want_server_fns && let Some(attr) = server_attr {
+                server_fns.push(build_server_fn(f, attr, path));
+            }
         }
     }
 
@@ -144,10 +144,11 @@ fn build_component(
 
     if typed_args.len() == 1
         && let Some(struct_name) = last_ident(&typed_args[0].ty)
-            && let Some(s) = props_structs.get(&struct_name) {
-                via_props_struct = true;
-                props = extract_props_from_struct(s);
-            }
+        && let Some(s) = props_structs.get(&struct_name)
+    {
+        via_props_struct = true;
+        props = extract_props_from_struct(s);
+    }
 
     if !via_props_struct {
         for pt in &typed_args {
@@ -265,9 +266,10 @@ fn pat_to_name(pat: &syn::Pat) -> String {
 
 fn is_option_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last() {
-            return seg.ident == "Option";
-        }
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return seg.ident == "Option";
+    }
     false
 }
 

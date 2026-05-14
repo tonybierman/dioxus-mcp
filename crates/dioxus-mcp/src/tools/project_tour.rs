@@ -124,10 +124,11 @@ pub async fn project_tour(
 
     let mut trunc = TruncationFlags::default();
     if let Some(rm) = routes.as_mut()
-        && rm.routes.len() > max {
-            rm.routes.truncate(max);
-            trunc.routes = true;
-        }
+        && rm.routes.len() > max
+    {
+        rm.routes.truncate(max);
+        trunc.routes = true;
+    }
     if let Some(idx) = index.as_mut() {
         if idx.components.len() > max {
             idx.components.truncate(max);
@@ -139,10 +140,11 @@ pub async fn project_tour(
         }
     }
     if let Some(aa) = assets.as_mut()
-        && aa.unreferenced_files.len() > max {
-            aa.unreferenced_files.truncate(max);
-            trunc.unreferenced_assets = true;
-        }
+        && aa.unreferenced_files.len() > max
+    {
+        aa.unreferenced_files.truncate(max);
+        trunc.unreferenced_assets = true;
+    }
 
     let summary = render_summary(&audit, &routes, &index, &assets, &trunc);
 
