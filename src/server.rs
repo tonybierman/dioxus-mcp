@@ -249,7 +249,11 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Read runtime events captured by the dioxus-mcp-probe crate. Tails target/dioxus-mcp/events.jsonl and returns events matching the filters: kind (render | signal_write | signal_read | server_fn | route | panic | event), since (RFC 3339 cutoff, default last 5 min), component, signal, server_fn, limit (default 200, hard cap 2000). Returns an empty list with a clear note if the probe hasn't been installed yet."
+        description = "Read runtime events captured by the dioxus-mcp-probe crate. Tails target/dioxus-mcp/events.jsonl and returns events matching the filters: kind (render | signal_write | signal_read | server_fn | route | panic | event), since (RFC 3339 cutoff, default last 5 min), component, signal, server_fn, limit (default 200, hard cap 2000). Returns an empty list with a clear note if the probe hasn't been installed yet. \
+\
+USE THIS (don't ask the user to paste logs) when they ask things like: \"Was there a panic? Where did it happen?\", \"Did the app crash?\", \"Which signals wrote in the past minute?\", \"Show the last few renders of <Component>\", \"List server-fn calls for <name>\", \"What navigations happened?\", \"Tail the runtime log\". \
+\
+If the user references \"the last run\" or a specific log file, pass `log_path` and widen `since` (default cutoff is only 5 min back). On \"no Cargo.toml from project root\", set `project_root` to the actual Dioxus app directory."
     )]
     async fn runtime_events(
         &self,
@@ -262,7 +266,9 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Per-server-fn latency summary derived from the dioxus-mcp-probe log. Pairs phase=start with phase=end by call_id and returns count, ok/err, and min/p50/p95/max latency in microseconds for each #[server] fn called in the window. Filters: since (RFC 3339, default last 5 min), server_fn (one name only), log_path (override)."
+        description = "Per-server-fn latency summary derived from the dioxus-mcp-probe log. Pairs phase=start with phase=end by call_id and returns count, ok/err, and min/p50/p95/max latency in microseconds for each #[server] fn called in the window. Filters: since (RFC 3339, default last 5 min), server_fn (one name only), log_path (override). \
+\
+USE THIS when the user asks: \"What's the latency distribution for <fn>?\", \"Which server fns are slowest?\", \"Are any server fns erroring?\", \"How many <fn> calls ran and how many failed?\", \"What's still pending mid-flight?\", \"Summary of server-fn activity over the last N minutes\", \"Show p95 latency for every server fn\"."
     )]
     async fn server_fn_summary(
         &self,
@@ -283,12 +289,29 @@ impl ServerHandler for DioxusMcp {
         )
         .with_server_info(Implementation::from_build_env())
         .with_instructions(
-            "Dioxus project assistant. Tools: create_component, create_route, \
-             create_server_fn, check_rsx, audit_feature_flags, explain_signal_graph, \
-             route_map, project_index, server_fn_call_graph, asset_audit, \
-             dead_components, prop_drill, signal_lint, props_lint, project_tour, \
-             search_docs, find_example, openapi_spec, runtime_events, \
-             server_fn_summary."
+            "Dioxus project assistant for Dioxus 0.7 codebases. \
+             \
+             Routing rule: when the user's question maps onto one of these tools, \
+             CALL THE TOOL instead of asking them to paste output or stack traces. \
+             That is what these tools are for. \
+             \
+             - Runtime / behavior questions (panics, crashes, renders, signal writes, \
+               navigations, \"what just happened\", \"was there a panic\") -> runtime_events. \
+             - Server-fn latency, error rates, in-flight calls -> server_fn_summary. \
+             - \"What routes / components / server fns exist\" -> route_map, project_index, \
+               server_fn_call_graph, project_tour. \
+             - Static code analysis (dead code, prop drilling, signal/props lints, \
+               asset audit, feature flags, OpenAPI spec) -> dead_components, prop_drill, \
+               signal_lint, props_lint, asset_audit, audit_feature_flags, openapi_spec, \
+               explain_signal_graph. \
+             - Reading Dioxus 0.7 docs / canonical examples -> search_docs, find_example. \
+             - Scaffolding new code -> create_component, create_route, create_server_fn. \
+             - RSX correctness check -> check_rsx. \
+             \
+             Probe note: runtime_events and server_fn_summary read the JSONL log written \
+             by the dioxus-mcp-probe crate. If the cwd isn't the Dioxus app, pass \
+             `project_root`. If the user references \"the last run\" or a specific log, \
+             pass `log_path` and widen `since` (default cutoff is 5 min)."
                 .to_string(),
         )
     }
