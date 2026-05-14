@@ -1,5 +1,7 @@
 # dioxus-mcp
 
+[![CI](https://github.com/tonybierman/dioxus-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/tonybierman/dioxus-mcp/actions/workflows/ci.yml)
+
 An MCP server that gives Claude Code (and any other MCP client) deep static
 understanding of a Dioxus 0.7 project: route maps, component/server-fn
 indexes, dead-code detection, prop-drilling reports, signal/props lints,
