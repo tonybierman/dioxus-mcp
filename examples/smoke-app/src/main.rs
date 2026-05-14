@@ -6,11 +6,16 @@
 //! for the subsystems Dioxus 0.7 doesn't instrument (`dioxus_router`,
 //! `dioxus_fullstack`) and provokes a panic in a child thread.
 //!
+//! Run from the workspace root; the log lands at `/tmp/probe-smoke.jsonl`
+//! by default (overridable via the first arg) so it doesn't get tangled
+//! up with any real Dioxus app's `target/dioxus-mcp/events.jsonl`:
+//!
 //! ```
-//! cargo run -p dioxus-mcp-probe-smoke -- /tmp/probe-smoke.jsonl
+//! cargo run -p dioxus-mcp-probe-smoke
 //! ```
 //!
-//! Then query the log via the MCP `runtime_events` tool, or just `cat` it.
+//! Then in claude (still at the workspace root), ask for runtime events
+//! and pass `log_path: "/tmp/probe-smoke.jsonl"`.
 
 use std::path::PathBuf;
 use std::thread;
@@ -20,11 +25,13 @@ use dioxus::prelude::*;
 use dioxus_mcp_probe::{install_with, ProbeConfig};
 use tracing::info_span;
 
+const DEFAULT_LOG: &str = "/tmp/probe-smoke.jsonl";
+
 fn main() {
     let log_path = PathBuf::from(
         std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "/tmp/probe-smoke.jsonl".into()),
+            .unwrap_or_else(|| DEFAULT_LOG.into()),
     );
     let _ = std::fs::remove_file(&log_path);
     if let Some(parent) = log_path.parent() {

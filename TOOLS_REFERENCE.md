@@ -327,13 +327,15 @@ default last 5 minutes), `component?`, `signal?`, `server_fn?`, `limit?`
 
 **Demonstrated in:** [`tests/fixtures/runtime_events/events.jsonl`](tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
 
-**Try it end-to-end:** [`examples/smoke-app`](examples/smoke-app) is a real headless Dioxus crate that installs the probe with a custom log path, drives a `VirtualDom` rebuild (so the probe captures Dioxus's own TRACE spans from `dioxus_core` and `dioxus_signals`), emits synthetic spans for the subsystems Dioxus 0.7 doesn't instrument (router, fullstack), and panics in a child thread.
+**Try it end-to-end:** [`examples/smoke-app`](examples/smoke-app) is a real headless Dioxus crate that drives a `VirtualDom` rebuild (so the probe captures Dioxus's own TRACE spans from `dioxus_core` and `dioxus_signals`), emits synthetic spans for the subsystems Dioxus 0.7 doesn't instrument (router, fullstack), and panics in a child thread.
+
+From the workspace root (where claude already is):
 
 ```
-cargo run -p dioxus-mcp-probe-smoke -- /tmp/probe-smoke.jsonl
+cargo run -p dioxus-mcp-probe-smoke
 ```
 
-then call `runtime_events` with `{"log_path": "/tmp/probe-smoke.jsonl"}` to see the captured events — typically ~25 entries spanning `render`, `signal`, `route`, `server_fn`, and `panic`. Useful when validating a fresh checkout of the probe against actual Dioxus instrumentation.
+The log lands at `/tmp/probe-smoke.jsonl` (override via the first arg). Then ask claude for runtime events and pass that path as `log_path`; expect ~25 entries spanning `render`, `signal`, `route`, `server_fn`, and `panic`.
 
 ---
 
