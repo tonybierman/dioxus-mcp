@@ -62,7 +62,7 @@ to scan, default `src/`), `project_root?`.
 
 **Example call:**
 ```json
-{"name": "project_index", "arguments": {"kind": "server_fn"}}
+{"name": "project_index", "arguments": {}}
 ```
 
 **Ask Claude:** "What server functions exist in this project?"
@@ -137,10 +137,10 @@ closure parameters.
 
 **Example call:**
 ```json
-{"name": "check_rsx", "arguments": {"file": "src/components/list.rs"}}
+{"name": "check_rsx", "arguments": {"file": "src/lint_demo.rs"}}
 ```
 
-**Ask Claude:** "Lint the rsx in `src/components/list.rs`."
+**Ask Claude:** "Lint the rsx in `src/lint_demo.rs`."
 
 **Demonstrated in:** [`src/lint_demo.rs`](tests/fixtures/sample-project/src/lint_demo.rs) — `for` loop without `key:` and an `onclick: move || {}` with no event arg.
 
@@ -231,10 +231,10 @@ that capture no other signals (they'll never re-run on state change).
 
 **Example call:**
 ```json
-{"name": "explain_signal_graph", "arguments": {"file": "src/pages/dashboard.rs"}}
+{"name": "explain_signal_graph", "arguments": {"file": "src/components/home.rs"}}
 ```
 
-**Ask Claude:** "Walk me through the reactive graph in dashboard.rs."
+**Ask Claude:** "Walk me through the reactive graph in home.rs."
 
 **Demonstrated in:** [`src/components/home.rs`](tests/fixtures/sample-project/src/components/home.rs) — `use_signal` plus a `use_memo` that reads it.
 
@@ -282,11 +282,11 @@ PascalCase), `router_file?` (auto-detected), `project_root?`.
 ```json
 {
   "name": "create_route",
-  "arguments": {"path": "/users/:id", "component": "UserPage"}
+  "arguments": {"path": "/settings", "component": "Settings"}
 }
 ```
 
-**Ask Claude:** "Add a route at /users/:id rendering UserPage."
+**Ask Claude:** "Add a route at /settings rendering Settings."
 
 **Demonstrated in:** `tool_create_route` in [`tests/integration.rs`](tests/integration.rs) — inserts a variant into the fixture's `Route` enum.
 

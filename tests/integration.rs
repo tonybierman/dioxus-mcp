@@ -187,7 +187,9 @@ fn tool_server_fn_call_graph() {
 
 #[test]
 fn tool_dead_components() {
-    let r = call_tool("dead_components", json!({}));
+    // Args exactly mirror the TOOLS.md example call. "RootLayout" is a no-op
+    // extra root (not in the fixture); the tool still flags `Unused`.
+    let r = call_tool("dead_components", json!({"roots": ["RootLayout"]}));
     let dead: Vec<&str> = r["dead"]
         .as_array()
         .unwrap()
@@ -201,7 +203,9 @@ fn tool_dead_components() {
 
 #[test]
 fn tool_asset_audit() {
-    let r = call_tool("asset_audit", json!({}));
+    // Args mirror the TOOLS.md example. `public` doesn't exist in the
+    // fixture; the tool silently ignores missing asset dirs.
+    let r = call_tool("asset_audit", json!({"assets_dirs": ["assets", "public"]}));
     let unreferenced: Vec<&str> = r["unreferenced_files"]
         .as_array()
         .unwrap()
@@ -321,32 +325,37 @@ fn tool_explain_signal_graph() {
 
 #[test]
 fn tool_create_component() {
+    // Args mirror the TOOLS.md example call exactly.
     let tmp = copy_fixture_to_temp();
     let r = call_tool_at(
         tmp.path(),
         "create_component",
         json!({
-            "name": "TestWidget",
-            "props": [{"name": "label", "type": "String"}]
+            "name": "UserCard",
+            "props": [
+                {"name": "id", "type": "i32"},
+                {"name": "label", "type": "String", "optional": true}
+            ]
         }),
     );
     let created = r["files_created"].as_array().unwrap();
     assert!(
-        created.iter().any(|p| p.as_str().unwrap().ends_with("test_widget.rs")),
+        created.iter().any(|p| p.as_str().unwrap().ends_with("user_card.rs")),
         "files_created: {created:?}"
     );
-    assert!(tmp.path().join("src/components/test_widget.rs").exists());
+    assert!(tmp.path().join("src/components/user_card.rs").exists());
     let mod_rs = std::fs::read_to_string(tmp.path().join("src/components/mod.rs")).unwrap();
-    assert!(mod_rs.contains("pub mod test_widget"), "mod.rs: {mod_rs}");
+    assert!(mod_rs.contains("pub mod user_card"), "mod.rs: {mod_rs}");
 }
 
 #[test]
 fn tool_create_route() {
+    // Args mirror the TOOLS.md example call exactly.
     let tmp = copy_fixture_to_temp();
     let r = call_tool_at(
         tmp.path(),
         "create_route",
-        json!({"path": "/test-route", "component": "TestRoute"}),
+        json!({"path": "/settings", "component": "Settings"}),
     );
     let modified = r["files_modified"].as_array().unwrap();
     assert!(
@@ -354,34 +363,35 @@ fn tool_create_route() {
         "files_modified: {modified:?}"
     );
     let router = std::fs::read_to_string(tmp.path().join("src/router.rs")).unwrap();
-    assert!(router.contains("/test-route"), "router.rs: {router}");
-    assert!(router.contains("TestRoute"), "router.rs: {router}");
+    assert!(router.contains("/settings"), "router.rs: {router}");
+    assert!(router.contains("Settings"), "router.rs: {router}");
 }
 
 #[test]
 fn tool_create_server_fn() {
+    // Args mirror the TOOLS.md example call exactly.
     let tmp = copy_fixture_to_temp();
     let r = call_tool_at(
         tmp.path(),
         "create_server_fn",
         json!({
-            "name": "test_fn",
+            "name": "fetch_users",
             "args": [{"name": "limit", "type": "u32"}],
-            "return_type": "String"
+            "return_type": "Vec<User>"
         }),
     );
     let created = r["files_created"].as_array().unwrap();
     assert!(
-        created.iter().any(|p| p.as_str().unwrap().ends_with("test_fn.rs")),
+        created.iter().any(|p| p.as_str().unwrap().ends_with("fetch_users.rs")),
         "files_created: {created:?}"
     );
-    assert!(tmp.path().join("src/server/test_fn.rs").exists());
+    assert!(tmp.path().join("src/server/fetch_users.rs").exists());
 }
 
 #[test]
 #[ignore = "requires network access to dioxuslabs.com"]
 fn tool_search_docs() {
-    let r = call_tool("search_docs", json!({"query": "use_signal"}));
+    let r = call_tool("search_docs", json!({"query": "use_resource"}));
     assert!(
         r.get("results").map(|v| v.is_array()).unwrap_or(false),
         "expected results array, got: {r}"

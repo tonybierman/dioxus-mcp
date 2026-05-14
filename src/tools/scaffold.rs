@@ -50,7 +50,7 @@ pub async fn {{ snake }}(
 {%- endfor %}
 ) -> ServerFnResult<{{ ret }}> {
     // Server-side code runs on Axum (Dioxus 0.7).
-    Ok({% if ret == 'String' %}String::new(){% elif ret.startswith('Vec<') %}Vec::new(){% else %}Default::default(){% endif %})
+    Ok(Default::default())
 }
 "#;
 
