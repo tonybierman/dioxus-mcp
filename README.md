@@ -80,14 +80,25 @@ walking up for the first `Cargo.toml` with a `dioxus` dependency.
 
 ## Install
 
+Build the server binary out of the workspace:
+
 ```
-cargo build --release
+cargo build --release -p dioxus-mcp
 ```
 
-Then register the binary with Claude Code:
+The binary lands at `target/release/dioxus-mcp` (workspace target dir).
+Register it with Claude Code:
 
 ```
 claude mcp add dioxus /absolute/path/to/dioxus-mcp/target/release/dioxus-mcp -s user
+```
+
+Or install it onto your `$PATH` so the registered path doesn't change
+across rebuilds:
+
+```
+cargo install --path crates/dioxus-mcp
+claude mcp add dioxus dioxus-mcp -s user
 ```
 
 Restart Claude Code; `/mcp` should list `dioxus`.

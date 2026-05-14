@@ -325,7 +325,7 @@ default last 5 minutes), `component?`, `signal?`, `server_fn?`, `limit?`
 }
 ```
 
-**Demonstrated in:** [`crates/dioxus-mcp/tests/fixtures/runtime_events/events.jsonl`](crates/dioxus-mcp/tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `crates/dioxus-mcp/tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
+**Demonstrated in:** [`crates/dioxus-mcp/tests/fixtures/runtime_events/events.jsonl`](crates/dioxus-mcp/tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with a mix of `render`, `signal_write`, `server_fn`, and `panic` events; the `tool_runtime_events` test in `crates/dioxus-mcp/tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
 
 **Try it end-to-end:** [`examples/smoke-app`](examples/smoke-app) is a real headless Dioxus crate that drives a `VirtualDom` rebuild (so the probe captures Dioxus's own TRACE spans from `dioxus_core` and `dioxus_signals`), emits synthetic spans for the subsystems Dioxus 0.7 doesn't instrument (router, fullstack), and panics in a child thread.
 
@@ -397,7 +397,7 @@ Returns ranked snippets with URLs. Cached for 15 minutes.
 Returns matching files with raw URLs and short excerpts.
 
 **Args:** `concept` (required), `ref?` (branch/tag, default `"main"`),
-`limit?`.
+`limit?` (default 3).
 
 **Example call:**
 ```json
