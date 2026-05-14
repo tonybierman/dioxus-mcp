@@ -51,6 +51,123 @@ impl DioxusMcp {
     }
 
     #[tool(
+        description = "Server-fn call graph: for every #[server] fn, list every call site (caller_file, caller_line, enclosing_fn) and emit an orphan list of server fns nobody calls. Cross-crate callers not detected."
+    )]
+    async fn server_fn_call_graph(
+        &self,
+        Parameters(p): Parameters<tools::server_fn_call_graph::ServerFnCallGraphParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::server_fn_call_graph::server_fn_call_graph(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Audit assets/: list files under the assets dir(s) not referenced by any `asset!(\"...\")` macro, and `asset!()` references to files that don't exist on disk. Dynamic (non-string-literal) args are counted but skipped."
+    )]
+    async fn asset_audit(
+        &self,
+        Parameters(p): Parameters<tools::asset_audit::AssetAuditParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::asset_audit::asset_audit(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "List components defined but never used in any rsx! block. Components reachable from the Routable enum (route targets + layouts) plus `App` are treated as roots."
+    )]
+    async fn dead_components(
+        &self,
+        Parameters(p): Parameters<tools::dead_components::DeadComponentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dead_components::dead_components(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Find props passed unchanged from a parent component into a child (drilling). Matches bare ident and one-level wrappers `.clone()`, `.into()`, `.to_owned()`, `.read()`, `.peek()`, `.cloned()`; each finding tagged with a `via` field."
+    )]
+    async fn prop_drill(
+        &self,
+        Parameters(p): Parameters<tools::prop_drill::PropDrillParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::prop_drill::prop_drill(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Lint signals: flag `use_signal` / `use_memo` / `use_resource` / `use_effect` calls inside `for` / `while` / `loop` bodies in component fns — a new hook is created on every iteration."
+    )]
+    async fn signal_lint(
+        &self,
+        Parameters(p): Parameters<tools::signal_lint::SignalLintParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::signal_lint::signal_lint(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Lint Props structs: flag `#[derive(Props, ...)]` structs that don't also derive `PartialEq`. Dioxus needs PartialEq on Props for memoization."
+    )]
+    async fn props_lint(
+        &self,
+        Parameters(p): Parameters<tools::props_lint::PropsLintParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::props_lint::props_lint(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "One-shot project tour: feature-flag audit + route map + component/server-fn index + asset audit, plus a pre-rendered markdown summary. Use `include`/`exclude` to scope, `max_items_per_section` to cap output."
+    )]
+    async fn project_tour(
+        &self,
+        Parameters(p): Parameters<tools::project_tour::ProjectTourParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::project_tour::project_tour(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Index every #[component] and #[server] function in the crate. Returns each symbol's name, file:line, signature (props/args + types, optional flag), and for server fns the unwrapped ServerFnResult<T> return type."
+    )]
+    async fn project_index(
+        &self,
+        Parameters(p): Parameters<tools::project_index::ProjectIndexParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::project_index::project_index(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "List every route in the project's #[derive(Routable)] enum: URL path (raw + nest-prefixed), target component, params, and any #[layout(...)] / #[nest(...)] it's nested under."
+    )]
+    async fn route_map(
+        &self,
+        Parameters(p): Parameters<tools::route_map::RouteMapParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::route_map::route_map(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "Explain the reactive graph of a Dioxus component: which use_signal / use_memo / use_resource / use_effect bindings exist and which signals each one reads."
     )]
     async fn explain_signal_graph(
@@ -58,52 +175,6 @@ impl DioxusMcp {
         Parameters(p): Parameters<tools::analysis::ExplainSignalGraphParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::analysis::explain_signal_graph(&self.state, p).await {
-            Ok(r) => ok_json(&r),
-            Err(e) => Err(err(e)),
-        }
-    }
-
-    #[tool(
-        description = "Spawn `dx serve` for the given platform. Blocks up to ~60s for the server-ready signal, then returns a session_id. Use dx_stop to terminate."
-    )]
-    async fn dx_serve(
-        &self,
-        Parameters(p): Parameters<tools::cli::DxServeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match tools::cli::dx_serve(&self.state, p).await {
-            Ok(r) => ok_json(&r),
-            Err(e) => Err(err(e)),
-        }
-    }
-
-    #[tool(description = "Kill a `dx serve` session previously started by dx_serve.")]
-    async fn dx_stop(
-        &self,
-        Parameters(p): Parameters<tools::cli::DxStopParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match tools::cli::dx_stop(&self.state, p).await {
-            Ok(r) => ok_json(&r),
-            Err(e) => Err(err(e)),
-        }
-    }
-
-    #[tool(description = "Run `dx bundle` for the given platform, capturing structured warnings/errors and final artifact paths.")]
-    async fn dx_bundle(
-        &self,
-        Parameters(p): Parameters<tools::cli::DxBundleParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match tools::cli::dx_bundle(&self.state, p).await {
-            Ok(r) => ok_json(&r),
-            Err(e) => Err(err(e)),
-        }
-    }
-
-    #[tool(description = "Run `cargo check --message-format=json` (optionally with a platform feature) and return structured diagnostics.")]
-    async fn dx_check(
-        &self,
-        Parameters(p): Parameters<tools::cli::DxCheckParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match tools::cli::dx_check(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -173,9 +244,11 @@ impl ServerHandler for DioxusMcp {
         )
         .with_server_info(Implementation::from_build_env())
         .with_instructions(
-            "Dioxus project assistant. Tools: dx_serve, dx_stop, dx_bundle, dx_check, \
-             create_component, create_route, create_server_fn, check_rsx, \
-             audit_feature_flags, explain_signal_graph, search_docs, find_example."
+            "Dioxus project assistant. Tools: create_component, create_route, \
+             create_server_fn, check_rsx, audit_feature_flags, explain_signal_graph, \
+             route_map, project_index, server_fn_call_graph, asset_audit, \
+             dead_components, prop_drill, signal_lint, props_lint, project_tour, \
+             search_docs, find_example."
                 .to_string(),
         )
     }

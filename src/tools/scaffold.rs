@@ -242,7 +242,7 @@ pub async fn create_route(
     })
 }
 
-fn has_derive(attr: &syn::Attribute, target: &str) -> bool {
+pub(crate) fn has_derive(attr: &syn::Attribute, target: &str) -> bool {
     if !attr.path().is_ident("derive") {
         return false;
     }
@@ -256,7 +256,7 @@ fn has_derive(attr: &syn::Attribute, target: &str) -> bool {
     found
 }
 
-fn find_routable(crate_root: &Path) -> Option<PathBuf> {
+pub(crate) fn find_routable(crate_root: &Path) -> Option<PathBuf> {
     for cand in &["src/router.rs", "src/route.rs", "src/main.rs", "src/lib.rs"] {
         let p = crate_root.join(cand);
         if let Ok(s) = std::fs::read_to_string(&p) {
@@ -383,7 +383,7 @@ pub async fn create_server_fn(
     })
 }
 
-async fn crate_root(state: &Arc<State>, project_root: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) async fn crate_root(state: &Arc<State>, project_root: Option<&str>) -> Result<PathBuf, String> {
     match project_root {
         Some(root) => {
             let info = crate::project::ProjectInfo::detect(std::path::Path::new(root));

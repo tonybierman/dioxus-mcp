@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use moka::future::Cache;
-use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::project::ProjectInfo;
@@ -13,7 +11,6 @@ use crate::project::ProjectInfo;
 pub struct State {
     pub project_root: PathBuf,
     pub project: Mutex<ProjectInfo>,
-    pub dx_children: Mutex<HashMap<String, Child>>,
     pub doc_cache: Cache<String, Arc<CachedDoc>>,
     pub http: reqwest::Client,
 }
@@ -34,7 +31,6 @@ impl State {
         Ok(Self {
             project_root,
             project: Mutex::new(project),
-            dx_children: Mutex::new(HashMap::new()),
             doc_cache: Cache::builder()
                 .time_to_live(Duration::from_secs(15 * 60))
                 .max_capacity(256)
