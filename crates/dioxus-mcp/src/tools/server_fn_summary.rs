@@ -137,10 +137,8 @@ pub async fn server_fn_summary(
             .to_string();
 
         match phase {
-            "start" => {
-                if !call_id.is_empty() {
-                    starts.insert(call_id, (name, ts.to_string()));
-                }
+            "start" if !call_id.is_empty() => {
+                starts.insert(call_id, (name, ts.to_string()));
             }
             "end" => {
                 let duration_us = obj.get("duration_us").and_then(|x| x.as_u64()).or_else(|| {
