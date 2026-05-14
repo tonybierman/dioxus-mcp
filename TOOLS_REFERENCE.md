@@ -25,7 +25,7 @@ Also returns a pre-rendered markdown summary suitable for dropping straight into
 {"name": "project_tour", "arguments": {}}
 ```
 
-**Demonstrated in:** the whole `tests/fixtures/sample-project/` tree.
+**Demonstrated in:** the whole `crates/dioxus-mcp/tests/fixtures/sample-project/` tree.
 
 ---
 
@@ -41,7 +41,7 @@ Each route comes back with raw `path`, nest-prefixed `full_path`, target compone
 {"name": "route_map", "arguments": {}}
 ```
 
-**Demonstrated in:** [`src/router.rs`](tests/fixtures/sample-project/src/router.rs) — `Route` enum with `#[layout]`, `#[nest]`, and typed params.
+**Demonstrated in:** [`src/router.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/router.rs) — `Route` enum with `#[layout]`, `#[nest]`, and typed params.
 
 ---
 
@@ -57,7 +57,7 @@ to scan, default `src/`), `project_root?`.
 {"name": "project_index", "arguments": {}}
 ```
 
-**Demonstrated in:** [`src/components/home.rs`](tests/fixtures/sample-project/src/components/home.rs) and [`src/server/fetch_user.rs`](tests/fixtures/sample-project/src/server/fetch_user.rs) — Props-struct component and a server fn with typed args.
+**Demonstrated in:** [`src/components/home.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/components/home.rs) and [`src/server/fetch_user.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/server/fetch_user.rs) — Props-struct component and a server fn with typed args.
 
 ---
 
@@ -72,7 +72,7 @@ Call sites carry `caller_file`, `caller_line`, `enclosing_fn`, and `full_path`. 
 {"name": "server_fn_call_graph", "arguments": {}}
 ```
 
-**Demonstrated in:** [`src/components/user_page.rs`](tests/fixtures/sample-project/src/components/user_page.rs) (calls `fetch_user`) and [`src/server/orphan_fn.rs`](tests/fixtures/sample-project/src/server/orphan_fn.rs) (never called).
+**Demonstrated in:** [`src/components/user_page.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/components/user_page.rs) (calls `fetch_user`) and [`src/server/orphan_fn.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/server/orphan_fn.rs) (never called).
 
 ---
 
@@ -87,7 +87,7 @@ Call sites carry `caller_file`, `caller_line`, `enclosing_fn`, and `full_path`. 
 {"name": "dead_components", "arguments": {"roots": ["RootLayout"]}}
 ```
 
-**Demonstrated in:** [`src/components/unused.rs`](tests/fixtures/sample-project/src/components/unused.rs) — defined but referenced nowhere in any `rsx!`.
+**Demonstrated in:** [`src/components/unused.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/components/unused.rs) — defined but referenced nowhere in any `rsx!`.
 
 ---
 
@@ -102,7 +102,7 @@ Dynamic (non-string-literal) `asset!()` calls can't be resolved statically; they
 {"name": "asset_audit", "arguments": {"assets_dirs": ["assets", "public"]}}
 ```
 
-**Demonstrated in:** [`assets/`](tests/fixtures/sample-project/assets/) (with `orphan.css` unreferenced) and [`src/main.rs`](tests/fixtures/sample-project/src/main.rs) (referencing a missing `missing.svg`).
+**Demonstrated in:** [`assets/`](crates/dioxus-mcp/tests/fixtures/sample-project/assets/) (with `orphan.css` unreferenced) and [`src/main.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/main.rs) (referencing a missing `missing.svg`).
 
 ---
 
@@ -120,7 +120,7 @@ crate version), `router_file?` (forwarded to `route_map` when
 {"name": "openapi_spec", "arguments": {"include_routes": true}}
 ```
 
-**Demonstrated in:** [`src/server/list_posts.rs`](tests/fixtures/sample-project/src/server/list_posts.rs) — `#[server(ListPosts)]` taking a `ListPostsInput` struct and returning `Vec<Post>`; both types are resolved from local `#[derive(Serialize, Deserialize)]` definitions.
+**Demonstrated in:** [`src/server/list_posts.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/server/list_posts.rs) — `#[server(ListPosts)]` taking a `ListPostsInput` struct and returning `Vec<Post>`; both types are resolved from local `#[derive(Serialize, Deserialize)]` definitions.
 
 ---
 
@@ -137,7 +137,7 @@ Currently flags `for` loops missing a `key:` attribute and event-handler closure
 {"name": "check_rsx", "arguments": {"file": "src/lint_demo.rs"}}
 ```
 
-**Demonstrated in:** [`src/lint_demo.rs`](tests/fixtures/sample-project/src/lint_demo.rs) — `for` loop without `key:` and an `onclick: move || {}` with no event arg.
+**Demonstrated in:** [`src/lint_demo.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/lint_demo.rs) — `for` loop without `key:` and an `onclick: move || {}` with no event arg.
 
 ---
 
@@ -152,7 +152,7 @@ Covers `for` / `while` / `loop` bodies, including loops nested inside `rsx!` mac
 {"name": "signal_lint", "arguments": {}}
 ```
 
-**Demonstrated in:** [`src/components/home.rs`](tests/fixtures/sample-project/src/components/home.rs) — `use_signal` inside an rsx! `for` loop.
+**Demonstrated in:** [`src/components/home.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/components/home.rs) — `use_signal` inside an rsx! `for` loop.
 
 ---
 
@@ -165,7 +165,7 @@ Covers `for` / `while` / `loop` bodies, including loops nested inside `rsx!` mac
 {"name": "props_lint", "arguments": {}}
 ```
 
-**Demonstrated in:** [`src/components/child.rs`](tests/fixtures/sample-project/src/components/child.rs) — `ChildProps` derives `Props, Clone` but not `PartialEq`.
+**Demonstrated in:** [`src/components/child.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/components/child.rs) — `ChildProps` derives `Props, Clone` but not `PartialEq`.
 
 ---
 
@@ -180,7 +180,7 @@ Matches bare ident, `prop.clone()`, `prop.into()`, `prop.to_owned()`, `prop.read
 {"name": "prop_drill", "arguments": {}}
 ```
 
-**Demonstrated in:** [`src/components/home.rs`](tests/fixtures/sample-project/src/components/home.rs) — `Child { name: props.title.clone(), user_id: props.user_id }`.
+**Demonstrated in:** [`src/components/home.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/components/home.rs) — `Child { name: props.title.clone(), user_id: props.user_id }`.
 
 ---
 
@@ -195,7 +195,7 @@ Flags conflicting render targets (web + desktop without fullstack), broken fulls
 {"name": "audit_feature_flags", "arguments": {}}
 ```
 
-**Demonstrated in:** [`Cargo.toml`](tests/fixtures/sample-project/Cargo.toml) — clean `fullstack + web + server` setup.
+**Demonstrated in:** [`Cargo.toml`](crates/dioxus-mcp/tests/fixtures/sample-project/Cargo.toml) — clean `fullstack + web + server` setup.
 
 ---
 
@@ -210,7 +210,7 @@ Covers `use_signal` / `use_memo` / `use_resource` / `use_effect`. Memos and effe
 {"name": "explain_signal_graph", "arguments": {"file": "src/components/home.rs"}}
 ```
 
-**Demonstrated in:** [`src/components/home.rs`](tests/fixtures/sample-project/src/components/home.rs) — `use_signal` plus a `use_memo` that reads it.
+**Demonstrated in:** [`src/components/home.rs`](crates/dioxus-mcp/tests/fixtures/sample-project/src/components/home.rs) — `use_signal` plus a `use_memo` that reads it.
 
 ---
 
@@ -238,7 +238,7 @@ Writes under `src/components/` by default (override via `path`) and wires the ne
 }
 ```
 
-**Demonstrated in:** `tool_create_component` in [`tests/integration.rs`](tests/integration.rs) — runs against a tempdir copy of the fixture.
+**Demonstrated in:** `tool_create_component` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs) — runs against a tempdir copy of the fixture.
 
 ---
 
@@ -255,7 +255,7 @@ PascalCase), `router_file?` (auto-detected), `project_root?`.
 }
 ```
 
-**Demonstrated in:** `tool_create_route` in [`tests/integration.rs`](tests/integration.rs) — inserts a variant into the fixture's `Route` enum.
+**Demonstrated in:** `tool_create_route` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs) — inserts a variant into the fixture's `Route` enum.
 
 ---
 
@@ -278,7 +278,7 @@ Refuses if the project isn't fullstack-capable (no `fullstack` feature, and miss
 }
 ```
 
-**Demonstrated in:** `tool_create_server_fn` in [`tests/integration.rs`](tests/integration.rs) — generates a new file under `src/server/` of the fixture.
+**Demonstrated in:** `tool_create_server_fn` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs) — generates a new file under `src/server/` of the fixture.
 
 ---
 
@@ -325,7 +325,7 @@ default last 5 minutes), `component?`, `signal?`, `server_fn?`, `limit?`
 }
 ```
 
-**Demonstrated in:** [`tests/fixtures/runtime_events/events.jsonl`](tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
+**Demonstrated in:** [`crates/dioxus-mcp/tests/fixtures/runtime_events/events.jsonl`](crates/dioxus-mcp/tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `crates/dioxus-mcp/tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
 
 **Try it end-to-end:** [`examples/smoke-app`](examples/smoke-app) is a real headless Dioxus crate that drives a `VirtualDom` rebuild (so the probe captures Dioxus's own TRACE spans from `dioxus_core` and `dioxus_signals`), emits synthetic spans for the subsystems Dioxus 0.7 doesn't instrument (router, fullstack), and panics in a child thread.
 
@@ -370,7 +370,7 @@ to one name), `log_path?` (override), `project_root?`.
 }
 ```
 
-**Demonstrated in:** [`tests/fixtures/server_fn_summary/events.jsonl`](tests/fixtures/server_fn_summary/events.jsonl) — 10 `fetch_user` calls with durations 100…1000 µs, 2 `save_post` calls (one ok, one err), and one `fetch_user` start with no matching end (the `pending` case). The `tool_server_fn_summary` test in `tests/integration.rs` asserts on counts, percentiles, ok/err split, the `pending` field, the `server_fn` filter, and the missing-log empty-list path.
+**Demonstrated in:** [`crates/dioxus-mcp/tests/fixtures/server_fn_summary/events.jsonl`](crates/dioxus-mcp/tests/fixtures/server_fn_summary/events.jsonl) — 10 `fetch_user` calls with durations 100…1000 µs, 2 `save_post` calls (one ok, one err), and one `fetch_user` start with no matching end (the `pending` case). The `tool_server_fn_summary` test in `crates/dioxus-mcp/tests/integration.rs` asserts on counts, percentiles, ok/err split, the `pending` field, the `server_fn` filter, and the missing-log empty-list path.
 
 ---
 
@@ -388,7 +388,7 @@ Returns ranked snippets with URLs. Cached for 15 minutes.
 {"name": "search_docs", "arguments": {"query": "use_resource"}}
 ```
 
-**Demonstrated in:** `tool_search_docs` in [`tests/integration.rs`](tests/integration.rs) — `#[ignore]`d offline; run with `cargo test -- --ignored`.
+**Demonstrated in:** `tool_search_docs` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs) — `#[ignore]`d offline; run with `cargo test -- --ignored`.
 
 ---
 
@@ -404,4 +404,4 @@ Returns matching files with raw URLs and short excerpts.
 {"name": "find_example", "arguments": {"concept": "fullstack"}}
 ```
 
-**Demonstrated in:** `tool_find_example` in [`tests/integration.rs`](tests/integration.rs) — `#[ignore]`d offline; run with `cargo test -- --ignored`.
+**Demonstrated in:** `tool_find_example` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs) — `#[ignore]`d offline; run with `cargo test -- --ignored`.

@@ -1,4 +1,4 @@
 /target
-tests/fixtures/**/target/
-tests/fixtures/**/Cargo.lock
+crates/dioxus-mcp/tests/fixtures/**/target/
+crates/dioxus-mcp/tests/fixtures/**/Cargo.lock
 examples/**/target/

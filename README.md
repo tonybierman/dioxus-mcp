@@ -139,7 +139,7 @@ cargo test -- --ignored       # also runs live-HTTP search_docs / find_example
 ```
 
 Tests spawn the binary over stdio and assert on each tool's response
-against `tests/fixtures/sample-project/` — a hand-crafted Dioxus
+against `crates/dioxus-mcp/tests/fixtures/sample-project/` — a hand-crafted Dioxus
 source tree where every file's purpose is to trigger meaningful
 output from one or more tools. Headers in each fixture file name
 which tool(s) it exercises.

@@ -3,7 +3,7 @@
 Static analysis answers "what does the code look like" questions. The runtime
 tools answer "what is the code doing right now": which components rendered,
 which signals wrote, how long server fns took, what panicked. They read a
-JSON-lines event log written by the [`dioxus-mcp-probe`](probe/) crate that
+JSON-lines event log written by the [`dioxus-mcp-probe`](crates/probe/) crate that
 you install in your Dioxus app.
 
 ## Setting up the probe
