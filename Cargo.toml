@@ -27,3 +27,6 @@ walkdir = "2"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 tower = "0.5"
 heck = "0.5"
+
+[dev-dependencies]
+tempfile = "3"

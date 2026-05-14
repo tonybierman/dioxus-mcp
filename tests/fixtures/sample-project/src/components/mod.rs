@@ -1,0 +1,12 @@
+pub mod navbar;
+pub mod home;
+pub mod child;
+pub mod user_page;
+pub mod about;
+pub mod unused;
+pub use navbar::*;
+pub use home::*;
+pub use child::*;
+pub use user_page::*;
+pub use about::*;
+pub use unused::*;

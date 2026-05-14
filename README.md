@@ -8,6 +8,9 @@ need to spawn `dx`.
 
 ## Tools
 
+See [TOOLS.md](TOOLS.md) for each tool's args, a JSON call example, and a
+natural-language prompt that Claude Code will route to it.
+
 ### Project introspection
 - **`project_tour`** — one-shot overview: feature audit + routes + index +
   asset audit, plus a pre-rendered markdown summary.
@@ -82,6 +85,19 @@ After a rebuild, restart Claude Code to pick up the new binary.
   `cargo`, `dx`, or any subprocess.
 - Targets Dioxus 0.7. Older versions will run but the audit/lints
   reflect 0.7 conventions.
+
+## Tests
+
+```
+cargo test                    # 15 offline integration tests
+cargo test -- --ignored       # also runs live-HTTP search_docs / find_example
+```
+
+Tests spawn the binary over stdio and assert on each tool's response
+against `tests/fixtures/sample-project/` — a hand-crafted Dioxus
+source tree where every file's purpose is to trigger meaningful
+output from one or more tools. Headers in each fixture file name
+which tool(s) it exercises.
 
 ## Transports
 
