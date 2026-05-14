@@ -22,7 +22,7 @@ use std::thread;
 use std::time::Duration;
 
 use dioxus::prelude::*;
-use dioxus_mcp_probe::{install_with, ProbeConfig};
+use dioxus_mcp_probe::{ProbeConfig, install_with};
 use tracing::info_span;
 
 const DEFAULT_LOG: &str = "/tmp/probe-smoke.jsonl";

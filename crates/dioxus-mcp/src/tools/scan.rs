@@ -16,18 +16,16 @@ pub struct ParseError {
 
 pub(crate) fn walk_rs_files(root: &Path) -> Vec<ScannedFile> {
     let mut out = Vec::new();
-    let walker = walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            if e.depth() == 0 {
-                return true;
-            }
-            if name.starts_with('.') {
-                return false;
-            }
-            !matches!(name.as_ref(), "target" | "node_modules")
-        });
+    let walker = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
+        let name = e.file_name().to_string_lossy();
+        if e.depth() == 0 {
+            return true;
+        }
+        if name.starts_with('.') {
+            return false;
+        }
+        !matches!(name.as_ref(), "target" | "node_modules")
+    });
 
     for entry in walker.flatten() {
         let path = entry.path();
@@ -37,7 +35,9 @@ pub(crate) fn walk_rs_files(root: &Path) -> Vec<ScannedFile> {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(path) else { continue };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
         let ast = syn::parse_file(&source);
         out.push(ScannedFile {
             path: path.to_path_buf(),

@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------- helpers ----------
 
@@ -70,7 +70,9 @@ fn call_tool_at(project_root: &Path, tool: &str, mut args: Value) -> Value {
     let stdout = String::from_utf8(output.stdout).expect("utf8");
 
     for line in stdout.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if v.get("id").and_then(|x| x.as_i64()) != Some(2) {
             continue;
         }
@@ -155,7 +157,10 @@ fn tool_project_index() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     for expected in ["App", "Home", "Child", "UserPage", "Unused"] {
-        assert!(names.contains(&expected), "components missing {expected}: {names:?}");
+        assert!(
+            names.contains(&expected),
+            "components missing {expected}: {names:?}"
+        );
     }
     let server_names: Vec<&str> = r["server_fns"]
         .as_array()
@@ -196,9 +201,15 @@ fn tool_dead_components() {
         .iter()
         .map(|d| d["name"].as_str().unwrap())
         .collect();
-    assert!(dead.contains(&"Unused"), "dead set should include Unused: {dead:?}");
+    assert!(
+        dead.contains(&"Unused"),
+        "dead set should include Unused: {dead:?}"
+    );
     assert!(!dead.contains(&"Home"), "Home is route-reachable: {dead:?}");
-    assert!(!dead.contains(&"NavBar"), "NavBar is a layout root: {dead:?}");
+    assert!(
+        !dead.contains(&"NavBar"),
+        "NavBar is a layout root: {dead:?}"
+    );
 }
 
 #[test]
@@ -229,9 +240,9 @@ fn tool_check_rsx() {
     assert!(r["rsx_block_count"].as_u64().unwrap() > 0);
     let issues = r["issues"].as_array().unwrap();
     assert!(!issues.is_empty(), "expected issues, got {issues:?}");
-    let any_key = issues.iter().any(|i| {
-        i["message"].as_str().unwrap_or("").contains("key:")
-    });
+    let any_key = issues
+        .iter()
+        .any(|i| i["message"].as_str().unwrap_or("").contains("key:"));
     let any_handler = issues.iter().any(|i| {
         i["message"]
             .as_str()
@@ -247,8 +258,9 @@ fn tool_signal_lint() {
     let r = call_tool("signal_lint", json!({}));
     let issues = r["issues"].as_array().unwrap();
     assert!(
-        issues.iter().any(|i| i["code"] == "hook_in_loop"
-            && i["component"] == "Home"),
+        issues
+            .iter()
+            .any(|i| i["code"] == "hook_in_loop" && i["component"] == "Home"),
         "expected hook_in_loop for Home: {issues:?}"
     );
 }
@@ -258,8 +270,9 @@ fn tool_props_lint() {
     let r = call_tool("props_lint", json!({}));
     let issues = r["issues"].as_array().unwrap();
     assert!(
-        issues.iter().any(|i| i["struct_name"] == "ChildProps"
-            && i["code"] == "props_missing_partial_eq"),
+        issues
+            .iter()
+            .any(|i| i["struct_name"] == "ChildProps" && i["code"] == "props_missing_partial_eq"),
         "expected ChildProps in props_missing_partial_eq: {issues:?}"
     );
 }
@@ -340,7 +353,9 @@ fn tool_create_component() {
     );
     let created = r["files_created"].as_array().unwrap();
     assert!(
-        created.iter().any(|p| p.as_str().unwrap().ends_with("user_card.rs")),
+        created
+            .iter()
+            .any(|p| p.as_str().unwrap().ends_with("user_card.rs")),
         "files_created: {created:?}"
     );
     assert!(tmp.path().join("src/components/user_card.rs").exists());
@@ -359,7 +374,9 @@ fn tool_create_route() {
     );
     let modified = r["files_modified"].as_array().unwrap();
     assert!(
-        modified.iter().any(|p| p.as_str().unwrap().ends_with("router.rs")),
+        modified
+            .iter()
+            .any(|p| p.as_str().unwrap().ends_with("router.rs")),
         "files_modified: {modified:?}"
     );
     let router = std::fs::read_to_string(tmp.path().join("src/router.rs")).unwrap();
@@ -382,7 +399,9 @@ fn tool_create_server_fn() {
     );
     let created = r["files_created"].as_array().unwrap();
     assert!(
-        created.iter().any(|p| p.as_str().unwrap().ends_with("fetch_users.rs")),
+        created
+            .iter()
+            .any(|p| p.as_str().unwrap().ends_with("fetch_users.rs")),
         "files_created: {created:?}"
     );
     assert!(tmp.path().join("src/server/fetch_users.rs").exists());
@@ -416,10 +435,7 @@ fn tool_openapi_spec() {
     );
     let list_resp = &list["post"]["responses"]["200"]["content"]["application/json"]["schema"];
     assert_eq!(list_resp["type"], "array");
-    assert_eq!(
-        list_resp["items"]["$ref"],
-        "#/components/schemas/Post"
-    );
+    assert_eq!(list_resp["items"]["$ref"], "#/components/schemas/Post");
 
     let schemas = spec["components"]["schemas"].as_object().unwrap();
     let input_schema = schemas
@@ -432,7 +448,10 @@ fn tool_openapi_spec() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(required.contains(&"limit"), "required: {required:?}");
-    assert!(!required.contains(&"cursor"), "Option<...> should be optional: {required:?}");
+    assert!(
+        !required.contains(&"cursor"),
+        "Option<...> should be optional: {required:?}"
+    );
     assert!(
         schemas.contains_key("Post"),
         "components.schemas missing Post: {:?}",
@@ -517,10 +536,11 @@ fn tool_runtime_events() {
     );
     assert!(future["events"].as_array().unwrap().is_empty());
     assert!(
-        future["notes"].as_array().unwrap().iter().any(|n| n
-            .as_str()
-            .unwrap_or("")
-            .contains("no events matched")),
+        future["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap_or("").contains("no events matched")),
         "notes: {}",
         future["notes"]
     );
@@ -591,11 +611,11 @@ fn tool_server_fn_summary() {
         json!({"log_path": "/nonexistent/path/events.jsonl"}),
     );
     assert!(missing["summaries"].as_array().unwrap().is_empty());
-    assert!(missing["notes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|n| n.as_str().unwrap_or("").contains("install dioxus-mcp-probe")));
+    assert!(missing["notes"].as_array().unwrap().iter().any(|n| {
+        n.as_str()
+            .unwrap_or("")
+            .contains("install dioxus-mcp-probe")
+    }));
 }
 
 #[test]
@@ -617,8 +637,5 @@ fn tool_search_docs() {
 #[ignore = "requires network access to github.com"]
 fn tool_find_example() {
     let r = call_tool("find_example", json!({"concept": "fullstack"}));
-    assert!(
-        r.is_object(),
-        "expected object response, got: {r}"
-    );
+    assert!(r.is_object(), "expected object response, got: {r}");
 }

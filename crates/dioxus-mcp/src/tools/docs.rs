@@ -53,8 +53,7 @@ pub async fn search_docs(
     for sec in &sections {
         let head_terms = tokenize(&sec.heading);
         let body_terms = tokenize(&sec.body);
-        let score = score_terms(&qterms, &head_terms) * 3.0
-            + score_terms(&qterms, &body_terms);
+        let score = score_terms(&qterms, &head_terms) * 3.0 + score_terms(&qterms, &body_terms);
         if score <= 0.0 {
             continue;
         }
@@ -67,7 +66,11 @@ pub async fn search_docs(
         });
     }
 
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(limit);
 
     Ok(SearchDocsResult {
@@ -116,7 +119,10 @@ fn split_sections(md: &str) -> Vec<Section> {
         cur_body.push('\n');
     }
     if let Some(h) = cur_heading {
-        out.push(Section { heading: h, body: cur_body });
+        out.push(Section {
+            heading: h,
+            body: cur_body,
+        });
     }
     out
 }
@@ -304,10 +310,7 @@ pub async fn find_example(
             .send()
             .await
             .map_err(|e| format!("github fetch: {e}"))?;
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| format!("github body: {e}"))?;
+        let body = resp.text().await.map_err(|e| format!("github body: {e}"))?;
         state
             .doc_cache
             .insert(
@@ -318,8 +321,8 @@ pub async fn find_example(
         body
     };
 
-    let entries: serde_json::Value = serde_json::from_str(&listing)
-        .map_err(|e| format!("github json: {e}"))?;
+    let entries: serde_json::Value =
+        serde_json::from_str(&listing).map_err(|e| format!("github json: {e}"))?;
     let arr = entries.as_array().ok_or("expected array")?;
 
     let qterms = tokenize(&p.concept);
@@ -349,7 +352,7 @@ pub async fn find_example(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        let name_terms = tokenize(&name.replace('-', " ").replace('_', " "));
+        let name_terms = tokenize(&name.replace(['-', '_'], " "));
         let score = score_terms(&qterms, &name_terms);
         if score > 0.0 {
             hits.push(ExampleHit {
@@ -361,7 +364,11 @@ pub async fn find_example(
             });
         }
     }
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(limit);
 
     Ok(FindExampleResult {

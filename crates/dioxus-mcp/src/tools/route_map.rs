@@ -52,10 +52,7 @@ pub struct RouteMapReport {
     pub routes: Vec<RouteEntry>,
 }
 
-pub async fn route_map(
-    state: &Arc<State>,
-    p: RouteMapParams,
-) -> Result<RouteMapReport, String> {
+pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMapReport, String> {
     let crate_root = crate_root(state, p.project_root.as_deref()).await?;
     let router_file = match p.router_file.as_deref() {
         Some(rf) => {
@@ -82,9 +79,7 @@ pub async fn route_map(
             syn::Item::Enum(e) if e.attrs.iter().any(|a| has_derive(a, "Routable")) => Some(e),
             _ => None,
         })
-        .ok_or_else(|| {
-            format!("no `#[derive(Routable)]` enum in {}", router_file.display())
-        })?;
+        .ok_or_else(|| format!("no `#[derive(Routable)]` enum in {}", router_file.display()))?;
 
     let enum_name = routable_enum.ident.to_string();
     let mut layout_stack: Vec<String> = Vec::new();
@@ -97,11 +92,10 @@ pub async fn route_map(
         for attr in &variant.attrs {
             let path = attr.path();
             if path.is_ident("layout") {
-                if let Ok(p) = attr.parse_args::<syn::Path>() {
-                    if let Some(seg) = p.segments.last() {
+                if let Ok(p) = attr.parse_args::<syn::Path>()
+                    && let Some(seg) = p.segments.last() {
                         layout_stack.push(seg.ident.to_string());
                     }
-                }
             } else if path.is_ident("end_layout") {
                 layout_stack.pop();
             } else if path.is_ident("nest") {
@@ -110,12 +104,16 @@ pub async fn route_map(
                 }
             } else if path.is_ident("end_nest") {
                 nest_stack.pop();
-            } else if path.is_ident("route") {
-                if let Ok(lit) = attr.parse_args::<syn::LitStr>() {
-                    let line = attr.path().segments.first().map(|s| s.ident.span().start().line).unwrap_or(0);
+            } else if path.is_ident("route")
+                && let Ok(lit) = attr.parse_args::<syn::LitStr>() {
+                    let line = attr
+                        .path()
+                        .segments
+                        .first()
+                        .map(|s| s.ident.span().start().line)
+                        .unwrap_or(0);
                     route_for_variant = Some((lit.value(), line));
                 }
-            }
         }
 
         let Some((route_path, line)) = route_for_variant else {

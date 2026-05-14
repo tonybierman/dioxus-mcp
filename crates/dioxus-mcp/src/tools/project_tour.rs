@@ -56,13 +56,15 @@ pub async fn project_tour(
 
     let audit_fut = async {
         if want("audit") {
-            Some(crate::tools::analysis::audit_feature_flags(
-                state,
-                crate::tools::analysis::AuditFeatureFlagsParams {
-                    project_root: p.project_root.clone(),
-                },
+            Some(
+                crate::tools::analysis::audit_feature_flags(
+                    state,
+                    crate::tools::analysis::AuditFeatureFlagsParams {
+                        project_root: p.project_root.clone(),
+                    },
+                )
+                .await,
             )
-            .await)
         } else {
             None
         }
@@ -121,12 +123,11 @@ pub async fn project_tour(
         tokio::join!(audit_fut, routes_fut, index_fut, assets_fut);
 
     let mut trunc = TruncationFlags::default();
-    if let Some(rm) = routes.as_mut() {
-        if rm.routes.len() > max {
+    if let Some(rm) = routes.as_mut()
+        && rm.routes.len() > max {
             rm.routes.truncate(max);
             trunc.routes = true;
         }
-    }
     if let Some(idx) = index.as_mut() {
         if idx.components.len() > max {
             idx.components.truncate(max);
@@ -137,12 +138,11 @@ pub async fn project_tour(
             trunc.server_fns = true;
         }
     }
-    if let Some(aa) = assets.as_mut() {
-        if aa.unreferenced_files.len() > max {
+    if let Some(aa) = assets.as_mut()
+        && aa.unreferenced_files.len() > max {
             aa.unreferenced_files.truncate(max);
             trunc.unreferenced_assets = true;
         }
-    }
 
     let summary = render_summary(&audit, &routes, &index, &assets, &trunc);
 
@@ -215,7 +215,11 @@ fn render_summary(
             a.total_files,
             a.referenced_count,
             a.unreferenced_files.len(),
-            if trunc.unreferenced_assets { " (truncated)" } else { "" },
+            if trunc.unreferenced_assets {
+                " (truncated)"
+            } else {
+                ""
+            },
             a.missing_assets.len()
         ));
     }

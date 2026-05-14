@@ -10,7 +10,7 @@ use syn::visit::Visit;
 
 use crate::state::State;
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct AssetAuditParams {
@@ -45,9 +45,7 @@ pub async fn asset_audit(
     p: AssetAuditParams,
 ) -> Result<AssetAuditReport, String> {
     let crate_root = crate_root(state, p.project_root.as_deref()).await?;
-    let dirs = p
-        .assets_dirs
-        .unwrap_or_else(|| vec!["assets".to_string()]);
+    let dirs = p.assets_dirs.unwrap_or_else(|| vec!["assets".to_string()]);
 
     let mut file_index: HashSet<String> = HashSet::new();
     let mut files_listed: Vec<String> = Vec::new();
@@ -106,7 +104,7 @@ pub async fn asset_audit(
         .filter(|f| {
             !referenced.contains(*f)
                 && !referenced.contains(&format!("/{f}"))
-                && !referenced_matches_any_form(*f, &referenced)
+                && !referenced_matches_any_form(f, &referenced)
         })
         .cloned()
         .collect();
@@ -130,11 +128,10 @@ fn referenced_matches_any_form(file_rel_from_root: &str, referenced: &HashSet<St
     if referenced.contains(trimmed) || referenced.contains(&format!("/{trimmed}")) {
         return true;
     }
-    if let Some(rest) = trimmed.split_once('/').map(|(_, r)| r) {
-        if referenced.contains(rest) || referenced.contains(&format!("/{rest}")) {
+    if let Some(rest) = trimmed.split_once('/').map(|(_, r)| r)
+        && (referenced.contains(rest) || referenced.contains(&format!("/{rest}"))) {
             return true;
         }
-    }
     false
 }
 
@@ -160,7 +157,9 @@ impl<'a, 'ast> Visit<'ast> for AssetVisitor<'a> {
                     self.referenced.insert(lit.clone());
                     let matched = self.file_index.contains(&lit)
                         || self.file_index.contains(lit.trim_start_matches('/'))
-                        || self.file_index.contains(&format!("/{}", lit.trim_start_matches('/')));
+                        || self
+                            .file_index
+                            .contains(&format!("/{}", lit.trim_start_matches('/')));
                     if !matched {
                         self.missing.push(MissingAsset {
                             path: lit,

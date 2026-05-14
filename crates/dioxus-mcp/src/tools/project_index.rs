@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 use crate::tools::scaffold::{crate_root, has_derive};
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::tighten_type;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -87,33 +87,25 @@ pub async fn project_index(
 
         let mut props_structs: HashMap<String, &syn::ItemStruct> = HashMap::new();
         for it in &file.items {
-            if let syn::Item::Struct(s) = it {
-                if s.attrs.iter().any(|a| has_derive(a, "Props")) {
+            if let syn::Item::Struct(s) = it
+                && s.attrs.iter().any(|a| has_derive(a, "Props")) {
                     props_structs.insert(s.ident.to_string(), s);
                 }
-            }
         }
 
         for it in &file.items {
             let syn::Item::Fn(f) = it else { continue };
 
-            let has_component = f
-                .attrs
-                .iter()
-                .any(|a| last_seg_is(a.path(), "component"));
-            let server_attr = f
-                .attrs
-                .iter()
-                .find(|a| last_seg_is(a.path(), "server"));
+            let has_component = f.attrs.iter().any(|a| last_seg_is(a.path(), "component"));
+            let server_attr = f.attrs.iter().find(|a| last_seg_is(a.path(), "server"));
 
             if want_components && has_component {
                 components.push(build_component(f, path, &props_structs));
             }
-            if want_server_fns {
-                if let Some(attr) = server_attr {
+            if want_server_fns
+                && let Some(attr) = server_attr {
                     server_fns.push(build_server_fn(f, attr, path));
                 }
-            }
         }
     }
 
@@ -150,14 +142,12 @@ fn build_component(
     let mut via_props_struct = false;
     let mut props: Vec<PropEntry> = Vec::new();
 
-    if typed_args.len() == 1 {
-        if let Some(struct_name) = last_ident(&typed_args[0].ty) {
-            if let Some(s) = props_structs.get(&struct_name) {
+    if typed_args.len() == 1
+        && let Some(struct_name) = last_ident(&typed_args[0].ty)
+            && let Some(s) = props_structs.get(&struct_name) {
                 via_props_struct = true;
                 props = extract_props_from_struct(s);
             }
-        }
-    }
 
     if !via_props_struct {
         for pt in &typed_args {
@@ -222,7 +212,9 @@ fn build_server_fn(f: &syn::ItemFn, attr: &syn::Attribute, path: &Path) -> Serve
 }
 
 fn extract_props_from_struct(s: &syn::ItemStruct) -> Vec<PropEntry> {
-    let syn::Fields::Named(named) = &s.fields else { return Vec::new() };
+    let syn::Fields::Named(named) = &s.fields else {
+        return Vec::new();
+    };
     named
         .named
         .iter()
@@ -272,11 +264,10 @@ fn pat_to_name(pat: &syn::Pat) -> String {
 }
 
 fn is_option_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             return seg.ident == "Option";
         }
-    }
     false
 }
 
@@ -286,7 +277,9 @@ fn unwrap_server_fn_result(ty: &syn::Type) -> Option<&syn::Type> {
     if seg.ident != "ServerFnResult" {
         return None;
     }
-    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
     for a in &args.args {
         if let syn::GenericArgument::Type(t) = a {
             return Some(t);

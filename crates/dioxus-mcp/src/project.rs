@@ -43,7 +43,9 @@ impl ProjectInfo {
     }
 
     pub fn manifest_dir(&self) -> Option<PathBuf> {
-        self.manifest_path.as_ref().and_then(|p| p.parent().map(PathBuf::from))
+        self.manifest_path
+            .as_ref()
+            .and_then(|p| p.parent().map(PathBuf::from))
     }
 
     pub fn version_major_minor(&self) -> Option<(u64, u64)> {
@@ -57,15 +59,18 @@ impl ProjectInfo {
 }
 
 fn find_manifest_with_dioxus(start: &Path) -> Option<PathBuf> {
-    let mut cur = if start.is_file() { start.parent()? } else { start };
+    let mut cur = if start.is_file() {
+        start.parent()?
+    } else {
+        start
+    };
     loop {
         let candidate = cur.join("Cargo.toml");
         if candidate.exists() {
-            if let Ok(m) = cargo_toml::Manifest::from_path(&candidate) {
-                if m.dependencies.contains_key("dioxus") {
+            if let Ok(m) = cargo_toml::Manifest::from_path(&candidate)
+                && m.dependencies.contains_key("dioxus") {
                     return Some(candidate);
                 }
-            }
             // if we hit a non-dioxus manifest at the workspace root, still note it
             if cur.parent().is_none() {
                 return Some(candidate);

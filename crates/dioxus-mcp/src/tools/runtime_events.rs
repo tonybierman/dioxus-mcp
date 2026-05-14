@@ -61,7 +61,7 @@ pub async fn runtime_events(
         }
     };
     let limit = p.limit.unwrap_or(DEFAULT_LIMIT).min(HARD_CAP);
-    let since = p.since.clone().unwrap_or_else(|| default_since_iso());
+    let since = p.since.clone().unwrap_or_else(default_since_iso);
 
     let mut notes: Vec<String> = Vec::new();
     let mut scanned: Vec<PathBuf> = Vec::new();
@@ -85,7 +85,15 @@ pub async fn runtime_events(
     let mut truncated = false;
 
     scanned.push(live_path.clone());
-    read_into(&live_path, &p, &since, limit, &mut collected, &mut truncated, &mut notes);
+    read_into(
+        &live_path,
+        &p,
+        &since,
+        limit,
+        &mut collected,
+        &mut truncated,
+        &mut notes,
+    );
 
     if !truncated && needs_prev_scan(&collected, &since) {
         let prev = rotated_path(&live_path, 1);
@@ -136,7 +144,10 @@ fn resolve_log_path(crate_root: &Path, override_path: Option<&str>) -> PathBuf {
                 crate_root.join(pb)
             }
         }
-        None => crate_root.join("target").join("dioxus-mcp").join("events.jsonl"),
+        None => crate_root
+            .join("target")
+            .join("dioxus-mcp")
+            .join("events.jsonl"),
     }
 }
 
@@ -200,39 +211,42 @@ fn read_into(
 }
 
 fn matches_filters(v: &Value, p: &RuntimeEventsParams, since: &str) -> bool {
-    let Some(obj) = v.as_object() else { return false };
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
 
-    if let Some(ts) = obj.get("ts").and_then(|x| x.as_str()) {
-        if ts < since {
+    if let Some(ts) = obj.get("ts").and_then(|x| x.as_str())
+        && ts < since {
             return false;
         }
-    }
-    if let Some(k) = &p.kind {
-        if obj.get("kind").and_then(|x| x.as_str()) != Some(k.as_str()) {
+    if let Some(k) = &p.kind
+        && obj.get("kind").and_then(|x| x.as_str()) != Some(k.as_str()) {
             return false;
         }
-    }
-    if let Some(c) = &p.component {
-        if obj.get("component").and_then(|x| x.as_str()) != Some(c.as_str()) {
+    if let Some(c) = &p.component
+        && obj.get("component").and_then(|x| x.as_str()) != Some(c.as_str()) {
             return false;
         }
-    }
-    if let Some(s) = &p.signal {
-        if obj.get("signal").and_then(|x| x.as_str()) != Some(s.as_str()) {
+    if let Some(s) = &p.signal
+        && obj.get("signal").and_then(|x| x.as_str()) != Some(s.as_str()) {
             return false;
         }
-    }
-    if let Some(sf) = &p.server_fn {
-        if obj.get("name").and_then(|x| x.as_str()) != Some(sf.as_str()) {
+    if let Some(sf) = &p.server_fn
+        && obj.get("name").and_then(|x| x.as_str()) != Some(sf.as_str()) {
             return false;
         }
-    }
     true
 }
 
 fn needs_prev_scan(collected: &[Value], since: &str) -> bool {
-    let Some(first) = collected.first() else { return true };
-    let Some(ts) = first.as_object().and_then(|o| o.get("ts")).and_then(|x| x.as_str()) else {
+    let Some(first) = collected.first() else {
+        return true;
+    };
+    let Some(ts) = first
+        .as_object()
+        .and_then(|o| o.get("ts"))
+        .and_then(|x| x.as_str())
+    else {
         return false;
     };
     // Only chase a rotation if the oldest event we found is still newer than the cutoff
@@ -242,7 +256,10 @@ fn needs_prev_scan(collected: &[Value], since: &str) -> bool {
 
 fn rotated_path(live: &Path, n: usize) -> PathBuf {
     let parent = live.parent().unwrap_or_else(|| Path::new("."));
-    let stem = live.file_stem().and_then(|s| s.to_str()).unwrap_or("events");
+    let stem = live
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("events");
     let ext = live.extension().and_then(|s| s.to_str()).unwrap_or("jsonl");
     parent.join(format!("{stem}.{n}.{ext}"))
 }

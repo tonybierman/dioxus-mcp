@@ -8,7 +8,7 @@ use syn::visit::Visit;
 
 use crate::state::State;
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SignalLintParams {
@@ -94,10 +94,10 @@ impl<'a, 'ast> Visit<'ast> for LoopVisitor<'a> {
         self.loop_depth -= 1;
     }
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
-        if self.loop_depth > 0 {
-            if let syn::Expr::Path(p) = &*e.func {
-                if let Some(seg) = p.path.segments.last() {
-                    if is_hook_name(&seg.ident.to_string()) {
+        if self.loop_depth > 0
+            && let syn::Expr::Path(p) = &*e.func
+                && let Some(seg) = p.path.segments.last()
+                    && is_hook_name(&seg.ident.to_string()) {
                         emit_hook_issue(
                             self.issues,
                             self.file,
@@ -106,9 +106,6 @@ impl<'a, 'ast> Visit<'ast> for LoopVisitor<'a> {
                             seg.ident.span().start().line,
                         );
                     }
-                }
-            }
-        }
         syn::visit::visit_expr_call(self, e);
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
@@ -168,23 +165,19 @@ fn lint_rsx_tokens(
     while i < tokens.len() {
         if let TokenTree::Ident(id) = &tokens[i] {
             let name = id.to_string();
-            if name == "for" || name == "while" || name == "loop" {
-                if let Some(brace_idx) = find_next_brace_group(tokens, i) {
-                    if let TokenTree::Group(g) = &tokens[brace_idx] {
+            if (name == "for" || name == "while" || name == "loop")
+                && let Some(brace_idx) = find_next_brace_group(tokens, i)
+                    && let TokenTree::Group(g) = &tokens[brace_idx] {
                         let inner: Vec<TokenTree> = g.stream().into_iter().collect();
                         lint_rsx_tokens(&inner, true, file, component, issues);
                         i = brace_idx + 1;
                         continue;
                     }
-                }
-            }
-            if in_loop && is_hook_name(&name) {
-                if let Some(TokenTree::Group(g)) = tokens.get(i + 1) {
-                    if g.delimiter() == proc_macro2::Delimiter::Parenthesis {
+            if in_loop && is_hook_name(&name)
+                && let Some(TokenTree::Group(g)) = tokens.get(i + 1)
+                    && g.delimiter() == proc_macro2::Delimiter::Parenthesis {
                         emit_hook_issue(issues, file, component, &name, id.span().start().line);
                     }
-                }
-            }
         }
         if let TokenTree::Group(g) = &tokens[i] {
             let inner: Vec<TokenTree> = g.stream().into_iter().collect();
@@ -196,11 +189,10 @@ fn lint_rsx_tokens(
 
 fn find_next_brace_group(tokens: &[TokenTree], start: usize) -> Option<usize> {
     for (k, tt) in tokens.iter().enumerate().skip(start + 1) {
-        if let TokenTree::Group(g) = tt {
-            if g.delimiter() == proc_macro2::Delimiter::Brace {
+        if let TokenTree::Group(g) = tt
+            && g.delimiter() == proc_macro2::Delimiter::Brace {
                 return Some(k);
             }
-        }
     }
     None
 }

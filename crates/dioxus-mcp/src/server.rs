@@ -180,7 +180,9 @@ impl DioxusMcp {
         }
     }
 
-    #[tool(description = "Generate a new Dioxus component file with optional typed Props, register it in the components mod tree.")]
+    #[tool(
+        description = "Generate a new Dioxus component file with optional typed Props, register it in the components mod tree."
+    )]
     async fn create_component(
         &self,
         Parameters(p): Parameters<tools::scaffold::CreateComponentParams>,
@@ -191,7 +193,9 @@ impl DioxusMcp {
         }
     }
 
-    #[tool(description = "Insert a new variant into the project's #[derive(Routable)] enum, wiring a path to a component.")]
+    #[tool(
+        description = "Insert a new variant into the project's #[derive(Routable)] enum, wiring a path to a component."
+    )]
     async fn create_route(
         &self,
         Parameters(p): Parameters<tools::scaffold::CreateRouteParams>,
@@ -202,7 +206,9 @@ impl DioxusMcp {
         }
     }
 
-    #[tool(description = "Generate a Dioxus 0.7 server function (Axum-backed) with the right feature gating. Refuses if the project isn't fullstack-capable.")]
+    #[tool(
+        description = "Generate a Dioxus 0.7 server function (Axum-backed) with the right feature gating. Refuses if the project isn't fullstack-capable."
+    )]
     async fn create_server_fn(
         &self,
         Parameters(p): Parameters<tools::scaffold::CreateServerFnParams>,
@@ -213,7 +219,9 @@ impl DioxusMcp {
         }
     }
 
-    #[tool(description = "Live-search dioxuslabs.com docs (scoped to the project's Dioxus version) and return ranked snippets. 15-min cache.")]
+    #[tool(
+        description = "Live-search dioxuslabs.com docs (scoped to the project's Dioxus version) and return ranked snippets. 15-min cache."
+    )]
     async fn search_docs(
         &self,
         Parameters(p): Parameters<tools::docs::SearchDocsParams>,
@@ -224,7 +232,9 @@ impl DioxusMcp {
         }
     }
 
-    #[tool(description = "Find official Dioxus examples on GitHub matching a concept (e.g. 'router', 'fullstack', 'use_signal').")]
+    #[tool(
+        description = "Find official Dioxus examples on GitHub matching a concept (e.g. 'router', 'fullstack', 'use_signal')."
+    )]
     async fn find_example(
         &self,
         Parameters(p): Parameters<tools::docs::FindExampleParams>,
@@ -284,12 +294,10 @@ USE THIS when the user asks: \"What's the latency distribution for <fn>?\", \"Wh
 #[tool_handler]
 impl ServerHandler for DioxusMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder().enable_tools().build(),
-        )
-        .with_server_info(Implementation::from_build_env())
-        .with_instructions(
-            "Dioxus project assistant for Dioxus 0.7 codebases. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
+                "Dioxus project assistant for Dioxus 0.7 codebases. \
              \
              Routing rule: when the user's question maps onto one of these tools, \
              CALL THE TOOL instead of asking them to paste output or stack traces. \
@@ -312,8 +320,8 @@ impl ServerHandler for DioxusMcp {
              by the dioxus-mcp-probe crate. If the cwd isn't the Dioxus app, pass \
              `project_root`. If the user references \"the last run\" or a specific log, \
              pass `log_path` and widen `since` (default cutoff is 5 min)."
-                .to_string(),
-        )
+                    .to_string(),
+            )
     }
 }
 

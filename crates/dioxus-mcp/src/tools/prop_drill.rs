@@ -9,7 +9,7 @@ use syn::visit::Visit;
 
 use crate::state::State;
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PropDrillParams {
@@ -39,10 +39,7 @@ pub struct PropDrillReport {
     pub parse_errors: Vec<ParseError>,
 }
 
-pub async fn prop_drill(
-    state: &Arc<State>,
-    p: PropDrillParams,
-) -> Result<PropDrillReport, String> {
+pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDrillReport, String> {
     let crate_root = crate_root(state, p.project_root.as_deref()).await?;
     let src_root = crate_root.join("src");
 
@@ -102,7 +99,9 @@ pub async fn prop_drill(
                 continue;
             }
             let name = f.sig.ident.to_string();
-            let Some(info) = parent_info.get(&name) else { continue };
+            let Some(info) = parent_info.get(&name) else {
+                continue;
+            };
             let props = info.props.clone();
             let props_arg = if via_props_struct.get(&name).copied().unwrap_or(false) {
                 fn_first_arg_name(f)
@@ -174,8 +173,12 @@ impl<'ast> Visit<'ast> for RsxCollector {
 
 fn fn_first_arg_name(f: &syn::ItemFn) -> Option<String> {
     let arg = f.sig.inputs.first()?;
-    let syn::FnArg::Typed(pt) = arg else { return None };
-    let syn::Pat::Ident(pi) = &*pt.pat else { return None };
+    let syn::FnArg::Typed(pt) = arg else {
+        return None;
+    };
+    let syn::Pat::Ident(pi) = &*pt.pat else {
+        return None;
+    };
     Some(pi.ident.to_string())
 }
 
@@ -190,14 +193,12 @@ fn find_invocations(
     while i < tokens.len() {
         if let TokenTree::Ident(id) = &tokens[i] {
             let name = id.to_string();
-            if known.contains(&name) {
-                if let Some(TokenTree::Group(g)) = tokens.get(i + 1) {
-                    if g.delimiter() == proc_macro2::Delimiter::Brace {
+            if known.contains(&name)
+                && let Some(TokenTree::Group(g)) = tokens.get(i + 1)
+                    && g.delimiter() == proc_macro2::Delimiter::Brace {
                         let inner: Vec<TokenTree> = g.stream().into_iter().collect();
                         analyze_invocation(&name, &inner, parent_props, parent_arg, out);
                     }
-                }
-            }
         }
         i += 1;
     }
@@ -223,7 +224,9 @@ fn analyze_invocation(
         }
         // Skip attribute-style fields (e.g. `class: "..."` is fine; we only care about
         // shorthand `prop` and `key: value` forms).
-        let TokenTree::Ident(key) = &field[0] else { continue };
+        let TokenTree::Ident(key) = &field[0] else {
+            continue;
+        };
         let key_s = key.to_string();
         let line = key.span().start().line;
         let value_tokens: Vec<TokenTree> = if field.len() == 1 {
@@ -239,7 +242,8 @@ fn analyze_invocation(
             continue;
         };
 
-        if let Some((parent_prop, via)) = match_passthrough(&value_tokens, parent_props, parent_arg) {
+        if let Some((parent_prop, via)) = match_passthrough(&value_tokens, parent_props, parent_arg)
+        {
             out.push(Passthrough {
                 parent_prop,
                 child: child.to_string(),
@@ -255,14 +259,13 @@ fn split_top_level_commas(tokens: &[TokenTree]) -> Vec<Vec<TokenTree>> {
     let mut parts: Vec<Vec<TokenTree>> = Vec::new();
     let mut current: Vec<TokenTree> = Vec::new();
     for tt in tokens {
-        if let TokenTree::Punct(p) = tt {
-            if p.as_char() == ',' {
+        if let TokenTree::Punct(p) = tt
+            && p.as_char() == ',' {
                 if !current.is_empty() {
                     parts.push(std::mem::take(&mut current));
                 }
                 continue;
             }
-        }
         current.push(tt.clone());
     }
     if !current.is_empty() {
@@ -326,17 +329,14 @@ fn match_base(
         }
         return None;
     }
-    if tokens.len() == 3 {
-        if let (TokenTree::Ident(a), TokenTree::Punct(dot), TokenTree::Ident(b)) =
+    if tokens.len() == 3
+        && let (TokenTree::Ident(a), TokenTree::Punct(dot), TokenTree::Ident(b)) =
             (&tokens[0], &tokens[1], &tokens[2])
-        {
-            if dot.as_char() == '.' && parent_arg == Some(&a.to_string()) {
+            && dot.as_char() == '.' && parent_arg == Some(&a.to_string()) {
                 let prop = b.to_string();
                 if parent_props.contains(&prop) {
                     return Some(prop);
                 }
             }
-        }
-    }
     None
 }

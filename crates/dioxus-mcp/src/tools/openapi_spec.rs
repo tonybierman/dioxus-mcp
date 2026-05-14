@@ -4,15 +4,13 @@ use std::sync::Arc;
 use quote::ToTokens;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::state::State;
-use crate::tools::project_index::{
-    project_index, ProjectIndexParams, ServerFnEntry,
-};
-use crate::tools::route_map::{route_map, RouteEntry, RouteMapParams};
+use crate::tools::project_index::{ProjectIndexParams, ServerFnEntry, project_index};
+use crate::tools::route_map::{RouteEntry, RouteMapParams, route_map};
 use crate::tools::scaffold::{crate_root, has_derive};
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::tighten_type;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -319,10 +317,12 @@ impl TypeResolver {
         for item in &file.items {
             match item {
                 syn::Item::Struct(s) if is_serde_type(&s.attrs) => {
-                    self.defs.insert(s.ident.to_string(), TypeDef::Struct(s.clone()));
+                    self.defs
+                        .insert(s.ident.to_string(), TypeDef::Struct(s.clone()));
                 }
                 syn::Item::Enum(e) if is_serde_type(&e.attrs) => {
-                    self.defs.insert(e.ident.to_string(), TypeDef::Enum(e.clone()));
+                    self.defs
+                        .insert(e.ident.to_string(), TypeDef::Enum(e.clone()));
                 }
                 _ => {}
             }
@@ -362,34 +362,37 @@ impl TypeResolver {
                 let ident = last.ident.to_string();
                 let generics = generic_args(&last.arguments);
 
-                if ident == "Option" {
-                    if let Some(inner) = generics.first() {
+                if ident == "Option"
+                    && let Some(inner) = generics.first() {
                         let (inner_schema, _) = self.resolve_ty(inner, false);
                         if top_level {
                             return (inner_schema, true);
                         }
                         return (nullable(inner_schema), true);
                     }
-                }
 
-                if matches!(ident.as_str(), "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "LinkedList") {
-                    if let Some(inner) = generics.first() {
+                if matches!(
+                    ident.as_str(),
+                    "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "LinkedList"
+                )
+                    && let Some(inner) = generics.first() {
                         let (items, _) = self.resolve_ty(inner, false);
                         return (json!({"type": "array", "items": items}), false);
                     }
-                }
 
-                if matches!(ident.as_str(), "HashMap" | "BTreeMap" | "IndexMap") {
-                    if let Some(v) = generics.get(1) {
+                if matches!(ident.as_str(), "HashMap" | "BTreeMap" | "IndexMap")
+                    && let Some(v) = generics.get(1) {
                         let (inner, _) = self.resolve_ty(v, false);
                         return (
                             json!({"type": "object", "additionalProperties": inner}),
                             false,
                         );
                     }
-                }
 
-                if matches!(ident.as_str(), "Box" | "Rc" | "Arc" | "Cow" | "RefCell" | "Cell" | "Mutex" | "RwLock") {
+                if matches!(
+                    ident.as_str(),
+                    "Box" | "Rc" | "Arc" | "Cow" | "RefCell" | "Cell" | "Mutex" | "RwLock"
+                ) {
                     let inner_idx = if ident == "Cow" { 1 } else { 0 };
                     if let Some(inner) = generics.get(inner_idx) {
                         return self.resolve_ty(inner, top_level);
@@ -549,8 +552,9 @@ impl TypeResolver {
                 let inner = match &v.fields {
                     syn::Fields::Unit => json!({"type": "null"}),
                     syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => {
-                        let ty_str =
-                            tighten_type(&u.unnamed.first().unwrap().ty.to_token_stream().to_string());
+                        let ty_str = tighten_type(
+                            &u.unnamed.first().unwrap().ty.to_token_stream().to_string(),
+                        );
                         self.resolve(&ty_str).0
                     }
                     syn::Fields::Unnamed(u) => {
@@ -577,8 +581,7 @@ impl TypeResolver {
                             if has_serde_skip(&f.attrs) {
                                 continue;
                             }
-                            let raw =
-                                f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                            let raw = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                             let fname = serde_rename(&f.attrs).unwrap_or(raw);
                             let ty_str = tighten_type(&f.ty.to_token_stream().to_string());
                             let (schema, optional) = self.resolve(&ty_str);
@@ -607,15 +610,17 @@ impl TypeResolver {
     }
 
     fn ensure_server_fn_error(&mut self) {
-        self.emitted.entry("ServerFnError".to_string()).or_insert_with(|| {
-            json!({
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string"}
-                },
-                "required": ["message"],
-            })
-        });
+        self.emitted
+            .entry("ServerFnError".to_string())
+            .or_insert_with(|| {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    },
+                    "required": ["message"],
+                })
+            });
     }
 
     fn into_schemas(self) -> Map<String, Value> {
@@ -650,13 +655,12 @@ fn primitive_schema(name: &str) -> Option<Value> {
 
 fn nullable(schema: Value) -> Value {
     // OpenAPI 3.1: prefer {"type": ["X", "null"]} when possible; otherwise oneOf.
-    if let Value::Object(ref obj) = schema {
-        if let Some(Value::String(t)) = obj.get("type") {
+    if let Value::Object(ref obj) = schema
+        && let Some(Value::String(t)) = obj.get("type") {
             let mut next = obj.clone();
             next.insert("type".into(), json!([t, "null"]));
             return Value::Object(next);
         }
-    }
     json!({"oneOf": [schema, {"type": "null"}]})
 }
 
@@ -727,11 +731,10 @@ fn resolver_unresolved(spec: &Value) -> Vec<String> {
     fn walk(v: &Value, out: &mut Vec<String>) {
         match v {
             Value::Object(map) => {
-                if let Some(Value::String(d)) = map.get("description") {
-                    if let Some(rest) = d.strip_prefix("unresolved type: ") {
+                if let Some(Value::String(d)) = map.get("description")
+                    && let Some(rest) = d.strip_prefix("unresolved type: ") {
                         out.push(rest.to_string());
                     }
-                }
                 for (_, child) in map {
                     walk(child, out);
                 }

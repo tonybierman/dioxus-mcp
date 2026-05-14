@@ -35,7 +35,13 @@ pub struct AuditReport {
 }
 
 const PLATFORM_FEATURES: &[&str] = &[
-    "web", "desktop", "mobile", "fullstack", "server", "static-generation", "ssr",
+    "web",
+    "desktop",
+    "mobile",
+    "fullstack",
+    "server",
+    "static-generation",
+    "ssr",
 ];
 
 pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams) -> AuditReport {
@@ -103,7 +109,7 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
         .collect();
 
     if has_fullstack {
-        if !render_targets.iter().any(|f| *f == "web") {
+        if !render_targets.contains(&"web") {
             findings.push(Finding {
                 level: "warning",
                 message: "`fullstack` is enabled but `web` is not — fullstack typically pairs `web` (client) with `server`".into(),
@@ -139,10 +145,10 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
     }
 
     // [features] default = ["web", "server"] footgun
-    if let Ok(text) = std::fs::read_to_string(&manifest) {
-        if let Ok(parsed) = text.parse::<toml::Table>() {
-            if let Some(features) = parsed.get("features").and_then(|v| v.as_table()) {
-                if let Some(default) = features.get("default").and_then(|v| v.as_array()) {
+    if let Ok(text) = std::fs::read_to_string(&manifest)
+        && let Ok(parsed) = text.parse::<toml::Table>()
+            && let Some(features) = parsed.get("features").and_then(|v| v.as_table())
+                && let Some(default) = features.get("default").and_then(|v| v.as_array()) {
                     let names: Vec<String> = default
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -157,9 +163,6 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
                         });
                     }
                 }
-            }
-        }
-    }
 
     let ok = !findings.iter().any(|f| f.level == "error");
     AuditReport {
@@ -197,10 +200,7 @@ pub struct CheckRsxReport {
     pub issues: Vec<RsxIssue>,
 }
 
-pub async fn check_rsx(
-    state: &Arc<State>,
-    p: CheckRsxParams,
-) -> Result<CheckRsxReport, String> {
+pub async fn check_rsx(state: &Arc<State>, p: CheckRsxParams) -> Result<CheckRsxReport, String> {
     let path = resolve_in_project(state, &p.file, p.project_root.as_deref()).await;
     let src = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -256,9 +256,9 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
     // 1) `for ... { ... }` without a `key:` attribute somewhere in the body.
     let mut i = 0;
     while i < tokens.len() {
-        if let TokenTree::Ident(id) = &tokens[i] {
-            if id == "for" {
-                if let Some(brace_idx) = find_matching_brace(tokens, i) {
+        if let TokenTree::Ident(id) = &tokens[i]
+            && id == "for"
+                && let Some(brace_idx) = find_matching_brace(tokens, i) {
                     let body_slice = &tokens[i + 1..=brace_idx];
                     if !slice_has_key_attr(body_slice) {
                         let s = id.span().start();
@@ -269,8 +269,6 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
                         });
                     }
                 }
-            }
-        }
         i += 1;
     }
 
@@ -285,8 +283,10 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
                 if matches!(tokens.get(k), Some(TokenTree::Ident(i)) if i == "move") {
                     k += 1;
                 }
-                let starts_pipe = matches!(tokens.get(k), Some(TokenTree::Punct(q)) if q.as_char() == '|');
-                let ends_pipe = matches!(tokens.get(k + 1), Some(TokenTree::Punct(q)) if q.as_char() == '|');
+                let starts_pipe =
+                    matches!(tokens.get(k), Some(TokenTree::Punct(q)) if q.as_char() == '|');
+                let ends_pipe =
+                    matches!(tokens.get(k + 1), Some(TokenTree::Punct(q)) if q.as_char() == '|');
                 if starts_pipe && ends_pipe {
                     let s = id.span().start();
                     issues.push(RsxIssue {
@@ -322,11 +322,10 @@ fn find_matching_brace(tokens: &[TokenTree], start_after: usize) -> Option<usize
 
 fn slice_has_key_attr(slice: &[TokenTree]) -> bool {
     for w in slice.windows(2) {
-        if let (TokenTree::Ident(id), TokenTree::Punct(p)) = (&w[0], &w[1]) {
-            if id == "key" && p.as_char() == ':' {
+        if let (TokenTree::Ident(id), TokenTree::Punct(p)) = (&w[0], &w[1])
+            && id == "key" && p.as_char() == ':' {
                 return true;
             }
-        }
     }
     for tt in slice {
         if let TokenTree::Group(g) = tt {
@@ -395,11 +394,10 @@ pub async fn explain_signal_graph(
             continue;
         }
         let name = f.sig.ident.to_string();
-        if let Some(filter) = &p.component {
-            if &name != filter {
+        if let Some(filter) = &p.component
+            && &name != filter {
                 continue;
             }
-        }
 
         let nodes = analyze_component_body(&f.block);
         let warnings = lint_signal_graph(&nodes);
@@ -421,7 +419,9 @@ fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
     let mut known_bindings: Vec<String> = Vec::new();
 
     for stmt in &block.stmts {
-        let syn::Stmt::Local(local) = stmt else { continue };
+        let syn::Stmt::Local(local) = stmt else {
+            continue;
+        };
         let Some(init) = &local.init else { continue };
         let kind = classify_init_call(&init.expr);
         let Some(kind) = kind else { continue };
@@ -457,7 +457,9 @@ fn classify_init_call(expr: &syn::Expr) -> Option<&'static str> {
         syn::Expr::Await(a) => return classify_init_call(&a.base),
         _ => return None,
     };
-    let syn::Expr::Path(p) = &*call.func else { return None };
+    let syn::Expr::Path(p) = &*call.func else {
+        return None;
+    };
     let last = p.path.segments.last()?.ident.to_string();
     match last.as_str() {
         "use_signal" => Some("signal"),
@@ -481,7 +483,10 @@ fn collect_reads(expr: &syn::Expr, known: &[String]) -> Vec<String> {
             }
         }
     }
-    let mut r = R { known, hits: Vec::new() };
+    let mut r = R {
+        known,
+        hits: Vec::new(),
+    };
     r.visit_expr(expr);
     r.hits
 }

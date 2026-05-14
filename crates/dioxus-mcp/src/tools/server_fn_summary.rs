@@ -91,8 +91,7 @@ pub async fn server_fn_summary(
     // Two-pass over the file:
     //  * collect start events keyed by call_id
     //  * each end event pulls its start, computes a duration, records it
-    let f = File::open(&live_path)
-        .map_err(|e| format!("open {}: {e}", live_path.display()))?;
+    let f = File::open(&live_path).map_err(|e| format!("open {}: {e}", live_path.display()))?;
     let reader = BufReader::new(f);
 
     // call_id -> (server_fn_name, start_ts_str)
@@ -125,11 +124,10 @@ pub async fn server_fn_summary(
             Some(n) => n.to_string(),
             None => continue,
         };
-        if let Some(only) = &p.server_fn {
-            if &name != only {
+        if let Some(only) = &p.server_fn
+            && &name != only {
                 continue;
             }
-        }
         let phase = obj.get("phase").and_then(|x| x.as_str()).unwrap_or("");
         let call_id = obj
             .get("call_id")
@@ -144,14 +142,11 @@ pub async fn server_fn_summary(
                 }
             }
             "end" => {
-                let duration_us = obj
-                    .get("duration_us")
-                    .and_then(|x| x.as_u64())
-                    .or_else(|| {
-                        // Fall back to computing duration from timestamps.
-                        let start = starts.get(&call_id).map(|(_, t)| t.as_str())?;
-                        duration_from_iso(start, ts)
-                    });
+                let duration_us = obj.get("duration_us").and_then(|x| x.as_u64()).or_else(|| {
+                    // Fall back to computing duration from timestamps.
+                    let start = starts.get(&call_id).map(|(_, t)| t.as_str())?;
+                    duration_from_iso(start, ts)
+                });
                 let ok = obj.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
                 starts.remove(&call_id);
                 if let Some(d) = duration_us {
@@ -187,8 +182,7 @@ pub async fn server_fn_summary(
     let mut summaries: Vec<ServerFnSummary> = names
         .into_keys()
         .map(|name| {
-            let durations: Vec<(u64, bool)> =
-                completed.get(&name).cloned().unwrap_or_default();
+            let durations: Vec<(u64, bool)> = completed.get(&name).cloned().unwrap_or_default();
             let pending = pending_by_name.get(&name).copied().unwrap_or(0);
             ServerFnSummary {
                 name,
@@ -198,7 +192,12 @@ pub async fn server_fn_summary(
         })
         .collect();
 
-    summaries.sort_by(|a, b| b.completed.count.cmp(&a.completed.count).then_with(|| a.name.cmp(&b.name)));
+    summaries.sort_by(|a, b| {
+        b.completed
+            .count
+            .cmp(&a.completed.count)
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
     Ok(ServerFnSummaryReport {
         summaries,
@@ -249,8 +248,10 @@ fn default_since_iso() -> String {
 }
 
 fn duration_from_iso(start: &str, end: &str) -> Option<u64> {
-    let s = time::OffsetDateTime::parse(start, &time::format_description::well_known::Rfc3339).ok()?;
-    let e = time::OffsetDateTime::parse(end, &time::format_description::well_known::Rfc3339).ok()?;
+    let s =
+        time::OffsetDateTime::parse(start, &time::format_description::well_known::Rfc3339).ok()?;
+    let e =
+        time::OffsetDateTime::parse(end, &time::format_description::well_known::Rfc3339).ok()?;
     let dur = e - s;
     if dur.is_negative() {
         return None;

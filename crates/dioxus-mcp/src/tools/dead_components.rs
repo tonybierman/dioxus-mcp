@@ -9,7 +9,7 @@ use syn::visit::Visit;
 
 use crate::state::State;
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DeadComponentsParams {
@@ -62,11 +62,7 @@ pub async fn dead_components(
     .await
     {
         Ok(rm) => {
-            let mut s: HashSet<String> = rm
-                .routes
-                .iter()
-                .map(|r| r.component.clone())
-                .collect();
+            let mut s: HashSet<String> = rm.routes.iter().map(|r| r.component.clone()).collect();
             for r in &rm.routes {
                 for l in &r.layouts {
                     s.insert(l.clone());
@@ -84,7 +80,8 @@ pub async fn dead_components(
         roots.extend(extra);
     }
 
-    let component_names: HashSet<String> = index.components.iter().map(|c| c.name.clone()).collect();
+    let component_names: HashSet<String> =
+        index.components.iter().map(|c| c.name.clone()).collect();
 
     // Walk src, count invocations of each known component inside rsx! blocks.
     let mut used: HashSet<String> = HashSet::new();
@@ -143,23 +140,17 @@ impl<'a, 'ast> Visit<'ast> for RsxComponentVisitor<'a> {
     }
 }
 
-fn scan_for_components(
-    tokens: &[TokenTree],
-    known: &HashSet<String>,
-    used: &mut HashSet<String>,
-) {
+fn scan_for_components(tokens: &[TokenTree], known: &HashSet<String>, used: &mut HashSet<String>) {
     let mut i = 0;
     while i < tokens.len() {
         if let TokenTree::Ident(id) = &tokens[i] {
             let name = id.to_string();
             // Component invocation: `Ident {` (or `path::Ident {`).
-            if known.contains(&name) {
-                if let Some(TokenTree::Group(g)) = tokens.get(i + 1) {
-                    if g.delimiter() == proc_macro2::Delimiter::Brace {
+            if known.contains(&name)
+                && let Some(TokenTree::Group(g)) = tokens.get(i + 1)
+                    && g.delimiter() == proc_macro2::Delimiter::Brace {
                         used.insert(name);
                     }
-                }
-            }
         }
         i += 1;
     }

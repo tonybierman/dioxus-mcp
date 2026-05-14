@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PropsLintParams {
@@ -29,10 +29,7 @@ pub struct PropsLintReport {
     pub parse_errors: Vec<ParseError>,
 }
 
-pub async fn props_lint(
-    state: &Arc<State>,
-    p: PropsLintParams,
-) -> Result<PropsLintReport, String> {
+pub async fn props_lint(state: &Arc<State>, p: PropsLintParams) -> Result<PropsLintReport, String> {
     let crate_root = crate_root(state, p.project_root.as_deref()).await?;
     let src_root = crate_root.join("src");
     let files = walk_rs_files(&src_root);
@@ -58,9 +55,7 @@ pub async fn props_lint(
                     file: sf.path.clone(),
                     line,
                     struct_name: s.ident.to_string(),
-                    fix: Some(format!(
-                        "add `PartialEq` to the derive list, e.g. `#[derive(Props, PartialEq, Clone)]`"
-                    )),
+                    fix: Some("add `PartialEq` to the derive list, e.g. `#[derive(Props, PartialEq, Clone)]`".to_string()),
                 });
             }
         }

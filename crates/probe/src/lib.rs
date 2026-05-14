@@ -17,11 +17,13 @@
 //! In release builds the probe is a no-op unless the `force` cargo feature
 //! is enabled, so it's safe to leave the `install()` call in `main`.
 
+#![allow(clippy::needless_doctest_main)]
+
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -235,25 +237,21 @@ fn enqueue(sender: &SyncSender<LogRecord>, dropped: &Arc<AtomicU64>, record: Log
 
 // ---------- writer thread ----------
 
-fn writer_loop(
-    receiver: Receiver<LogRecord>,
-    config: ProbeConfig,
-    shutdown: Arc<AtomicBool>,
-) {
+fn writer_loop(receiver: Receiver<LogRecord>, config: ProbeConfig, shutdown: Arc<AtomicBool>) {
     let mut writer = open_writer(&config.log_path);
     let mut bytes_in_file = current_size(&config.log_path);
     let mut last_flush = std::time::Instant::now();
 
-    let write_record = |writer: &mut Option<BufWriter<File>>,
-                        bytes_in_file: &mut u64,
-                        record: LogRecord| {
-        let Ok(line) = serde_json::to_string(&record) else { return };
-        if let Some(w) = writer.as_mut() {
-            if writeln!(w, "{line}").is_ok() {
-                *bytes_in_file += (line.len() + 1) as u64;
-            }
-        }
-    };
+    let write_record =
+        |writer: &mut Option<BufWriter<File>>, bytes_in_file: &mut u64, record: LogRecord| {
+            let Ok(line) = serde_json::to_string(&record) else {
+                return;
+            };
+            if let Some(w) = writer.as_mut()
+                && writeln!(w, "{line}").is_ok() {
+                    *bytes_in_file += (line.len() + 1) as u64;
+                }
+        };
 
     loop {
         let msg = receiver.recv_timeout(FLUSH_INTERVAL);
@@ -338,7 +336,10 @@ fn rotate(config: &ProbeConfig) {
 fn rotated_path(live: &Path, n: usize) -> PathBuf {
     // events.jsonl -> events.{n}.jsonl
     let parent = live.parent().unwrap_or_else(|| Path::new("."));
-    let stem = live.file_stem().and_then(|s| s.to_str()).unwrap_or("events");
+    let stem = live
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("events");
     let ext = live.extension().and_then(|s| s.to_str()).unwrap_or("jsonl");
     parent.join(format!("{stem}.{n}.{ext}"))
 }
@@ -372,7 +373,7 @@ fn install_panic_hook(sender: SyncSender<LogRecord>, dropped: Arc<AtomicU64>) {
             fields.insert("line".into(), Value::Number(loc.line().into()));
         }
         if let Ok(s) = sender.lock() {
-            enqueue(&*s, &dropped, make_record("panic", fields));
+            enqueue(&s, &dropped, make_record("panic", fields));
         }
         prev(info);
     }));
@@ -388,7 +389,9 @@ struct ProbeLayer {
 
 impl ProbeLayer {
     fn target_matches(&self, target: &str) -> bool {
-        self.targets.iter().any(|t| target == t || target.starts_with(&format!("{t}::")))
+        self.targets
+            .iter()
+            .any(|t| target == t || target.starts_with(&format!("{t}::")))
     }
 }
 
@@ -404,7 +407,10 @@ where
         attrs.record(&mut visitor);
         let kind = classify(attrs.metadata().target(), attrs.metadata().name());
         let mut fields = visitor.fields;
-        fields.insert("span".into(), Value::String(attrs.metadata().name().to_string()));
+        fields.insert(
+            "span".into(),
+            Value::String(attrs.metadata().name().to_string()),
+        );
         enqueue(&self.sender, &self.dropped, make_record(&kind, fields));
     }
 
@@ -415,7 +421,11 @@ where
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
         let kind = classify(event.metadata().target(), event.metadata().name());
-        enqueue(&self.sender, &self.dropped, make_record(&kind, visitor.fields));
+        enqueue(
+            &self.sender,
+            &self.dropped,
+            make_record(&kind, visitor.fields),
+        );
     }
 }
 
@@ -434,13 +444,19 @@ fn classify(target: &str, name: &str) -> String {
         }
         return "signal".into();
     }
-    if lower_target.contains("fullstack") || lower_name.contains("server_fn") || lower_name.contains("server fn") {
+    if lower_target.contains("fullstack")
+        || lower_name.contains("server_fn")
+        || lower_name.contains("server fn")
+    {
         return "server_fn".into();
     }
     if lower_target.contains("router") {
         return "route".into();
     }
-    if lower_name.contains("render") || lower_name.contains("rebuild") || lower_target.contains("core") {
+    if lower_name.contains("render")
+        || lower_name.contains("rebuild")
+        || lower_target.contains("core")
+    {
         return "render".into();
     }
     "event".into()
@@ -453,13 +469,16 @@ struct FieldVisitor {
 
 impl Visit for FieldVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.fields.insert(field.name().into(), Value::String(value.to_string()));
+        self.fields
+            .insert(field.name().into(), Value::String(value.to_string()));
     }
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.insert(field.name().into(), Value::Number(value.into()));
+        self.fields
+            .insert(field.name().into(), Value::Number(value.into()));
     }
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.insert(field.name().into(), Value::Number(value.into()));
+        self.fields
+            .insert(field.name().into(), Value::Number(value.into()));
     }
     fn record_f64(&mut self, field: &Field, value: f64) {
         if let Some(n) = serde_json::Number::from_f64(value) {
@@ -524,7 +543,11 @@ mod tests {
         enqueue(&tx, &dropped, make_record("render", Default::default()));
         enqueue(&tx, &dropped, make_record("render", Default::default()));
         // First enqueue fits the buffer; the next two get dropped.
-        assert!(dropped.load(Ordering::Relaxed) >= 2, "expected drops, got {}", dropped.load(Ordering::Relaxed));
+        assert!(
+            dropped.load(Ordering::Relaxed) >= 2,
+            "expected drops, got {}",
+            dropped.load(Ordering::Relaxed)
+        );
         drop(rx);
     }
 

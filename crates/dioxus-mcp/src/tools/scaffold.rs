@@ -169,8 +169,9 @@ pub async fn create_route(
     let crate_root = crate_root(state, p.project_root.as_deref()).await?;
     let router_file = match p.router_file.as_deref() {
         Some(rf) => crate_root.join(rf),
-        None => find_routable(&crate_root)
-            .ok_or_else(|| "could not find a Routable enum in src/; pass router_file".to_string())?,
+        None => find_routable(&crate_root).ok_or_else(|| {
+            "could not find a Routable enum in src/; pass router_file".to_string()
+        })?,
     };
 
     let src = std::fs::read_to_string(&router_file)
@@ -181,16 +182,12 @@ pub async fn create_route(
         .items
         .iter()
         .find_map(|it| match it {
-            syn::Item::Enum(e)
-                if e.attrs.iter().any(|a| has_derive(a, "Routable")) =>
-            {
+            syn::Item::Enum(e) if e.attrs.iter().any(|a| has_derive(a, "Routable")) => {
                 Some(e.ident.to_string())
             }
             _ => None,
         })
-        .ok_or_else(|| {
-            format!("no `#[derive(Routable)]` enum in {}", router_file.display())
-        })?;
+        .ok_or_else(|| format!("no `#[derive(Routable)]` enum in {}", router_file.display()))?;
 
     let variant_name = p.component.to_pascal_case();
     let variant = format!(
@@ -236,7 +233,10 @@ pub async fn create_route(
         files_created: vec![],
         files_modified: vec![router_file.clone()],
         next_steps: vec![
-            format!("ensure `{}` exists and is in scope at the routable enum", variant_name),
+            format!(
+                "ensure `{}` exists and is in scope at the routable enum",
+                variant_name
+            ),
             "consider running `cargo fmt` on the router file".into(),
         ],
     })
@@ -259,11 +259,10 @@ pub(crate) fn has_derive(attr: &syn::Attribute, target: &str) -> bool {
 pub(crate) fn find_routable(crate_root: &Path) -> Option<PathBuf> {
     for cand in &["src/router.rs", "src/route.rs", "src/main.rs", "src/lib.rs"] {
         let p = crate_root.join(cand);
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            if s.contains("Routable") {
+        if let Ok(s) = std::fs::read_to_string(&p)
+            && s.contains("Routable") {
                 return Some(p);
             }
-        }
     }
     // fall back: walk src/
     for entry in walkdir::WalkDir::new(crate_root.join("src"))
@@ -273,11 +272,10 @@ pub(crate) fn find_routable(crate_root: &Path) -> Option<PathBuf> {
         if entry.path().extension().and_then(|x| x.to_str()) != Some("rs") {
             continue;
         }
-        if let Ok(s) = std::fs::read_to_string(entry.path()) {
-            if s.contains("#[derive(Routable") || s.contains("derive(Routable") {
+        if let Ok(s) = std::fs::read_to_string(entry.path())
+            && (s.contains("#[derive(Routable") || s.contains("derive(Routable")) {
                 return Some(entry.path().to_path_buf());
             }
-        }
     }
     None
 }
@@ -383,7 +381,10 @@ pub async fn create_server_fn(
     })
 }
 
-pub(crate) async fn crate_root(state: &Arc<State>, project_root: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) async fn crate_root(
+    state: &Arc<State>,
+    project_root: Option<&str>,
+) -> Result<PathBuf, String> {
     match project_root {
         Some(root) => {
             let info = crate::project::ProjectInfo::detect(std::path::Path::new(root));

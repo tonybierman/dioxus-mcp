@@ -8,7 +8,7 @@ use syn::visit::Visit;
 
 use crate::state::State;
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{collect_parse_errors, walk_rs_files, ParseError};
+use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ServerFnCallGraphParams {
@@ -83,11 +83,13 @@ pub async fn server_fn_call_graph(
     let mut orphans: Vec<OrphanServerFn> = server_fn_names
         .iter()
         .filter(|n| !callees_seen.contains(*n))
-        .filter_map(|n| definitions.get(n).map(|(f, l)| OrphanServerFn {
-            name: n.clone(),
-            file: f.clone(),
-            line: *l,
-        }))
+        .filter_map(|n| {
+            definitions.get(n).map(|(f, l)| OrphanServerFn {
+                name: n.clone(),
+                file: f.clone(),
+                line: *l,
+            })
+        })
         .collect();
     orphans.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -134,8 +136,8 @@ impl<'a, 'ast> Visit<'ast> for CallVisitor<'a> {
         self.stack.pop();
     }
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(p) = &*e.func {
-            if let Some(seg) = p.path.segments.last() {
+        if let syn::Expr::Path(p) = &*e.func
+            && let Some(seg) = p.path.segments.last() {
                 let name = seg.ident.to_string();
                 if self.known.contains(&name) {
                     let line = seg.ident.span().start().line;
@@ -151,7 +153,6 @@ impl<'a, 'ast> Visit<'ast> for CallVisitor<'a> {
                     });
                 }
             }
-        }
         syn::visit::visit_expr_call(self, e);
     }
 }
