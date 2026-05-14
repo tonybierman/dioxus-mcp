@@ -1,5 +1,5 @@
 [workspace]
-members = ["probe"]
+members = ["probe", "examples/smoke-app"]
 
 [package]
 name = "dioxus-mcp"

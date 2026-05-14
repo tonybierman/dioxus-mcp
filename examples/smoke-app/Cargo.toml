@@ -1,0 +1,11 @@
+[package]
+name = "dioxus-mcp-probe-smoke"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "End-to-end smoke test app for dioxus-mcp-probe: runs a real headless Dioxus VirtualDom, drives signal writes, and panics in a child thread so the probe can capture each event kind."
+
+[dependencies]
+dioxus = { version = "0.7", default-features = false, features = ["macro", "html", "signals", "hooks"] }
+dioxus-mcp-probe = { path = "../../probe" }
+tracing = "0.1"
