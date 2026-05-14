@@ -374,6 +374,14 @@ last 5 minutes), `component?`, `signal?`, `server_fn?`, `limit?`
 
 **Demonstrated in:** [`tests/fixtures/runtime_events/events.jsonl`](tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
 
+**Try it end-to-end:** [`probe/examples/smoke.rs`](probe/examples/smoke.rs) installs the probe with a custom log path, emits a Dioxus-shaped span for each event kind, and panics in a child thread.
+
+```
+cargo run --example smoke -p dioxus-mcp-probe -- /tmp/probe-smoke.jsonl
+```
+
+then call `runtime_events` with `{"log_path": "/tmp/probe-smoke.jsonl"}` to see the seven captured events come back through the MCP tool. Useful when validating a fresh checkout of the probe without standing up a real Dioxus app.
+
 ---
 
 ## Docs
