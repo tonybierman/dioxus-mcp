@@ -92,7 +92,14 @@ default last 5 minutes), `component?`, `signal?`, `server_fn?`, `limit?`
 }
 ```
 
-**Ask Claude:** "Show me the last few renders of the Home component."
+**Ask Claude — phrasings that route to this tool:**
+- "Show me the last few renders of the Home component."
+- "Which signals wrote in the past minute?"
+- "List the server-fn calls for `fetch_user` today."
+- "Was there a panic? Where did it happen?"
+- "Show every signal write to `count`."
+- "What renders has UserPage done since I started the app?"
+- "Tail the runtime log — give me the latest 50 events of any kind."
 
 **Demonstrated in:** [`tests/fixtures/runtime_events/events.jsonl`](tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
 
@@ -124,7 +131,14 @@ to one name), `log_path?` (override), `project_root?`.
 {"name": "server_fn_summary", "arguments": {}}
 ```
 
-**Ask Claude:** "What's the latency distribution for fetch_user this hour?"
+**Ask Claude — phrasings that route to this tool:**
+- "What's the latency distribution for `fetch_user` this hour?"
+- "Which server functions are slowest?"
+- "Are any server fns erroring?"
+- "How many `save_post` calls have run, and how many failed?"
+- "What's still pending? Anything stuck mid-flight?"
+- "Give me a summary of server-fn activity over the last 5 minutes."
+- "Show p95 latency for every server fn."
 
 **Response shape:**
 ```json
