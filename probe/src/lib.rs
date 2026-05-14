@@ -20,7 +20,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -95,6 +95,7 @@ pub struct ProbeHandle {
     pub(crate) log_path: PathBuf,
     pub(crate) sender: Option<SyncSender<LogRecord>>,
     pub(crate) thread: Option<thread::JoinHandle<()>>,
+    pub(crate) shutdown: Arc<AtomicBool>,
 }
 
 impl ProbeHandle {
@@ -111,6 +112,10 @@ impl ProbeHandle {
 
 impl Drop for ProbeHandle {
     fn drop(&mut self) {
+        // Signal shutdown before dropping our sender. The panic hook holds
+        // a separate sender clone for the process lifetime, so we can't rely
+        // on channel-disconnect to wake the writer.
+        self.shutdown.store(true, Ordering::Relaxed);
         drop(self.sender.take());
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -133,6 +138,7 @@ pub fn install_with(config: ProbeConfig) -> ProbeHandle {
             log_path: config.log_path,
             sender: None,
             thread: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
     }
     install_active(config)
@@ -155,11 +161,13 @@ fn install_active(config: ProbeConfig) -> ProbeHandle {
 
     let (sender, receiver) = sync_channel::<LogRecord>(config.queue_capacity);
     let dropped = Arc::new(AtomicU64::new(0));
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     let writer_cfg = config.clone();
+    let writer_shutdown = shutdown.clone();
     let thread = thread::Builder::new()
         .name("dioxus-mcp-probe-writer".into())
-        .spawn(move || writer_loop(receiver, writer_cfg))
+        .spawn(move || writer_loop(receiver, writer_cfg, writer_shutdown))
         .expect("spawn probe writer thread");
 
     install_panic_hook(sender.clone(), dropped.clone());
@@ -186,6 +194,7 @@ fn install_active(config: ProbeConfig) -> ProbeHandle {
         log_path: config.log_path,
         sender: Some(sender),
         thread: Some(thread),
+        shutdown,
     }
 }
 
@@ -226,30 +235,39 @@ fn enqueue(sender: &SyncSender<LogRecord>, dropped: &Arc<AtomicU64>, record: Log
 
 // ---------- writer thread ----------
 
-fn writer_loop(receiver: Receiver<LogRecord>, config: ProbeConfig) {
+fn writer_loop(
+    receiver: Receiver<LogRecord>,
+    config: ProbeConfig,
+    shutdown: Arc<AtomicBool>,
+) {
     let mut writer = open_writer(&config.log_path);
     let mut bytes_in_file = current_size(&config.log_path);
     let mut last_flush = std::time::Instant::now();
+
+    let write_record = |writer: &mut Option<BufWriter<File>>,
+                        bytes_in_file: &mut u64,
+                        record: LogRecord| {
+        let Ok(line) = serde_json::to_string(&record) else { return };
+        if let Some(w) = writer.as_mut() {
+            if writeln!(w, "{line}").is_ok() {
+                *bytes_in_file += (line.len() + 1) as u64;
+            }
+        }
+    };
 
     loop {
         let msg = receiver.recv_timeout(FLUSH_INTERVAL);
         match msg {
             Ok(record) => {
-                let line = match serde_json::to_string(&record) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                if let Some(w) = writer.as_mut() {
-                    if writeln!(w, "{line}").is_ok() {
-                        bytes_in_file += (line.len() + 1) as u64;
-                        if bytes_in_file >= config.rotate_bytes {
-                            let _ = w.flush();
-                            drop(writer.take());
-                            rotate(&config);
-                            writer = open_writer(&config.log_path);
-                            bytes_in_file = 0;
-                        }
+                write_record(&mut writer, &mut bytes_in_file, record);
+                if bytes_in_file >= config.rotate_bytes {
+                    if let Some(w) = writer.as_mut() {
+                        let _ = w.flush();
                     }
+                    drop(writer.take());
+                    rotate(&config);
+                    writer = open_writer(&config.log_path);
+                    bytes_in_file = 0;
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -260,6 +278,15 @@ fn writer_loop(receiver: Receiver<LogRecord>, config: ProbeConfig) {
                 let _ = w.flush();
             }
             last_flush = std::time::Instant::now();
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            // Drain anything already buffered before exiting. The panic hook
+            // keeps a sender clone alive for the process lifetime, so we
+            // can't wait for channel-disconnect.
+            while let Ok(record) = receiver.try_recv() {
+                write_record(&mut writer, &mut bytes_in_file, record);
+            }
+            break;
         }
     }
 
@@ -378,7 +405,6 @@ where
         let kind = classify(attrs.metadata().target(), attrs.metadata().name());
         let mut fields = visitor.fields;
         fields.insert("span".into(), Value::String(attrs.metadata().name().to_string()));
-        fields.insert("phase".into(), Value::String("start".into()));
         enqueue(&self.sender, &self.dropped, make_record(&kind, fields));
     }
 
@@ -515,7 +541,8 @@ mod tests {
         };
         let (tx, rx) = sync_channel::<LogRecord>(64);
         let writer_cfg = cfg.clone();
-        let t = thread::spawn(move || writer_loop(rx, writer_cfg));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let t = thread::spawn(move || writer_loop(rx, writer_cfg, shutdown));
         let dropped = Arc::new(AtomicU64::new(0));
         for i in 0..50 {
             let mut fields = serde_json::Map::new();
@@ -555,7 +582,8 @@ mod tests {
         };
         let (tx, rx) = sync_channel::<LogRecord>(8);
         let writer_cfg = cfg.clone();
-        let t = thread::spawn(move || writer_loop(rx, writer_cfg));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let t = thread::spawn(move || writer_loop(rx, writer_cfg, shutdown));
         let dropped = Arc::new(AtomicU64::new(0));
         let mut fields = serde_json::Map::new();
         fields.insert("component".into(), Value::String("Home".into()));

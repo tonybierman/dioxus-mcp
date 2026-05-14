@@ -50,9 +50,16 @@ pub async fn runtime_events(
     state: &Arc<State>,
     p: RuntimeEventsParams,
 ) -> Result<RuntimeEventsReport, String> {
-    let crate_root = crate_root(state, p.project_root.as_deref()).await?;
-
-    let live_path = resolve_log_path(&crate_root, p.log_path.as_deref());
+    // An absolute log_path lets callers query any file without forcing
+    // crate-root resolution (useful when the dioxus-mcp server isn't
+    // running inside the Dioxus project).
+    let live_path = match p.log_path.as_deref() {
+        Some(path) if Path::new(path).is_absolute() => PathBuf::from(path),
+        _ => {
+            let crate_root = crate_root(state, p.project_root.as_deref()).await?;
+            resolve_log_path(&crate_root, p.log_path.as_deref())
+        }
+    };
     let limit = p.limit.unwrap_or(DEFAULT_LIMIT).min(HARD_CAP);
     let since = p.since.clone().unwrap_or_else(|| default_since_iso());
 
