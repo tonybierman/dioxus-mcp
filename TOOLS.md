@@ -347,40 +347,11 @@ errors.
 
 ## Runtime
 
-### `runtime_events`
-**Purpose:** Tail the JSON-lines event log written by the
-`dioxus-mcp-probe` crate and return events that match a filter
-(`kind`, `since`, `component`, `signal`, `server_fn`). When the log
-doesn't exist (the probe was never installed or the app hasn't been run
-yet) the tool returns an empty `events` array and a clear note rather
-than erroring. Up to one rotated file (`events.1.jsonl`) is read when
-the live file is newer than the `since` cutoff.
+Runtime tools read events captured by the `dioxus-mcp-probe` crate while
+the app is running. They live in [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md):
 
-**Args:** `kind?` (`render` | `signal_write` | `signal_read` |
-`server_fn` | `route` | `panic` | `event`), `since?` (RFC 3339, default
-last 5 minutes), `component?`, `signal?`, `server_fn?`, `limit?`
-(default 200, hard cap 2000), `log_path?` (override; default
-`target/dioxus-mcp/events.jsonl` under the crate root), `project_root?`.
-
-**Example call:**
-```json
-{
-  "name": "runtime_events",
-  "arguments": {"kind": "render", "component": "Home", "since": "2026-05-14T18:30:00Z"}
-}
-```
-
-**Ask Claude:** "Show me the last few renders of the Home component."
-
-**Demonstrated in:** [`tests/fixtures/runtime_events/events.jsonl`](tests/fixtures/runtime_events/events.jsonl) — hand-crafted log with one of every event kind; the `tool_runtime_events` test in `tests/integration.rs` exercises kind/component/server_fn/limit filtering and the missing-log empty-list path.
-
-**Try it end-to-end:** [`probe/examples/smoke.rs`](probe/examples/smoke.rs) installs the probe with a custom log path, emits a Dioxus-shaped span for each event kind, and panics in a child thread.
-
-```
-cargo run --example smoke -p dioxus-mcp-probe -- /tmp/probe-smoke.jsonl
-```
-
-then call `runtime_events` with `{"log_path": "/tmp/probe-smoke.jsonl"}` to see the seven captured events come back through the MCP tool. Useful when validating a fresh checkout of the probe without standing up a real Dioxus app.
+- `runtime_events` — filter the raw JSONL event log.
+- `server_fn_summary` — per-server-fn latency stats (count, ok/err, p50/p95).
 
 ---
 

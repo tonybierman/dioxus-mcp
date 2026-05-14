@@ -542,6 +542,63 @@ fn tool_runtime_events() {
 }
 
 #[test]
+fn tool_server_fn_summary() {
+    let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/server_fn_summary/events.jsonl");
+    let log_str = log.to_string_lossy().to_string();
+    let since = "1970-01-01T00:00:00Z";
+
+    let r = call_tool(
+        "server_fn_summary",
+        json!({"log_path": log_str, "since": since}),
+    );
+    let summaries = r["summaries"].as_array().unwrap();
+
+    // Most-called first: fetch_user (10) then save_post (2).
+    assert_eq!(summaries[0]["name"], "fetch_user");
+    assert_eq!(summaries[1]["name"], "save_post");
+
+    let fu = &summaries[0];
+    assert_eq!(fu["completed"]["count"], 10);
+    assert_eq!(fu["completed"]["ok"], 10);
+    assert_eq!(fu["completed"]["err"], 0);
+    assert_eq!(fu["completed"]["min_us"], 100);
+    assert_eq!(fu["completed"]["max_us"], 1000);
+    // Linear samples 100..1000 step 100. Nearest-rank: p50 -> index round(0.50*9)=5 -> 600.
+    assert_eq!(fu["completed"]["p50_us"], 600);
+    // p95 -> index round(0.95*9)=9 -> 1000.
+    assert_eq!(fu["completed"]["p95_us"], 1000);
+    // One start without an end remains pending.
+    assert_eq!(fu["pending"], 1);
+
+    let sp = &summaries[1];
+    assert_eq!(sp["completed"]["count"], 2);
+    assert_eq!(sp["completed"]["ok"], 1);
+    assert_eq!(sp["completed"]["err"], 1);
+
+    // Filter to one server_fn -> single-row report.
+    let only = call_tool(
+        "server_fn_summary",
+        json!({"log_path": log_str, "since": since, "server_fn": "save_post"}),
+    );
+    let only_rows = only["summaries"].as_array().unwrap();
+    assert_eq!(only_rows.len(), 1);
+    assert_eq!(only_rows[0]["name"], "save_post");
+
+    // Missing-log path -> empty list + clear note, not an error.
+    let missing = call_tool(
+        "server_fn_summary",
+        json!({"log_path": "/nonexistent/path/events.jsonl"}),
+    );
+    assert!(missing["summaries"].as_array().unwrap().is_empty());
+    assert!(missing["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n.as_str().unwrap_or("").contains("install dioxus-mcp-probe")));
+}
+
+#[test]
 #[ignore = "requires network access to dioxuslabs.com"]
 fn tool_search_docs() {
     let r = call_tool("search_docs", json!({"query": "use_resource"}));

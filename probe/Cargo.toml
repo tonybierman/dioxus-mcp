@@ -1,6 +1,6 @@
 [package]
 name = "dioxus-mcp-probe"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Runtime telemetry probe for Dioxus apps: captures renders, signal writes, server-fn timings, and panics into a JSONL log that dioxus-mcp's runtime_events tool reads."
 license = "MIT OR Apache-2.0"

@@ -10,8 +10,11 @@ writes, server-fn timings, panics) captured while the app is running.
 
 ## Tools
 
-See [TOOLS.md](TOOLS.md) for each tool's args, a JSON call example, and a
-natural-language prompt that Claude Code will route to it.
+See [TOOLS.md](TOOLS.md) for each static tool's args, a JSON call example,
+and a natural-language prompt that Claude Code will route to it.
+
+Runtime tools (anything that reads the probe's event log) are documented
+separately in [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md).
 
 ### Project introspection
 - **`project_tour`** — one-shot overview: feature audit + routes + index +
@@ -57,10 +60,14 @@ natural-language prompt that Claude Code will route to it.
   refuses if the project isn't fullstack-capable.
 
 ### Runtime
+See [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md) for the full event schema and tool docs.
+
 - **`runtime_events`** — filter the JSON-lines event log written by the
   `dioxus-mcp-probe` crate (renders, signal writes, server-fn timings,
   panics). Filters: `kind`, `since`, `component`, `signal`, `server_fn`,
   `limit`.
+- **`server_fn_summary`** — derived view: per-server-fn count, ok/err,
+  and min/p50/p95/max latency over a `since` window.
 
 ### Docs
 - **`search_docs`** — live-search dioxuslabs.com, scoped to the project's
@@ -109,7 +116,7 @@ that file.
 ```toml
 # in your Dioxus app's Cargo.toml
 [dev-dependencies]
-dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", tag = "probe-v0.1.0" }
+dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", tag = "probe-v0.1.1" }
 ```
 
 ```rust
@@ -127,7 +134,7 @@ at 10 MiB.
 ## Tests
 
 ```
-cargo test --workspace        # 17 main tests + 4 probe unit tests
+cargo test --workspace        # 18 main tests + 4 probe unit tests
 cargo test -- --ignored       # also runs live-HTTP search_docs / find_example
 ```
 

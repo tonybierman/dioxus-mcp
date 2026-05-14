@@ -260,6 +260,19 @@ impl DioxusMcp {
             Err(e) => Err(err(e)),
         }
     }
+
+    #[tool(
+        description = "Per-server-fn latency summary derived from the dioxus-mcp-probe log. Pairs phase=start with phase=end by call_id and returns count, ok/err, and min/p50/p95/max latency in microseconds for each #[server] fn called in the window. Filters: since (RFC 3339, default last 5 min), server_fn (one name only), log_path (override)."
+    )]
+    async fn server_fn_summary(
+        &self,
+        Parameters(p): Parameters<tools::server_fn_summary::ServerFnSummaryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::server_fn_summary::server_fn_summary(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -274,7 +287,8 @@ impl ServerHandler for DioxusMcp {
              create_server_fn, check_rsx, audit_feature_flags, explain_signal_graph, \
              route_map, project_index, server_fn_call_graph, asset_audit, \
              dead_components, prop_drill, signal_lint, props_lint, project_tour, \
-             search_docs, find_example, openapi_spec, runtime_events."
+             search_docs, find_example, openapi_spec, runtime_events, \
+             server_fn_summary."
                 .to_string(),
         )
     }
