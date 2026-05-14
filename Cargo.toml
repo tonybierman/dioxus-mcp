@@ -3,6 +3,8 @@ name = "dioxus-mcp"
 version = "0.2.0"
 edition = "2024"
 description = "MCP server giving LLM clients deep static understanding of Dioxus 0.7 projects: route maps, component/server-fn indexes, dead-code detection, prop-drilling reports, signal/props lints, asset audits, and scaffolding helpers."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tonybierman/dioxus-mcp"
 
 [dependencies]
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
