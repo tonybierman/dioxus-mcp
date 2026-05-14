@@ -126,6 +126,32 @@ targets + layouts) are treated as roots.
 
 ---
 
+### `openapi_spec`
+**Purpose:** Generate an OpenAPI 3.1 document from the project's
+`#[server]` fns (POST endpoints at `/api/{ServerName}`, JSON request &
+response) and, optionally, router routes (GET, text/html). Schemas for
+arg and return types are resolved by walking local
+`#[derive(Serialize)] / #[derive(Deserialize)]` structs and enums;
+unknown type names are returned under `unresolved_types`. Server fns
+without explicit `#[server(Name)]` use the fn ident and are listed
+under `guessed_paths` because Dioxus may hash the path at runtime.
+
+**Args:** `server_fn_prefix?` (default `"/api"`), `include_routes?`
+(default `false`), `title?` (default crate name), `version?` (default
+crate version), `router_file?` (forwarded to `route_map` when
+`include_routes`), `project_root?`.
+
+**Example call:**
+```json
+{"name": "openapi_spec", "arguments": {"include_routes": true}}
+```
+
+**Ask Claude:** "Generate an OpenAPI spec for the server functions in this project."
+
+**Demonstrated in:** [`src/server/list_posts.rs`](tests/fixtures/sample-project/src/server/list_posts.rs) — `#[server(ListPosts)]` taking a `ListPostsInput` struct and returning `Vec<Post>`; both types are resolved from local `#[derive(Serialize, Deserialize)]` definitions.
+
+---
+
 ## Lints
 
 ### `check_rsx`

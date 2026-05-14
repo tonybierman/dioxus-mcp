@@ -389,6 +389,76 @@ fn tool_create_server_fn() {
 }
 
 #[test]
+fn tool_openapi_spec() {
+    let r = call_tool("openapi_spec", json!({"include_routes": true}));
+    let spec = &r["spec"];
+    assert_eq!(spec["openapi"], "3.1.0");
+
+    let paths = spec["paths"].as_object().unwrap();
+
+    // FetchUser: explicit name from #[server(FetchUser)] → /api/FetchUser.
+    let fetch = paths
+        .get("/api/FetchUser")
+        .unwrap_or_else(|| panic!("paths: {paths:?}"));
+    let fetch_req = &fetch["post"]["requestBody"]["content"]["application/json"]["schema"];
+    assert_eq!(fetch_req["properties"]["id"]["type"], "integer");
+    let fetch_resp = &fetch["post"]["responses"]["200"]["content"]["application/json"]["schema"];
+    assert_eq!(fetch_resp["type"], "string");
+
+    // ListPosts: input + response should $ref local structs the resolver walked.
+    let list = paths
+        .get("/api/ListPosts")
+        .unwrap_or_else(|| panic!("paths: {paths:?}"));
+    let list_req = &list["post"]["requestBody"]["content"]["application/json"]["schema"];
+    assert_eq!(
+        list_req["properties"]["input"]["$ref"],
+        "#/components/schemas/ListPostsInput"
+    );
+    let list_resp = &list["post"]["responses"]["200"]["content"]["application/json"]["schema"];
+    assert_eq!(list_resp["type"], "array");
+    assert_eq!(
+        list_resp["items"]["$ref"],
+        "#/components/schemas/Post"
+    );
+
+    let schemas = spec["components"]["schemas"].as_object().unwrap();
+    let input_schema = schemas
+        .get("ListPostsInput")
+        .expect("ListPostsInput schema emitted");
+    let required: Vec<&str> = input_schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(required.contains(&"limit"), "required: {required:?}");
+    assert!(!required.contains(&"cursor"), "Option<...> should be optional: {required:?}");
+    assert!(
+        schemas.contains_key("Post"),
+        "components.schemas missing Post: {:?}",
+        schemas.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        schemas.contains_key("ServerFnError"),
+        "components.schemas missing ServerFnError",
+    );
+
+    // Route emission: BlogPost variant has a :slug — should become {slug} in the path.
+    assert!(
+        paths.contains_key("/blog/{slug}"),
+        "route path keys: {:?}",
+        paths.keys().collect::<Vec<_>>()
+    );
+
+    // Server fns without #[server(Name)] aren't in our fixture, so guessed_paths is empty.
+    assert!(
+        r["guessed_paths"].as_array().unwrap().is_empty(),
+        "guessed_paths: {:?}",
+        r["guessed_paths"]
+    );
+}
+
+#[test]
 #[ignore = "requires network access to dioxuslabs.com"]
 fn tool_search_docs() {
     let r = call_tool("search_docs", json!({"query": "use_resource"}));

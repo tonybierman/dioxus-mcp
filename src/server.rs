@@ -234,6 +234,19 @@ impl DioxusMcp {
             Err(e) => Err(err(e)),
         }
     }
+
+    #[tool(
+        description = "Generate an OpenAPI 3.1 spec from #[server] functions (POST endpoints) and, optionally, router routes (GET). Schemas for arg/return types are walked from local #[derive(Serialize)] / #[derive(Deserialize)] structs and enums; unresolved type names are reported. Defaults: server_fn_prefix=\"/api\", include_routes=false."
+    )]
+    async fn openapi_spec(
+        &self,
+        Parameters(p): Parameters<tools::openapi_spec::OpenapiSpecParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::openapi_spec::openapi_spec(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -248,7 +261,7 @@ impl ServerHandler for DioxusMcp {
              create_server_fn, check_rsx, audit_feature_flags, explain_signal_graph, \
              route_map, project_index, server_fn_call_graph, asset_audit, \
              dead_components, prop_drill, signal_lint, props_lint, project_tour, \
-             search_docs, find_example."
+             search_docs, find_example, openapi_spec."
                 .to_string(),
         )
     }

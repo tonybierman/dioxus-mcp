@@ -3,8 +3,8 @@
 An MCP server that gives Claude Code (and any other MCP client) deep static
 understanding of a Dioxus 0.7 project: route maps, component/server-fn
 indexes, dead-code detection, prop-drilling reports, signal/props lints,
-asset audits, and scaffolding helpers — all from the source tree, with no
-need to spawn `dx`.
+asset audits, OpenAPI generation, and scaffolding helpers — all from the
+source tree, with no need to spawn `dx`.
 
 ## Tools
 
@@ -26,6 +26,10 @@ natural-language prompt that Claude Code will route to it.
 - **`asset_audit`** — files under `assets/` not referenced by any
   `asset!()` macro, and `asset!()` paths pointing at files that don't
   exist.
+- **`openapi_spec`** — generate an OpenAPI 3.1 document from `#[server]`
+  fns (POST endpoints) and, optionally, router routes. Schemas are
+  resolved from local `#[derive(Serialize)] / #[derive(Deserialize)]`
+  types; unknowns are reported.
 
 ### Lints
 - **`check_rsx`** — common `rsx!` mistakes (missing `key:` on iterators,
@@ -89,7 +93,7 @@ After a rebuild, restart Claude Code to pick up the new binary.
 ## Tests
 
 ```
-cargo test                    # 15 offline integration tests
+cargo test                    # 16 offline integration tests
 cargo test -- --ignored       # also runs live-HTTP search_docs / find_example
 ```
 

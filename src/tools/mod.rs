@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod asset_audit;
 pub mod dead_components;
 pub mod docs;
+pub mod openapi_spec;
 pub mod project_index;
 pub mod project_tour;
 pub mod prop_drill;
