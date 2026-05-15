@@ -60,6 +60,13 @@ tool is exercised against live in [TOOLS_REFERENCE](TOOLS_REFERENCE.md).
 
 ---
 
+### `lint_project`
+**Purpose:** Run every static lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`) over `src/` and merge the results into a single report with a pre-rendered markdown summary. Use `include` / `exclude` to scope the run.
+
+**Ask Claude:** "Lint the whole project and give me a summary."
+
+---
+
 ## Lints
 
 ### `check_rsx`
@@ -107,9 +114,9 @@ tool is exercised against live in [TOOLS_REFERENCE](TOOLS_REFERENCE.md).
 ## Scaffolding
 
 ### `create_component`
-**Purpose:** Generate a new `#[component]` file with optional typed `Props`.
+**Purpose:** Generate a new `#[component]` file with optional typed `Props`. Optional `template:` (`empty` | `form` | `list` | `crud_table` | `resource_view`, default `empty`) picks the body skeleton.
 
-**Ask Claude:** "Create a UserCard component that takes an id and an optional label."
+**Ask Claude:** "Create a UserCard component that takes an id and an optional label." / "Scaffold a TodoForm component using the form template."
 
 ---
 
@@ -128,16 +135,19 @@ tool is exercised against live in [TOOLS_REFERENCE](TOOLS_REFERENCE.md).
 ---
 
 ### `get_dsl_spec`
-**Purpose:** Return the YAML DSL vocabulary used by `execute_code`. Pass `extensions: ["crud", "realtime", "auth"]` to include extra primitive groups; empty/omitted returns core only (Component, Screen, ServerFn).
+**Purpose:** Return the YAML DSL vocabulary used by `execute_code`. Core covers `Model`, `Store`, `Resource`, `Component`, `Screen`, `ServerFn`, and `Modify`, plus the smaller primitives they compose on (`Form`, `List`, `Table`, `Signal`, `Socket`, `Feed`, `SessionState`, `LoginScreen`, `ProtectedRoute`). Pass `extensions: ["crud", "realtime", "auth"]` to include extra primitive groups; empty / omitted returns core only.
 
 **Ask Claude:** "Show me the DSL spec for the auth and crud extensions."
 
 ---
 
 ### `execute_code`
-**Purpose:** Materialize a Dioxus 0.7 file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions and cross-references across the whole doc; rejects unknown fields, multi-document YAML, and missing refs (List/Table → ServerFn, Feed → Socket).
+**Purpose:** Materialize a Dioxus 0.7 file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions and cross-references across the whole doc; rejects unknown fields, multi-document YAML, and missing refs (List/Table → ServerFn, Feed → Socket). `resources:` are a meta-primitive — each one fans out into one model, one store, five server fns, and two screens during preflight. `modify:` entries are idempotent in-place edits applied after creation.
 
-**Ask Claude:** "Scaffold a signup screen with a login form and a protected dashboard route."
+**Ask Claude:**
+- "Scaffold a signup screen with a login form and a protected dashboard route."
+- "Scaffold a Todo resource — model + store + CRUD endpoints + list/new screens."
+- "Add a `priority: u8` field to the Todo model."
 
 ---
 

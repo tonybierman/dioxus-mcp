@@ -124,6 +124,21 @@ crate version), `router_file?` (forwarded to `route_map` when
 
 ---
 
+### `lint_project`
+
+Runs every static lint over `src/` and returns one merged report. Each sub-report is present iff that lint ran; `summary` is a pre-rendered markdown digest of the run, and `issues_by_lint` gives per-lint counts in `lints_run` order. Parse errors are deduplicated across lints and reported separately under `parse_errors` (they don't count toward `total_issues`).
+
+**Args:** `include?` (subset of `["check_rsx","dead_components","prop_drill","signal_lint","props_lint"]`; defaults to every lint), `exclude?` (applied after `include`), `dead_component_roots?` (extra roots forwarded to `dead_components`), `project_root?`.
+
+**Example call:**
+```json
+{"name": "lint_project", "arguments": {"exclude": ["prop_drill"]}}
+```
+
+**Demonstrated in:** `tool_lint_project` and `tool_lint_project_include_subset` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs).
+
+---
+
 ## Lints
 
 ### `check_rsx`
@@ -218,10 +233,11 @@ Covers `use_signal` / `use_memo` / `use_resource` / `use_effect`. Memos and effe
 
 ### `create_component`
 
-Writes under `src/components/` by default (override via `path`) and wires the new module into `components/mod.rs`.
+Writes under `src/components/` by default (override via `path`) and wires the new module into `components/mod.rs`. `template:` selects the body skeleton; the rendered body is slotted into a standard `#[component] fn { rsx! { ... } }` wrapper regardless of which template is picked.
 
 **Args:** `name` (required; normalized to PascalCase/snake_case),
 `props?` (`[{name, type, optional?}]`), `path?` (default `src/components`),
+`template?` (`"empty"` (default) | `"form"` | `"list"` | `"crud_table"` | `"resource_view"`),
 `project_root?`.
 
 **Example call:**
@@ -238,7 +254,18 @@ Writes under `src/components/` by default (override via `path`) and wires the ne
 }
 ```
 
-**Demonstrated in:** `tool_create_component` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs) — runs against a tempdir copy of the fixture.
+Form-template example:
+```json
+{
+  "name": "create_component",
+  "arguments": {
+    "name": "TodoForm",
+    "template": "form"
+  }
+}
+```
+
+**Demonstrated in:** `tool_create_component` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs) — runs against a tempdir copy of the fixture. Per-template rendering is covered by the `component_template_tests` unit module in [`crates/dioxus-mcp/src/tools/scaffold.rs`](crates/dioxus-mcp/src/tools/scaffold.rs).
 
 ---
 
@@ -284,7 +311,7 @@ Refuses if the project isn't fullstack-capable (no `fullstack` feature, and miss
 
 ### `get_dsl_spec`
 
-Returns the YAML DSL vocabulary used by `execute_code`. The vocabulary is split into a core block (`Component`, `Screen`, `ServerFn`) and three extension blocks (`crud`, `realtime`, `auth`). Each primitive entry includes its fields and a runnable example.
+Returns the YAML DSL vocabulary used by `execute_code`. The core block covers `Model`, `Store`, `Resource`, `Component`, `Screen`, `ServerFn`, and `Modify`, plus the smaller primitives they compose on (`Form`, `List`, `Table`, `Signal`, `Socket`, `Feed`, `SessionState`, `LoginScreen`, `ProtectedRoute`). Three extension blocks (`crud`, `realtime`, `auth`) add further primitives on top. Each entry includes its fields and a runnable example.
 
 **Args:** `extensions?` (subset of `["crud", "realtime", "auth"]`; empty / omitted returns core only).
 
@@ -296,15 +323,31 @@ Returns the YAML DSL vocabulary used by `execute_code`. The vocabulary is split 
 }
 ```
 
-**Result shape:** `{"spec": "<yaml string>"}` — feed the spec back to the model so it can author a valid doc, then call `execute_code` with that doc as `code`.
+**Result shape:** `{"spec": "<yaml string>"}` — feed the spec back to the model so it can author a valid doc, then call `execute_code` with that doc as `code`. A typical doc combines several core primitives:
 
-**Demonstrated in:** `tool_get_dsl_spec_core_only` and `tool_get_dsl_spec_with_extensions` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs).
+```yaml
+version: "1"
+models:
+  - name: Todo
+    fields:
+      - { name: id, type: i64 }
+      - { name: title, type: String }
+stores:
+  - name: TodoStore
+    item: Todo
+    emit_tests: true
+screens:
+  - name: TodoScreen
+    route: /todos
+```
+
+**Demonstrated in:** `tool_get_dsl_spec_core_only` and `tool_get_dsl_spec_with_extensions` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs). Every spec example is round-tripped through its struct by `spec_examples_round_trip` in [`crates/dioxus-mcp/src/tools/dsl.rs`](crates/dioxus-mcp/src/tools/dsl.rs).
 
 ---
 
 ### `execute_code`
 
-Parses a single YAML doc conforming to the spec and materializes the corresponding Dioxus 0.7 source files in one shot. Pre-flight pass collects every target name across the whole doc and rejects duplicates and missing cross-references (List/Table → ServerFn, Feed → Socket) before any file is written. Multi-document YAML (`---` separators), unknown fields, and `version != "1"` are rejected. ServerFns are written first so a misconfigured (non-fullstack) project fails fast. Routes are inserted via `create_route` serially because the enum-body insertion is string-based.
+Parses a single YAML doc conforming to the spec and materializes the corresponding Dioxus 0.7 source files in one shot. Pre-flight pass collects every target name across the whole doc and rejects duplicates and missing cross-references (List/Table → ServerFn, Feed → Socket) before any file is written. `resources:` are a meta-primitive — each entry expands into one model, one store, five server fns (create/get/update/delete/list), and two screens (list + new) during preflight, so all the usual collision and cross-ref checks apply to the expanded form. `modify:` entries are idempotent in-place edits to items that already exist on disk (add a model field, add a component prop, add a server-fn arg) and are applied after creation. Multi-document YAML (`---` separators), unknown fields, and `version != "1"` are rejected. ServerFns are written first so a misconfigured (non-fullstack) project fails fast. Routes are inserted via `create_route` serially because the enum-body insertion is string-based.
 
 **Args:** `code` (required, string — the YAML doc), `project_root?` (absolute path).
 
@@ -323,6 +366,9 @@ Parses a single YAML doc conforming to the spec and materializes the correspondi
 **Notes:**
 - `Socket` primitives generate a `web-sys`-backed binding; `next_steps` will tell you to add the right `web-sys` and `wasm-bindgen` features to your project's `Cargo.toml`.
 - `ProtectedRoute` uses a placeholder `Signal<bool>` for the auth check — wire your `SessionState` accessor in by hand once both are scaffolded.
+- `Store` primitives accept `emit_tests: true`, which adds five sync `#[test]`s (create, get, update, delete, list) to the generated store file.
+- `Screen` primitives accept a `template:` (e.g. `{ kind: resource_list, endpoint: "..." }` or `{ kind: resource_form, ... }`) that emits a resource-bound list ladder or controlled form, eliminating boilerplate around `use_resource`.
+- `Modify` is idempotent: re-running the same `modify:` entry against a file that already has the field/prop/arg is a no-op rather than an error.
 
 **Demonstrated in:** `tool_execute_code_screen_and_nav`, `tool_execute_code_form`, `tool_execute_code_list_calls_server_fn`, `tool_execute_code_protected_route`, `tool_execute_code_unknown_field_rejected`, `tool_execute_code_duplicate_names_rejected`, `tool_execute_code_multidoc_yaml_rejected`, `tool_execute_code_wrong_version_rejected` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs).
 

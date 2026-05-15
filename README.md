@@ -38,6 +38,10 @@ separately in [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md).
   fns (POST endpoints) and, optionally, router routes. Schemas are
   resolved from local `#[derive(Serialize)] / #[derive(Deserialize)]`
   types; unknowns are reported.
+- **`lint_project`** — run every static lint (`check_rsx`,
+  `dead_components`, `prop_drill`, `signal_lint`, `props_lint`) over
+  `src/` and merge the results into a single response with a
+  pre-rendered markdown summary. Scope via `include` / `exclude`.
 
 ### Lints
 - **`check_rsx`** — common `rsx!` mistakes (missing `key:` on iterators,
@@ -56,17 +60,24 @@ separately in [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md).
 
 ### Scaffolding
 - **`create_component`** — new `#[component]` file with optional typed
-  Props, registered in `components/mod.rs`.
+  Props, registered in `components/mod.rs`. `template:` picks the body
+  skeleton (`empty` | `form` | `list` | `crud_table` | `resource_view`,
+  default `empty`).
 - **`create_route`** — insert a variant into the existing
   `#[derive(Routable)]` enum.
 - **`create_server_fn`** — new `#[server]` fn under `src/server/`,
   refuses if the project isn't fullstack-capable.
 - **`get_dsl_spec`** — return the YAML DSL vocabulary used by
-  `execute_code`. Pass `extensions: ["crud", "realtime", "auth"]` to
-  include extra primitives; empty / omitted returns core only.
+  `execute_code`. The core covers `models`, `stores`, `resources`,
+  `components`, `screens`, `server_fns`, and `modify`, plus the
+  primitives they compose on (forms, lists, tables, signals, sockets,
+  feeds). Pass `extensions: ["crud", "realtime", "auth"]` to include
+  extra primitive groups.
 - **`execute_code`** — materialize a whole Dioxus 0.7 file set from one
   YAML doc: screens, components, forms, lists/tables, signals, sockets,
-  feeds, login screens, protected routes. Pre-flights name collisions
+  feeds, login screens, protected routes, shared models, client-side
+  stores, resource bundles (model + store + 5 server fns + list/new
+  screens), and idempotent `modify:` edits. Pre-flights name collisions
   and cross-references before any file is written.
 
 ### Runtime
@@ -155,7 +166,7 @@ at 10 MiB.
 ## Tests
 
 ```
-cargo test --workspace        # 18 main tests + 4 probe unit tests
+cargo test --workspace        # MCP integration suite + probe unit tests
 cargo test -- --ignored       # also runs live-HTTP search_docs / find_example
 ```
 
