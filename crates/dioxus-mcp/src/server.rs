@@ -220,6 +220,32 @@ impl DioxusMcp {
     }
 
     #[tool(
+        description = "Return the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. Call this BEFORE `execute_code` so the model authors a valid YAML doc."
+    )]
+    async fn get_dsl_spec(
+        &self,
+        Parameters(p): Parameters<tools::dsl::GetDslSpecParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::get_dsl_spec(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Materialize a Dioxus 0.7 file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, and next_steps."
+    )]
+    async fn execute_code(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ExecuteCodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::execute_code(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "Live-search dioxuslabs.com docs (scoped to the project's Dioxus version) and return ranked snippets. 15-min cache."
     )]
     async fn search_docs(
@@ -314,6 +340,7 @@ impl ServerHandler for DioxusMcp {
                explain_signal_graph. \
              - Reading Dioxus 0.7 docs / canonical examples -> search_docs, find_example. \
              - Scaffolding new code -> create_component, create_route, create_server_fn. \
+             - Bulk scaffolding from a YAML DSL -> get_dsl_spec then execute_code. \
              - RSX correctness check -> check_rsx. \
              \
              Probe note: runtime_events and server_fn_summary read the JSONL log written \

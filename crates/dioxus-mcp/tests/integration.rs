@@ -639,3 +639,414 @@ fn tool_find_example() {
     let r = call_tool("find_example", json!({"concept": "fullstack"}));
     assert!(r.is_object(), "expected object response, got: {r}");
 }
+
+// ---------- DSL tools ----------
+
+/// Variant of call_tool_at that surfaces JSON-RPC errors instead of panicking
+/// on missing `result.content[0].text`. Returns `Ok(parsed)` on success and
+/// `Err(error_message)` when the server responded with a JSON-RPC error or an
+/// `isError: true` content block.
+fn try_call_tool_at(project_root: &Path, tool: &str, mut args: Value) -> Result<Value, String> {
+    if args.get("project_root").is_none() {
+        args["project_root"] = json!(project_root.to_string_lossy());
+    }
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "integration", "version": "0"}
+        }
+    });
+    let init_done = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    });
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args}
+    });
+
+    let mut child = Command::new(bin_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn dioxus-mcp");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "{init}").unwrap();
+        writeln!(stdin, "{init_done}").unwrap();
+        writeln!(stdin, "{call}").unwrap();
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("id").and_then(|x| x.as_i64()) != Some(2) {
+            continue;
+        }
+        if let Some(e) = v.get("error") {
+            return Err(e.to_string());
+        }
+        let result = v
+            .get("result")
+            .ok_or_else(|| format!("no result in: {v}"))?;
+        let text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| format!("no content[0].text in: {v}"))?;
+        return Ok(serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.into())));
+    }
+    Err(format!("no response with id=2; stdout was:\n{stdout}"))
+}
+
+#[test]
+fn tool_get_dsl_spec_core_only() {
+    let r = call_tool("get_dsl_spec", json!({}));
+    let spec = r["spec"].as_str().unwrap();
+    assert!(spec.contains("version: \"1\""), "spec: {spec}");
+    assert!(spec.contains("core:"), "spec: {spec}");
+    assert!(spec.contains("Component:"), "spec: {spec}");
+    assert!(spec.contains("Screen:"), "spec: {spec}");
+    assert!(spec.contains("ServerFn:"), "spec: {spec}");
+    assert!(
+        !spec.contains("extensions:"),
+        "core-only must not include extensions"
+    );
+}
+
+#[test]
+fn tool_get_dsl_spec_with_extensions() {
+    let r = call_tool("get_dsl_spec", json!({"extensions": ["crud", "auth"]}));
+    let spec = r["spec"].as_str().unwrap();
+    assert!(spec.contains("extensions:"), "spec: {spec}");
+    assert!(spec.contains("crud:"), "missing crud section");
+    assert!(spec.contains("Form:"), "missing Form primitive");
+    assert!(spec.contains("auth:"), "missing auth section");
+    assert!(spec.contains("LoginScreen:"), "missing LoginScreen");
+    assert!(!spec.contains("realtime:"), "should not include realtime");
+}
+
+#[test]
+fn tool_execute_code_screen_and_nav() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+screens:
+  - name: SettingsScreen
+    route: /settings
+    layout: sidebar
+"#;
+    let r = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let created = r["files_created"].as_array().unwrap();
+    assert!(
+        created
+            .iter()
+            .any(|p| p.as_str().unwrap().ends_with("settings_screen.rs")),
+        "files_created: {created:?}"
+    );
+    assert!(
+        tmp.path()
+            .join("src/components/settings_screen.rs")
+            .exists()
+    );
+    let router = std::fs::read_to_string(tmp.path().join("src/router.rs")).unwrap();
+    assert!(router.contains("/settings"), "router: {router}");
+    assert!(router.contains("SettingsScreen"), "router: {router}");
+}
+
+#[test]
+fn tool_execute_code_form() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+forms:
+  - name: SignupForm
+    fields:
+      - {name: email, type: email, validation: required}
+      - {name: password, type: password}
+    on_submit: handle_signup
+"#;
+    let _ = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let src = std::fs::read_to_string(tmp.path().join("src/components/signup_form.rs")).unwrap();
+    assert!(src.contains("use_signal"), "expected signals: {src}");
+    assert!(src.contains("oninput"), "expected oninput handler: {src}");
+    assert!(
+        src.contains("r#type: \"email\""),
+        "expected email input type: {src}"
+    );
+    assert!(
+        src.contains("validation: required"),
+        "expected validation comment: {src}"
+    );
+    assert!(src.contains("handle_signup"), "expected handler ref: {src}");
+}
+
+#[test]
+fn tool_execute_code_list_calls_server_fn() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+server_fns:
+  - name: fetch_users
+    return_type: Vec<String>
+lists:
+  - name: UserList
+    endpoint: fetch_users
+    item_type: String
+"#;
+    let r = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let created: Vec<String> = r["files_created"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        created.iter().any(|p| p.ends_with("fetch_users.rs")),
+        "expected server fn file: {created:?}"
+    );
+    assert!(
+        created.iter().any(|p| p.ends_with("user_list.rs")),
+        "expected list file: {created:?}"
+    );
+    let list = std::fs::read_to_string(tmp.path().join("src/components/user_list.rs")).unwrap();
+    assert!(list.contains("use_resource"), "list: {list}");
+    assert!(list.contains("fetch_users"), "list: {list}");
+}
+
+#[test]
+fn tool_execute_code_protected_route() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+session_states:
+  - name: session
+    user_type: String
+protected_routes:
+  - name: Dashboard
+    redirect_to: /login
+    requires: session
+"#;
+    let _ = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let src = std::fs::read_to_string(tmp.path().join("src/components/dashboard.rs")).unwrap();
+    assert!(src.contains("use_session"), "guard: {src}");
+    assert!(src.contains("navigator"), "guard: {src}");
+    assert!(src.contains("use_effect"), "guard: {src}");
+    assert!(src.contains("/login"), "guard: {src}");
+    assert!(src.contains("children: Element"), "guard: {src}");
+}
+
+#[test]
+fn tool_execute_code_protected_route_fallback_without_session_state() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+protected_routes:
+  - name: Dashboard
+    redirect_to: /login
+"#;
+    let _ = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let src = std::fs::read_to_string(tmp.path().join("src/components/dashboard.rs")).unwrap();
+    // No SessionState in doc → fallback path with placeholder bool context.
+    assert!(src.contains("authenticated"), "guard fallback: {src}");
+    assert!(src.contains("navigator"), "guard fallback: {src}");
+    assert!(src.contains("use_effect"), "guard fallback: {src}");
+}
+
+#[test]
+fn tool_execute_code_form_feeds_into_list() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+server_fns:
+  - name: fetch_notes
+    return_type: Vec<String>
+  - name: create_note
+    args:
+      - {name: body, type: String}
+    return_type: String
+lists:
+  - name: NotesList
+    endpoint: fetch_notes
+    item_type: String
+forms:
+  - name: NewNoteForm
+    fields:
+      - {name: body, type: textarea}
+    on_submit: create_note
+    feeds_into: NotesList
+"#;
+    let _ = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let list = std::fs::read_to_string(tmp.path().join("src/components/notes_list.rs")).unwrap();
+    assert!(list.contains("provide_notes_list_version"), "list: {list}");
+    assert!(list.contains("use_notes_list_version"), "list: {list}");
+    assert!(list.contains("NotesListVersion"), "list: {list}");
+    assert!(list.contains("match items()"), "list: {list}");
+    let form = std::fs::read_to_string(tmp.path().join("src/components/new_note_form.rs")).unwrap();
+    assert!(
+        form.contains("use crate::components::notes_list::use_notes_list_version"),
+        "form import: {form}"
+    );
+    assert!(form.contains("spawn(async move"), "form spawn: {form}");
+    assert!(
+        form.contains("create_note(body_v).await.is_ok()"),
+        "form call: {form}"
+    );
+    assert!(form.contains("*version.write() += 1"), "form bump: {form}");
+    assert!(
+        form.contains("body.set(String::new())"),
+        "form reset: {form}"
+    );
+}
+
+#[test]
+fn tool_execute_code_form_feeds_into_unknown_list_rejected() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+forms:
+  - name: NewNoteForm
+    fields:
+      - {name: body, type: textarea}
+    feeds_into: NotesList
+"#;
+    let r = try_call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    assert!(r.is_err(), "should reject unknown list ref, got: {r:?}");
+    assert!(
+        !tmp.path().join("src/components/new_note_form.rs").exists(),
+        "no file should have been written"
+    );
+}
+
+#[test]
+fn tool_execute_code_screen_wrap_with() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+session_states:
+  - name: session
+    user_type: String
+protected_routes:
+  - name: NotesGuard
+    redirect_to: /login
+    requires: session
+screens:
+  - name: NotesScreen
+    route: /notes
+    wrap_with: NotesGuard
+"#;
+    let _ = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let screen =
+        std::fs::read_to_string(tmp.path().join("src/components/notes_screen.rs")).unwrap();
+    assert!(
+        screen.contains("use crate::components::NotesGuard"),
+        "screen import: {screen}"
+    );
+    assert!(screen.contains("NotesGuard {"), "screen wrap: {screen}");
+}
+
+#[test]
+fn tool_execute_code_server_fn_method_and_path() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+server_fns:
+  - name: fetch_notes
+    return_type: Vec<String>
+  - name: create_note
+    args:
+      - {name: body, type: String}
+    return_type: String
+"#;
+    let _ = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let getter = std::fs::read_to_string(tmp.path().join("src/server/fetch_notes.rs")).unwrap();
+    assert!(
+        getter.contains("#[get(\"/api/fetch_notes\")]"),
+        "getter: {getter}"
+    );
+    assert!(
+        getter.contains("Result<Vec<String>, ServerFnError>"),
+        "getter return: {getter}"
+    );
+    let poster = std::fs::read_to_string(tmp.path().join("src/server/create_note.rs")).unwrap();
+    assert!(
+        poster.contains("#[post(\"/api/create_note\")]"),
+        "poster: {poster}"
+    );
+}
+
+#[test]
+fn tool_execute_code_protected_route_unknown_session_rejected() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+protected_routes:
+  - name: Dashboard
+    redirect_to: /login
+    requires: nonexistent
+"#;
+    let r = try_call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    assert!(r.is_err(), "should reject unknown session ref, got: {r:?}");
+}
+
+#[test]
+fn tool_execute_code_unknown_field_rejected() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+forms:
+  - name: BadForm
+    feilds:
+      - {name: email, type: email}
+"#;
+    let r = try_call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    assert!(r.is_err(), "should reject typo, got: {r:?}");
+    assert!(
+        !tmp.path().join("src/components/bad_form.rs").exists(),
+        "no file should have been written"
+    );
+}
+
+#[test]
+fn tool_execute_code_duplicate_names_rejected() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+components:
+  - name: UserCard
+  - name: UserCard
+"#;
+    let r = try_call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    assert!(r.is_err(), "should reject duplicate, got: {r:?}");
+    assert!(
+        !tmp.path().join("src/components/user_card.rs").exists(),
+        "no files should have been written"
+    );
+}
+
+#[test]
+fn tool_execute_code_multidoc_yaml_rejected() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+components:
+  - name: A
+---
+version: "1"
+components:
+  - name: B
+"#;
+    let r = try_call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    assert!(r.is_err(), "should reject multi-doc, got: {r:?}");
+}
+
+#[test]
+fn tool_execute_code_wrong_version_rejected() {
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "0"
+components:
+  - name: Foo
+"#;
+    let r = try_call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    assert!(r.is_err(), "should reject wrong version, got: {r:?}");
+}

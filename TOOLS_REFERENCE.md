@@ -282,6 +282,52 @@ Refuses if the project isn't fullstack-capable (no `fullstack` feature, and miss
 
 ---
 
+### `get_dsl_spec`
+
+Returns the YAML DSL vocabulary used by `execute_code`. The vocabulary is split into a core block (`Component`, `Screen`, `ServerFn`) and three extension blocks (`crud`, `realtime`, `auth`). Each primitive entry includes its fields and a runnable example.
+
+**Args:** `extensions?` (subset of `["crud", "realtime", "auth"]`; empty / omitted returns core only).
+
+**Example call:**
+```json
+{
+  "name": "get_dsl_spec",
+  "arguments": {"extensions": ["crud", "auth"]}
+}
+```
+
+**Result shape:** `{"spec": "<yaml string>"}` — feed the spec back to the model so it can author a valid doc, then call `execute_code` with that doc as `code`.
+
+**Demonstrated in:** `tool_get_dsl_spec_core_only` and `tool_get_dsl_spec_with_extensions` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs).
+
+---
+
+### `execute_code`
+
+Parses a single YAML doc conforming to the spec and materializes the corresponding Dioxus 0.7 source files in one shot. Pre-flight pass collects every target name across the whole doc and rejects duplicates and missing cross-references (List/Table → ServerFn, Feed → Socket) before any file is written. Multi-document YAML (`---` separators), unknown fields, and `version != "1"` are rejected. ServerFns are written first so a misconfigured (non-fullstack) project fails fast. Routes are inserted via `create_route` serially because the enum-body insertion is string-based.
+
+**Args:** `code` (required, string — the YAML doc), `project_root?` (absolute path).
+
+**Example call:**
+```json
+{
+  "name": "execute_code",
+  "arguments": {
+    "code": "version: \"1\"\nscreens:\n  - name: SettingsScreen\n    route: /settings\n    layout: sidebar\n"
+  }
+}
+```
+
+**Result shape:** the same `ScaffoldResult` returned by `create_component` / `create_route` / `create_server_fn` — `files_created`, `files_modified`, `next_steps` — with all primitive emissions merged.
+
+**Notes:**
+- `Socket` primitives generate a `web-sys`-backed binding; `next_steps` will tell you to add the right `web-sys` and `wasm-bindgen` features to your project's `Cargo.toml`.
+- `ProtectedRoute` uses a placeholder `Signal<bool>` for the auth check — wire your `SessionState` accessor in by hand once both are scaffolded.
+
+**Demonstrated in:** `tool_execute_code_screen_and_nav`, `tool_execute_code_form`, `tool_execute_code_list_calls_server_fn`, `tool_execute_code_protected_route`, `tool_execute_code_unknown_field_rejected`, `tool_execute_code_duplicate_names_rejected`, `tool_execute_code_multidoc_yaml_rejected`, `tool_execute_code_wrong_version_rejected` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs).
+
+---
+
 ## Runtime
 
 ### Event schema

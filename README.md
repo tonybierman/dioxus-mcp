@@ -61,6 +61,13 @@ separately in [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md).
   `#[derive(Routable)]` enum.
 - **`create_server_fn`** — new `#[server]` fn under `src/server/`,
   refuses if the project isn't fullstack-capable.
+- **`get_dsl_spec`** — return the YAML DSL vocabulary used by
+  `execute_code`. Pass `extensions: ["crud", "realtime", "auth"]` to
+  include extra primitives; empty / omitted returns core only.
+- **`execute_code`** — materialize a whole Dioxus 0.7 file set from one
+  YAML doc: screens, components, forms, lists/tables, signals, sockets,
+  feeds, login screens, protected routes. Pre-flights name collisions
+  and cross-references before any file is written.
 
 ### Runtime
 See [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md) for the full event schema and tool docs.

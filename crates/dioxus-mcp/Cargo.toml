@@ -30,6 +30,7 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 tower = "0.5"
 heck = "0.5"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+serde_yml = "0.0.12"
 
 [dev-dependencies]
 tempfile = "3"

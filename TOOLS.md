@@ -127,6 +127,20 @@ tool is exercised against live in [TOOLS_REFERENCE](TOOLS_REFERENCE.md).
 
 ---
 
+### `get_dsl_spec`
+**Purpose:** Return the YAML DSL vocabulary used by `execute_code`. Pass `extensions: ["crud", "realtime", "auth"]` to include extra primitive groups; empty/omitted returns core only (Component, Screen, ServerFn).
+
+**Ask Claude:** "Show me the DSL spec for the auth and crud extensions."
+
+---
+
+### `execute_code`
+**Purpose:** Materialize a Dioxus 0.7 file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions and cross-references across the whole doc; rejects unknown fields, multi-document YAML, and missing refs (List/Table → ServerFn, Feed → Socket).
+
+**Ask Claude:** "Scaffold a signup screen with a login form and a protected dashboard route."
+
+---
+
 ## Runtime
 
 Runtime tools read events captured by the `dioxus-mcp-probe` crate while

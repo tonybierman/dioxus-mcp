@@ -36,20 +36,13 @@ pub fn {{ pascal }}({% if has_props %}props: {{ pascal }}Props{% endif %}) -> El
 "#;
 
 const SERVER_FN_TPL: &str = r#"use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct {{ pascal }}Result {
-    pub ok: bool,
-}
-
-#[server({{ pascal }})]
+#[{{ method }}("{{ path }}")]
 pub async fn {{ snake }}(
 {%- for a in args %}
     {{ a.name }}: {{ a.ty }},
 {%- endfor %}
-) -> ServerFnResult<{{ ret }}> {
-    // Server-side code runs on Axum (Dioxus 0.7).
+) -> Result<{{ ret }}, ServerFnError> {
     Ok(Default::default())
 }
 "#;
@@ -298,6 +291,12 @@ pub struct CreateServerFnParams {
     pub args: Vec<ArgSpec>,
     /// Defaults to `String`.
     pub return_type: Option<String>,
+    /// HTTP method: "get" or "post". Defaults to "post" when args is non-empty,
+    /// "get" otherwise.
+    pub method: Option<String>,
+    /// Route path under which the server fn is exposed. Defaults to
+    /// "/api/{snake_name}".
+    pub path: Option<String>,
     /// Absolute path to the Dioxus project root. Required when the MCP server was not
     /// started in the target project directory.
     pub project_root: Option<String>,
@@ -328,9 +327,24 @@ pub async fn create_server_fn(
     let server_dir = crate_root.join("src/server");
     std::fs::create_dir_all(&server_dir).map_err(|e| e.to_string())?;
 
-    let pascal = p.name.to_pascal_case();
     let snake = p.name.to_snake_case();
     let ret = p.return_type.unwrap_or_else(|| "String".into());
+    let method = match p.method.as_deref().map(str::to_ascii_lowercase) {
+        Some(m) => {
+            if !matches!(m.as_str(), "get" | "post") {
+                return Err(format!("method must be \"get\" or \"post\", got {m:?}"));
+            }
+            m
+        }
+        None => {
+            if p.args.is_empty() {
+                "get".to_string()
+            } else {
+                "post".to_string()
+            }
+        }
+    };
+    let route_path = p.path.clone().unwrap_or_else(|| format!("/api/{snake}"));
     let target = server_dir.join(format!("{snake}.rs"));
     if target.exists() {
         return Err(format!("{} already exists", target.display()));
@@ -341,9 +355,10 @@ pub async fn create_server_fn(
     let tpl = env.get_template("server_fn").unwrap();
     let rendered = tpl
         .render(context! {
-            pascal => pascal.clone(),
             snake => snake.clone(),
             ret => ret.clone(),
+            method => method,
+            path => route_path,
             args => p.args.iter().map(|a| context!{ name => a.name.clone(), ty => a.ty.clone() }).collect::<Vec<_>>(),
         })
         .map_err(|e| e.to_string())?;
