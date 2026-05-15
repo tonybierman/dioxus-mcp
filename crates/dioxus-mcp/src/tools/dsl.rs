@@ -36,6 +36,8 @@ pub struct DslDoc {
     #[serde(default)]
     pub models: Vec<DslModel>,
     #[serde(default)]
+    pub stores: Vec<DslStore>,
+    #[serde(default)]
     pub server_fns: Vec<DslServerFn>,
     #[serde(default)]
     pub signals: Vec<DslSignal>,
@@ -59,6 +61,10 @@ pub struct DslDoc {
     pub protected_routes: Vec<DslProtectedRoute>,
     #[serde(default)]
     pub screens: Vec<DslScreen>,
+    /// Meta-primitive: each entry fans out into one model, one store, five
+    /// server fns, and two screens (list + new). Expanded before preflight.
+    #[serde(default)]
+    pub resources: Vec<DslResource>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -80,6 +86,69 @@ pub struct DslModelField {
     pub ty: String,
     #[serde(default)]
     pub optional: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslStore {
+    pub name: String,
+    /// Model name (PascalCase or snake_case) declared in the same doc — or
+    /// synthesized by a `resources:` entry. The store provides typed CRUD over
+    /// this type.
+    pub resource: String,
+    /// Backend. Currently only "in_memory" is implemented. Default: "in_memory".
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Name of the integer id field on the model. Default: "id".
+    #[serde(default)]
+    pub id_field: Option<String>,
+    /// Rust type of the id field. Default: "i64".
+    #[serde(default)]
+    pub id_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslResource {
+    pub name: String,
+    pub fields: Vec<DslModelField>,
+    /// Name of the integer id field on the model. Must exist in `fields`.
+    /// Default: "id".
+    #[serde(default)]
+    pub id_field: Option<String>,
+    /// URL base for the generated list/new screens. Default: "/{plural-snake}".
+    /// `/products` and `/products/new` are appended automatically.
+    #[serde(default)]
+    pub route_base: Option<String>,
+    /// Extra derives forwarded to the synthesized Model.
+    #[serde(default)]
+    pub derives: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslScreenTemplate {
+    /// One of: empty (default), resource_list, resource_form.
+    pub kind: String,
+    /// Server-fn name (snake_case) the screen calls. Required for resource_list
+    /// and resource_form.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Type returned by the endpoint (resource_list) or accepted by it
+    /// (resource_form).
+    #[serde(default)]
+    pub item_type: Option<String>,
+    /// For resource_form: server-fn (snake_case) called on submit. When unset,
+    /// `endpoint` is used.
+    #[serde(default)]
+    pub on_submit: Option<String>,
+    /// For resource_form: route to navigate to on success.
+    #[serde(default)]
+    pub redirect_to: Option<String>,
+    /// For resource_form: input fields { name, type } where type is one of
+    /// text, email, password, number, checkbox, textarea.
+    #[serde(default)]
+    pub fields: Vec<DslFieldDef>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -135,6 +204,13 @@ pub struct DslScreen {
     /// screen body. Imported from src/components and rendered around the page.
     #[serde(default)]
     pub wrap_with: Option<String>,
+    /// Optional template selector. Without it, the screen renders an empty
+    /// placeholder body. `kind: resource_list` emits a use_resource +
+    /// loading/error/data match ladder against `endpoint`. `kind: resource_form`
+    /// emits a controlled form whose submit handler calls `on_submit` (or
+    /// `endpoint`) and navigates to `redirect_to`.
+    #[serde(default)]
+    pub template: Option<DslScreenTemplate>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -271,7 +347,9 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   src/components/mod.rs            entries added (sorted), file created if missing
 #   src/model/{snake}.rs             Model (struct with serde derives)
 #   src/model/mod.rs                 entries added (sorted)
-#   src/server/{snake}.rs            ServerFn
+#   src/state/{snake}.rs             Store (server-feature gated CRUD helper)
+#   src/state/mod.rs                 entries added (sorted)
+#   src/server/{snake}.rs            ServerFn (incl. resource-synthesized fns)
 #   src/server/mod.rs                entries added (sorted)
 #   src/signals/{snake}.rs           Signal
 #   src/signals/mod.rs               entries added (sorted)
@@ -281,7 +359,8 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   src/auth/mod.rs                  entries added (sorted)
 #   the project's #[derive(Routable)] enum file
 #                                    new variants inserted for Screen / LoginScreen
-#                                    (deduplicated by variant name)
+#                                    (deduplicated by variant name; resources
+#                                    emit a list + new screen per entry)
 #
 # Re-run semantics:
 #   - By default execute_code REFUSES to overwrite an existing leaf file under
@@ -328,16 +407,24 @@ const CORE_COMPONENT: &str = r#"  Component:
 "#;
 
 const CORE_SCREEN: &str = r#"  Screen:
-    description: A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The screen's body is wrapped with `wrap_with` (when set) so a guard component like ProtectedRoute can sit at the route layer.
+    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=resource_list emits a use_resource + loading/error/data ladder bound to the named endpoint; kind=resource_form emits a controlled form that calls on_submit (or endpoint) and navigates to redirect_to."
     fields:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
       - {name: wrap_with, type: "ComponentName (e.g. a ProtectedRoute guard)", required: false}
+      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?}", required: false}
+    template_kinds: [empty, resource_list, resource_form]
     example:
       screens:
         - name: HomeScreen
           route: /
           wrap_with: Dashboard
+        - name: ProductListScreen
+          route: /products
+          template:
+            kind: resource_list
+            endpoint: list_products
+            item_type: Product
 "#;
 
 const CORE_SERVER_FN: &str = r#"  ServerFn:
@@ -357,6 +444,42 @@ const CORE_SERVER_FN: &str = r#"  ServerFn:
           return_type: "Vec<String>"
           method: post
           path: /api/users
+"#;
+
+const CORE_STORE: &str = r#"  Store:
+    description: "A typed in-memory CRUD helper over a Model. Generates src/state/{snake}.rs as a server-only file (gated with `#![cfg(feature = \"server\")]`) exposing `{Pascal}Store::global()` with list/get/create/update/delete methods. The model must have an integer id field (default name `id`, default type `i64`). Pair with server fns that call into `{Pascal}Store::global()` to expose the store over the wire. The top-level `resources` primitive emits a model+store+server-fn slice in one entry."
+    fields:
+      - {name: name, type: string, required: true}
+      - {name: resource, type: "Model name in this doc (or synthesized by resources:)", required: true}
+      - {name: kind, type: "in_memory (default). sqlite is reserved.", required: false}
+      - {name: id_field, type: "string (default \"id\")", required: false}
+      - {name: id_type, type: "string (default \"i64\")", required: false}
+    example:
+      models:
+        - name: Product
+          fields:
+            - {name: id, type: i64}
+            - {name: name, type: String}
+      stores:
+        - name: ProductStore
+          resource: Product
+"#;
+
+const CORE_RESOURCE: &str = r#"  Resource:
+    description: "A meta-primitive that fans out into a Model + Store + 5 server fns (list/get/create/update/delete) + 2 screens (list at `{route_base}` and new at `{route_base}/new`). One entry yields a full CRUD slice. The model must declare an integer id field; defaults to id with type i64. URL params (e.g. an edit-by-id route) are not yet emitted — wire that manually."
+    fields:
+      - {name: name, type: "PascalCase resource name (Product, Order, …)", required: true}
+      - {name: fields, type: "ModelField[] — must contain the id field", required: true}
+      - {name: id_field, type: "string (default \"id\")", required: false}
+      - {name: route_base, type: "string (default \"/{plural-snake}\")", required: false}
+      - {name: derives, type: "string[] forwarded to the synthesized Model", required: false}
+    example:
+      resources:
+        - name: Product
+          fields:
+            - {name: id, type: i64}
+            - {name: name, type: String}
+            - {name: description, type: String, optional: true}
 "#;
 
 const CRUD_FORM: &str = r#"  Form:
@@ -801,6 +924,204 @@ pub struct {{ pascal }} {
 }
 "#;
 
+const STORE_TPL: &str = r#"#![cfg(feature = "server")]
+//! In-memory CRUD store for {{ res_pascal }}. Tied to the server feature so
+//! the wasm bundle does not pull it in.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use crate::model::{{ res_pascal }};
+
+pub struct {{ store_pascal }} {
+    items: Mutex<Vec<{{ res_pascal }}>>,
+    next_id: AtomicI64,
+}
+
+impl {{ store_pascal }} {
+    fn new() -> Self {
+        Self {
+            items: Mutex::new(Vec::new()),
+            next_id: AtomicI64::new(1),
+        }
+    }
+
+    pub fn global() -> &'static {{ store_pascal }} {
+        static INSTANCE: OnceLock<{{ store_pascal }}> = OnceLock::new();
+        INSTANCE.get_or_init({{ store_pascal }}::new)
+    }
+
+    pub fn list(&self) -> Vec<{{ res_pascal }}> {
+        self.items.lock().unwrap().clone()
+    }
+
+    pub fn get(&self, id: {{ id_type }}) -> Option<{{ res_pascal }}> {
+        self.items
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.{{ id_field }} == id)
+            .cloned()
+    }
+
+    pub fn create(&self, mut item: {{ res_pascal }}) -> {{ res_pascal }} {
+        item.{{ id_field }} = self.next_id.fetch_add(1, Ordering::SeqCst) as {{ id_type }};
+        self.items.lock().unwrap().push(item.clone());
+        item
+    }
+
+    pub fn update(&self, item: {{ res_pascal }}) -> Option<{{ res_pascal }}> {
+        let mut items = self.items.lock().unwrap();
+        if let Some(slot) = items.iter_mut().find(|r| r.{{ id_field }} == item.{{ id_field }}) {
+            *slot = item.clone();
+            Some(item)
+        } else {
+            None
+        }
+    }
+
+    pub fn delete(&self, id: {{ id_type }}) -> bool {
+        let mut items = self.items.lock().unwrap();
+        let before = items.len();
+        items.retain(|r| r.{{ id_field }} != id);
+        items.len() < before
+    }
+}
+"#;
+
+const SCREEN_RESOURCE_LIST_TPL: &str = r#"use dioxus::prelude::*;
+{%- if wrap_pascal %}
+use crate::components::{{ wrap_pascal }};
+{%- endif %}
+use crate::server::{{ endpoint }};
+
+#[component]
+pub fn {{ pascal }}() -> Element {
+    let items = use_resource(move || async move { {{ endpoint }}().await });
+
+    rsx! {
+{%- if wrap_pascal %}
+        {{ wrap_pascal }} {
+            div { class: "screen {{ snake }}",
+                h1 { "{{ pascal }}" }
+                match &*items.read_unchecked() {
+                    None => rsx! { div { "Loading..." } },
+                    Some(Err(e)) => rsx! { div { class: "error", "Error: {e}" } },
+                    Some(Ok(rows)) if rows.is_empty() => rsx! { div { "No items." } },
+                    Some(Ok(rows)) => rsx! {
+                        ul { class: "{{ snake }}-items",
+                            for item in rows.iter() {
+                                li { "{item:?}" }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+{%- else %}
+        div { class: "screen {{ snake }}",
+            h1 { "{{ pascal }}" }
+            match &*items.read_unchecked() {
+                None => rsx! { div { "Loading..." } },
+                Some(Err(e)) => rsx! { div { class: "error", "Error: {e}" } },
+                Some(Ok(rows)) if rows.is_empty() => rsx! { div { "No items." } },
+                Some(Ok(rows)) => rsx! {
+                    ul { class: "{{ snake }}-items",
+                        for item in rows.iter() {
+                            li { "{item:?}" }
+                        }
+                    }
+                },
+            }
+        }
+{%- endif %}
+    }
+}
+"#;
+
+const SCREEN_RESOURCE_FORM_TPL: &str = r#"use dioxus::prelude::*;
+{%- if wrap_pascal %}
+use crate::components::{{ wrap_pascal }};
+{%- endif %}
+use crate::server::{{ submit }};
+{%- if item_type %}
+use crate::model::{{ item_type }};
+{%- endif %}
+
+#[component]
+pub fn {{ pascal }}() -> Element {
+{%- for f in fields %}
+    let mut {{ f.name }} = use_signal(|| {{ f.initial }});
+{%- endfor %}
+{%- if redirect_to %}
+    let nav = navigator();
+{%- endif %}
+
+    rsx! {
+{%- if wrap_pascal %}
+        {{ wrap_pascal }} {
+            div { class: "screen {{ snake }}",
+                h1 { "{{ pascal }}" }
+                form {
+                    onsubmit: move |evt: FormEvent| {
+                        evt.prevent_default();
+{{ submit_body }}
+                    },
+{%- for f in fields %}
+                    label { "{{ f.label }}" }
+                    {{ f.tag }} {
+{%- if f.tag == "input" %}
+                        r#type: "{{ f.input_type }}",
+{%- endif %}
+                        value: "{{ '{' }}{{ f.name }}(){{ '}' }}",
+                        oninput: move |e| {{ f.name }}.set(e.value()),
+                    }
+{%- endfor %}
+                    button { r#type: "submit", "Submit" }
+                }
+            }
+        }
+{%- else %}
+        div { class: "screen {{ snake }}",
+            h1 { "{{ pascal }}" }
+            form {
+                onsubmit: move |evt: FormEvent| {
+                    evt.prevent_default();
+{{ submit_body }}
+                },
+{%- for f in fields %}
+                label { "{{ f.label }}" }
+                {{ f.tag }} {
+{%- if f.tag == "input" %}
+                    r#type: "{{ f.input_type }}",
+{%- endif %}
+                    value: "{{ '{' }}{{ f.name }}(){{ '}' }}",
+                    oninput: move |e| {{ f.name }}.set(e.value()),
+                }
+{%- endfor %}
+                button { r#type: "submit", "Submit" }
+            }
+        }
+{%- endif %}
+    }
+}
+"#;
+
+const SERVER_FN_WITH_BODY_TPL: &str = r#"use dioxus::prelude::*;
+{%- for u in extra_uses %}
+{{ u }}
+{%- endfor %}
+
+#[{{ method }}("{{ path }}")]
+pub async fn {{ snake }}(
+{%- for a in args %}
+    {{ a.name }}: {{ a.ty }},
+{%- endfor %}
+) -> Result<{{ ret }}, ServerFnError> {
+{{ body }}
+}
+"#;
+
 // ===========================================================================
 // `get_dsl_spec`
 // ===========================================================================
@@ -827,6 +1148,8 @@ pub async fn get_dsl_spec(
     out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
     out.push_str("\ncore:\n");
     out.push_str(CORE_MODEL);
+    out.push_str(CORE_STORE);
+    out.push_str(CORE_RESOURCE);
     out.push_str(CORE_COMPONENT);
     out.push_str(CORE_SCREEN);
     out.push_str(CORE_SERVER_FN);
@@ -920,7 +1243,7 @@ pub async fn execute_code(
             "execute_code: input must be a single YAML document; remove `---` separators".into(),
         );
     }
-    let doc: DslDoc = serde_yml::from_str(&p.code).map_err(|e| format!("YAML parse: {e}"))?;
+    let mut doc: DslDoc = serde_yml::from_str(&p.code).map_err(|e| format!("YAML parse: {e}"))?;
     if doc.version != SPEC_VERSION {
         return Err(format!(
             "execute_code: version must be {SPEC_VERSION:?}, got {:?}",
@@ -928,16 +1251,18 @@ pub async fn execute_code(
         ));
     }
 
+    let synth_server_fns = expand_resources(&mut doc)?;
+
     let crate_root = scaffold::crate_root(state, p.project_root.as_deref()).await?;
 
-    preflight(&doc, &crate_root, p.if_missing)?;
+    preflight(&doc, &synth_server_fns, &crate_root, p.if_missing)?;
 
     if p.dry_run {
-        return Ok(plan_dsl(&doc, &crate_root));
+        return Ok(plan_dsl(&doc, &synth_server_fns, &crate_root));
     }
 
     let skip: BTreeSet<std::path::PathBuf> = if p.if_missing {
-        skip_set(&doc, &crate_root)
+        skip_set(&doc, &synth_server_fns, &crate_root)
     } else {
         BTreeSet::new()
     };
@@ -999,6 +1324,32 @@ pub async fn execute_code(
             },
         )
         .await?;
+        merge(&mut result, r);
+    }
+
+    let mut store_emitted = false;
+    for st in &doc.stores {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/state", &st.name),
+        ) {
+            continue;
+        }
+        let r = generate_store(&crate_root, st)?;
+        merge(&mut result, r);
+        store_emitted = true;
+    }
+
+    for sf in &synth_server_fns {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/server", &sf.name),
+        ) {
+            continue;
+        }
+        let r = generate_synth_server_fn(state, &crate_root, sf, p.project_root.as_deref()).await?;
         merge(&mut result, r);
     }
 
@@ -1169,6 +1520,12 @@ pub async fn execute_code(
         );
     }
 
+    if store_emitted {
+        result.next_steps.push(
+            "declare `pub mod state;` in your crate root so server fns can resolve `crate::state::*` (the store files are `#![cfg(feature = \"server\")]` and compile to nothing on the wasm side)".into(),
+        );
+    }
+
     Ok(result)
 }
 
@@ -1219,7 +1576,11 @@ fn skip_or_record(
 
 /// Walk the doc and return the set of leaf files that already exist on disk —
 /// the primitives whose target file should be skipped in `if_missing` mode.
-fn skip_set(doc: &DslDoc, crate_root: &Path) -> BTreeSet<std::path::PathBuf> {
+fn skip_set(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+) -> BTreeSet<std::path::PathBuf> {
     let mut s = BTreeSet::new();
     let mut maybe_add = |subdir: &str, name: &str| {
         let p = leaf_for(crate_root, subdir, name);
@@ -1266,6 +1627,12 @@ fn skip_set(doc: &DslDoc, crate_root: &Path) -> BTreeSet<std::path::PathBuf> {
     for m in &doc.models {
         maybe_add("src/model", &m.name);
     }
+    for st in &doc.stores {
+        maybe_add("src/state", &st.name);
+    }
+    for sf in synth_server_fns {
+        maybe_add("src/server", &sf.name);
+    }
     s
 }
 
@@ -1273,7 +1640,7 @@ fn skip_set(doc: &DslDoc, crate_root: &Path) -> BTreeSet<std::path::PathBuf> {
 /// classify its leaf file as `would_create` (path is free) or `collisions`
 /// (path already exists), and classify the parent `mod.rs` plus any touched
 /// router file as `would_create` / `would_modify`.
-fn plan_dsl(doc: &DslDoc, crate_root: &Path) -> ScaffoldResult {
+fn plan_dsl(doc: &DslDoc, synth_server_fns: &[SynthServerFn], crate_root: &Path) -> ScaffoldResult {
     let mut out = ScaffoldResult {
         dry_run: true,
         ..Default::default()
@@ -1339,6 +1706,12 @@ fn plan_dsl(doc: &DslDoc, crate_root: &Path) -> ScaffoldResult {
     for m in &doc.models {
         leaf(&mut out, &mut mods_touched, "src/model", &m.name);
     }
+    for st in &doc.stores {
+        leaf(&mut out, &mut mods_touched, "src/state", &st.name);
+    }
+    for sf in synth_server_fns {
+        leaf(&mut out, &mut mods_touched, "src/server", &sf.name);
+    }
 
     // Router file: modified when there are routed primitives (screens or login_screens).
     if (!doc.screens.is_empty() || !doc.login_screens.is_empty())
@@ -1352,7 +1725,12 @@ fn plan_dsl(doc: &DslDoc, crate_root: &Path) -> ScaffoldResult {
 
 // ---------- pre-flight ----------
 
-fn preflight(doc: &DslDoc, crate_root: &Path, if_missing: bool) -> Result<(), String> {
+fn preflight(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+    if_missing: bool,
+) -> Result<(), String> {
     // 1. Collect every snake_case name across every primitive and reject dups
     //    that would land in the same target directory.
     let mut comp_names: BTreeSet<String> = BTreeSet::new();
@@ -1361,6 +1739,7 @@ fn preflight(doc: &DslDoc, crate_root: &Path, if_missing: bool) -> Result<(), St
     let mut srv_names: BTreeSet<String> = BTreeSet::new();
     let mut sess_names: BTreeSet<String> = BTreeSet::new();
     let mut model_names: BTreeSet<String> = BTreeSet::new();
+    let mut store_names: BTreeSet<String> = BTreeSet::new();
 
     let mut comp_dup = |name: &str| -> Result<(), String> {
         let s = name.to_snake_case();
@@ -1408,6 +1787,19 @@ fn preflight(doc: &DslDoc, crate_root: &Path, if_missing: bool) -> Result<(), St
     for s in &doc.server_fns {
         if !srv_names.insert(s.name.to_snake_case()) {
             return Err(format!("duplicate server_fn name: {}", s.name));
+        }
+    }
+    for s in synth_server_fns {
+        if !srv_names.insert(s.name.to_snake_case()) {
+            return Err(format!(
+                "resources: expansion produced server_fn {:?} which collides with an explicit `server_fns:` entry — rename or remove the conflict",
+                s.name
+            ));
+        }
+    }
+    for s in &doc.stores {
+        if !store_names.insert(s.name.to_snake_case()) {
+            return Err(format!("duplicate store name: {}", s.name));
         }
     }
     for s in &doc.session_states {
@@ -1478,17 +1870,35 @@ fn preflight(doc: &DslDoc, crate_root: &Path, if_missing: bool) -> Result<(), St
             ));
         }
     }
+    for s in &doc.stores {
+        if !model_names.contains(&s.resource.to_snake_case()) {
+            return Err(format!(
+                "store {:?} references unknown model {:?}; declare it under models",
+                s.name, s.resource
+            ));
+        }
+    }
 
     // 3. Pre-check files that would collide with what's already on disk for
-    //    each component-target name. (server_fn / signal / socket dirs may not
-    //    exist yet; existence isn't an error there.) Suppressed when
-    //    `if_missing` is set — those collisions become skip entries instead.
+    //    each component-target name. (server_fn / signal / socket / state
+    //    dirs may not exist yet; existence isn't an error there.) Suppressed
+    //    when `if_missing` is set — those collisions become skip entries
+    //    instead.
     if !if_missing {
         let comp_dir = crate_root.join("src/components");
         for n in &comp_names {
             if comp_dir.join(format!("{n}.rs")).exists() {
                 return Err(format!(
                     "src/components/{n}.rs already exists; refusing to overwrite. \
+                     Pass `if_missing: true` to skip existing primitives instead of erroring."
+                ));
+            }
+        }
+        let state_dir = crate_root.join("src/state");
+        for n in &store_names {
+            if state_dir.join(format!("{n}.rs")).exists() {
+                return Err(format!(
+                    "src/state/{n}.rs already exists; refusing to overwrite. \
                      Pass `if_missing: true` to skip existing primitives instead of erroring."
                 ));
             }
@@ -1903,15 +2313,19 @@ async fn generate_screen(
     let pascal = sc.name.to_pascal_case();
     let snake = sc.name.to_snake_case();
     let wrap_pascal = sc.wrap_with.as_ref().map(|w| w.to_pascal_case());
-    let body = render(
-        "screen",
-        SCREEN_TPL,
-        context! {
-            pascal => pascal.clone(),
-            snake => snake.clone(),
-            wrap_pascal => wrap_pascal.clone(),
-        },
-    )?;
+
+    let body = match &sc.template {
+        None => render(
+            "screen",
+            SCREEN_TPL,
+            context! {
+                pascal => pascal.clone(),
+                snake => snake.clone(),
+                wrap_pascal => wrap_pascal.clone(),
+            },
+        )?,
+        Some(t) => render_screen_template(&pascal, &snake, wrap_pascal.as_deref(), t)?,
+    };
     let mut r = write_component_file(crate_root, &snake, body)?;
     if let Some(w) = &wrap_pascal {
         r.next_steps.push(format!(
@@ -1932,6 +2346,446 @@ async fn generate_screen(
     Ok(r)
 }
 
+fn render_screen_template(
+    pascal: &str,
+    snake: &str,
+    wrap_pascal: Option<&str>,
+    t: &DslScreenTemplate,
+) -> Result<String, String> {
+    match t.kind.as_str() {
+        "empty" => render(
+            "screen",
+            SCREEN_TPL,
+            context! {
+                pascal => pascal,
+                snake => snake,
+                wrap_pascal => wrap_pascal,
+            },
+        ),
+        "resource_list" => {
+            let endpoint = t
+                .endpoint
+                .as_ref()
+                .ok_or_else(|| {
+                    format!("screen {pascal:?} template kind=resource_list requires `endpoint`")
+                })?
+                .to_snake_case();
+            render(
+                "screen_resource_list",
+                SCREEN_RESOURCE_LIST_TPL,
+                context! {
+                    pascal => pascal,
+                    snake => snake,
+                    wrap_pascal => wrap_pascal,
+                    endpoint => endpoint,
+                },
+            )
+        }
+        "resource_form" => {
+            let submit = t
+                .on_submit
+                .as_ref()
+                .or(t.endpoint.as_ref())
+                .ok_or_else(|| {
+                    format!(
+                        "screen {pascal:?} template kind=resource_form requires `on_submit` or `endpoint`"
+                    )
+                })?
+                .to_snake_case();
+            let fields_ctx: Vec<_> = t
+                .fields
+                .iter()
+                .map(|fd| {
+                    let initial = field_initial(&fd.ty);
+                    let input_type = match fd.ty.as_str() {
+                        "email" => "email",
+                        "password" => "password",
+                        "number" => "number",
+                        "checkbox" => "checkbox",
+                        "textarea" => "text",
+                        _ => "text",
+                    };
+                    let tag = if fd.ty == "textarea" {
+                        "textarea"
+                    } else {
+                        "input"
+                    };
+                    context! {
+                        name => fd.name.to_snake_case(),
+                        label => fd.name.to_pascal_case(),
+                        input_type => input_type,
+                        tag => tag,
+                        initial => initial,
+                    }
+                })
+                .collect();
+            let submit_body = resource_form_submit_body(t, &submit);
+            render(
+                "screen_resource_form",
+                SCREEN_RESOURCE_FORM_TPL,
+                context! {
+                    pascal => pascal,
+                    snake => snake,
+                    wrap_pascal => wrap_pascal,
+                    submit => submit,
+                    item_type => t.item_type.clone(),
+                    fields => fields_ctx,
+                    submit_body => submit_body,
+                    redirect_to => t.redirect_to.clone(),
+                },
+            )
+        }
+        other => Err(format!(
+            "unknown screen template kind {other:?} (expected: empty, resource_list, resource_form)"
+        )),
+    }
+}
+
+/// Build the rust body that runs inside the form's onsubmit handler.
+/// When `item_type` is set we attempt to construct it from the field signals
+/// and call the submit fn with it. Otherwise we emit a TODO body.
+fn resource_form_submit_body(t: &DslScreenTemplate, submit: &str) -> String {
+    let indent = "                ";
+    let mut out = String::new();
+    let has_item = t.item_type.is_some() && !t.fields.is_empty();
+
+    if !t.fields.is_empty() {
+        for f in &t.fields {
+            let n = f.name.to_snake_case();
+            out.push_str(&format!("{indent}let {n}_v = {n}();\n"));
+        }
+    }
+
+    if has_item {
+        let item_type = t.item_type.as_deref().unwrap();
+        out.push_str(&format!("{indent}let item = {item_type} {{\n"));
+        // Best-effort field assignment. Caller must include all required
+        // fields in `fields:` or hand-edit the produced file.
+        for f in &t.fields {
+            let n = f.name.to_snake_case();
+            let val = if matches!(f.ty.as_str(), "number") {
+                format!("{n}_v.parse().unwrap_or_default()")
+            } else {
+                format!("{n}_v")
+            };
+            out.push_str(&format!("{indent}    {n}: {val},\n"));
+        }
+        out.push_str(&format!("{indent}    ..Default::default()\n"));
+        out.push_str(&format!("{indent}}};\n"));
+        let nav_line = match &t.redirect_to {
+            Some(r) => format!("{indent}        nav.push(\"{r}\");\n"),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "{indent}spawn(async move {{\n{indent}    if {submit}(item).await.is_ok() {{\n{nav_line}{indent}    }}\n{indent}}});"
+        ));
+    } else if !t.fields.is_empty() {
+        let arg_call = t
+            .fields
+            .iter()
+            .map(|f| format!("{}_v", f.name.to_snake_case()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "{indent}spawn(async move {{\n{indent}    let _ = {submit}({arg_call}).await;\n{indent}}});"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{indent}// TODO call {submit}(...). Add `fields:` to the template to scaffold signals + inputs."
+        ));
+    }
+
+    out
+}
+
+// ---------- store + resource ----------
+
+fn generate_store(crate_root: &Path, store: &DslStore) -> Result<ScaffoldResult, String> {
+    let kind = store.kind.as_deref().unwrap_or("in_memory");
+    if kind != "in_memory" {
+        return Err(format!(
+            "store {:?}: kind {kind:?} not implemented yet (only `in_memory`)",
+            store.name
+        ));
+    }
+    let store_pascal = store.name.to_pascal_case();
+    let store_snake = store.name.to_snake_case();
+    let res_pascal = store.resource.to_pascal_case();
+    let id_field = store.id_field.as_deref().unwrap_or("id").to_snake_case();
+    let id_type = store.id_type.as_deref().unwrap_or("i64").to_string();
+    let body = render(
+        "store",
+        STORE_TPL,
+        context! {
+            store_pascal => store_pascal.clone(),
+            res_pascal => res_pascal,
+            id_field => id_field,
+            id_type => id_type,
+        },
+    )?;
+    let mut r = write_module_file(crate_root, "src/state", &store_snake, body)?;
+    r.next_steps.push(format!(
+        "declare `pub mod state;` in your crate root so server fns can reach `crate::state::{store_snake}::{store_pascal}`"
+    ));
+    Ok(r)
+}
+
+#[derive(Debug, Clone)]
+struct SynthServerFn {
+    name: String,
+    args: Vec<(String, String)>,
+    return_type: String,
+    method: &'static str,
+    path: String,
+    body: String,
+}
+
+/// Expand each `resources:` entry into the equivalent model + store + 5 server
+/// fns + 2 screens. Synth server fns are returned separately because they
+/// carry custom bodies that the standard server-fn generator can't emit.
+fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
+    let resources = std::mem::take(&mut doc.resources);
+    let mut synth = Vec::new();
+    let mut existing_models: BTreeSet<String> =
+        doc.models.iter().map(|m| m.name.to_snake_case()).collect();
+    let mut existing_stores: BTreeSet<String> =
+        doc.stores.iter().map(|s| s.name.to_snake_case()).collect();
+
+    for r in &resources {
+        let res_pascal = r.name.to_pascal_case();
+        let res_snake = r.name.to_snake_case();
+        let id_field = r.id_field.as_deref().unwrap_or("id").to_snake_case();
+        if !r.fields.iter().any(|f| f.name.to_snake_case() == id_field) {
+            return Err(format!(
+                "resource {:?} must declare its id field {id_field:?} in `fields`",
+                r.name
+            ));
+        }
+        let id_type = r
+            .fields
+            .iter()
+            .find(|f| f.name.to_snake_case() == id_field)
+            .map(|f| f.ty.clone())
+            .unwrap_or_else(|| "i64".into());
+        let plural = pluralize(&res_snake);
+        let route_base = r.route_base.clone().unwrap_or_else(|| format!("/{plural}"));
+        let store_pascal = format!("{res_pascal}Store");
+        let store_snake = format!("{res_snake}_store");
+
+        // 1. Model — synthesize unless already declared.
+        if existing_models.insert(res_snake.clone()) {
+            let mut derives = r.derives.clone();
+            if !derives.iter().any(|d| d == "Default") {
+                derives.push("Default".into());
+            }
+            doc.models.push(DslModel {
+                name: res_pascal.clone(),
+                fields: r.fields.clone(),
+                derives,
+            });
+        }
+
+        // 2. Store — synthesize unless already declared.
+        if existing_stores.insert(store_snake.clone()) {
+            doc.stores.push(DslStore {
+                name: store_pascal.clone(),
+                resource: res_pascal.clone(),
+                kind: Some("in_memory".into()),
+                id_field: Some(id_field.clone()),
+                id_type: Some(id_type.clone()),
+            });
+        }
+
+        // 3. Server fns
+        let store_path = format!("crate::state::{store_snake}::{store_pascal}");
+        let list_name = format!("list_{plural}");
+        let get_name = format!("get_{res_snake}");
+        let create_name = format!("create_{res_snake}");
+        let update_name = format!("update_{res_snake}");
+        let delete_name = format!("delete_{res_snake}");
+
+        let mk_body = |call: &str| {
+            format!(
+                "    #[cfg(feature = \"server\")]\n    {{\n        return Ok({call});\n    }}\n    #[cfg(not(feature = \"server\"))]\n    {{\n        unreachable!()\n    }}"
+            )
+        };
+
+        synth.push(SynthServerFn {
+            name: list_name.clone(),
+            args: vec![],
+            return_type: format!("Vec<crate::model::{res_pascal}>"),
+            method: "get",
+            path: format!("/api{route_base}"),
+            body: mk_body(&format!("{store_path}::global().list()")),
+        });
+        synth.push(SynthServerFn {
+            name: get_name,
+            args: vec![("id".into(), id_type.clone())],
+            return_type: format!("Option<crate::model::{res_pascal}>"),
+            method: "post",
+            path: format!("/api{route_base}/get"),
+            body: mk_body(&format!("{store_path}::global().get(id)")),
+        });
+        synth.push(SynthServerFn {
+            name: create_name.clone(),
+            args: vec![("item".into(), format!("crate::model::{res_pascal}"))],
+            return_type: format!("crate::model::{res_pascal}"),
+            method: "post",
+            path: format!("/api{route_base}"),
+            body: mk_body(&format!("{store_path}::global().create(item)")),
+        });
+        synth.push(SynthServerFn {
+            name: update_name,
+            args: vec![("item".into(), format!("crate::model::{res_pascal}"))],
+            return_type: format!("Option<crate::model::{res_pascal}>"),
+            method: "post",
+            path: format!("/api{route_base}/update"),
+            body: mk_body(&format!("{store_path}::global().update(item)")),
+        });
+        synth.push(SynthServerFn {
+            name: delete_name,
+            args: vec![("id".into(), id_type.clone())],
+            return_type: "bool".into(),
+            method: "post",
+            path: format!("/api{route_base}/delete"),
+            body: mk_body(&format!("{store_path}::global().delete(id)")),
+        });
+
+        // 4. Screens: list + new. Edit/show require URL params which the
+        //    DSL doesn't yet emit.
+        let list_screen = format!("{res_pascal}ListScreen");
+        let new_screen = format!("{res_pascal}NewScreen");
+        let non_id_fields: Vec<DslFieldDef> = r
+            .fields
+            .iter()
+            .filter(|f| f.name.to_snake_case() != id_field)
+            .map(|f| DslFieldDef {
+                name: f.name.clone(),
+                ty: field_type_for_model_field(&f.ty),
+                validation: None,
+            })
+            .collect();
+
+        doc.screens.push(DslScreen {
+            name: list_screen,
+            route: route_base.clone(),
+            wrap_with: None,
+            template: Some(DslScreenTemplate {
+                kind: "resource_list".into(),
+                endpoint: Some(list_name.clone()),
+                item_type: Some(res_pascal.clone()),
+                on_submit: None,
+                redirect_to: None,
+                fields: vec![],
+            }),
+        });
+        doc.screens.push(DslScreen {
+            name: new_screen,
+            route: format!("{route_base}/new"),
+            wrap_with: None,
+            template: Some(DslScreenTemplate {
+                kind: "resource_form".into(),
+                endpoint: Some(create_name.clone()),
+                item_type: Some(format!("crate::model::{res_pascal}")),
+                on_submit: Some(create_name),
+                redirect_to: Some(route_base.clone()),
+                fields: non_id_fields,
+            }),
+        });
+    }
+    Ok(synth)
+}
+
+/// Map a model field type onto the form-input kind used by the form template.
+/// Anything non-trivial defaults to "text" — the user can post-edit.
+fn field_type_for_model_field(ty: &str) -> String {
+    match ty {
+        "bool" => "checkbox".into(),
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize" | "isize" | "f32"
+        | "f64" => "number".into(),
+        _ => "text".into(),
+    }
+}
+
+fn pluralize(snake: &str) -> String {
+    if snake.ends_with('s')
+        || snake.ends_with("sh")
+        || snake.ends_with("ch")
+        || snake.ends_with('x')
+        || snake.ends_with('z')
+    {
+        format!("{snake}es")
+    } else if snake.ends_with('y') {
+        let chars: Vec<char> = snake.chars().collect();
+        if chars.len() >= 2 && !"aeiou".contains(chars[chars.len() - 2]) {
+            let mut s = snake.to_string();
+            s.pop();
+            s.push_str("ies");
+            return s;
+        }
+        format!("{snake}s")
+    } else {
+        format!("{snake}s")
+    }
+}
+
+async fn generate_synth_server_fn(
+    state: &Arc<State>,
+    crate_root: &Path,
+    sf: &SynthServerFn,
+    project_root: Option<&str>,
+) -> Result<ScaffoldResult, String> {
+    // Reuse the fullstack-capable check by detecting through ProjectInfo.
+    let project = match project_root {
+        Some(root) => crate::project::ProjectInfo::detect(std::path::Path::new(root)),
+        None => state.project.lock().await.clone(),
+    };
+    let active = &project.dioxus_features;
+    let fullstack_capable = active.iter().any(|f| f == "fullstack")
+        || (active.iter().any(|f| f == "server") && active.iter().any(|f| f == "web"));
+    if !fullstack_capable {
+        return Err(
+            "this project does not have `fullstack` (or `web`+`server`) enabled on the dioxus dep; \
+             resource: server fns require a fullstack setup. Run audit_feature_flags for guidance."
+                .into(),
+        );
+    }
+
+    let snake = sf.name.to_snake_case();
+    let server_dir = crate_root.join("src/server");
+    std::fs::create_dir_all(&server_dir).map_err(|e| e.to_string())?;
+    let target = server_dir.join(format!("{snake}.rs"));
+    if target.exists() {
+        return Err(format!("{} already exists", target.display()));
+    }
+    let body = render(
+        "server_fn_body",
+        SERVER_FN_WITH_BODY_TPL,
+        context! {
+            snake => snake.clone(),
+            ret => sf.return_type.clone(),
+            method => sf.method,
+            path => sf.path.clone(),
+            args => sf.args.iter().map(|(n, t)| context!{ name => n.clone(), ty => t.clone() }).collect::<Vec<_>>(),
+            body => sf.body.clone(),
+            extra_uses => Vec::<String>::new(),
+        },
+    )?;
+    std::fs::write(&target, body).map_err(|e| e.to_string())?;
+    let mod_rs = server_dir.join("mod.rs");
+    let upsert = upsert_mod_entry(&mod_rs, &snake)?;
+    let (files_created, files_modified) = match upsert {
+        ModUpsert::Created => (vec![target, mod_rs], vec![]),
+        ModUpsert::Modified => (vec![target], vec![mod_rs]),
+        ModUpsert::Unchanged => (vec![target], vec![]),
+    };
+    Ok(ScaffoldResult {
+        files_created,
+        files_modified,
+        ..Default::default()
+    })
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1948,6 +2802,8 @@ mod tests {
     fn spec_examples_round_trip() {
         let blocks: &[(&str, &str)] = &[
             ("CORE_MODEL", CORE_MODEL),
+            ("CORE_STORE", CORE_STORE),
+            ("CORE_RESOURCE", CORE_RESOURCE),
             ("CORE_COMPONENT", CORE_COMPONENT),
             ("CORE_SCREEN", CORE_SCREEN),
             ("CORE_SERVER_FN", CORE_SERVER_FN),
@@ -2080,7 +2936,7 @@ components:
 "#,
         )
         .unwrap();
-        let plan = plan_dsl(&doc, root);
+        let plan = plan_dsl(&doc, &[], root);
         assert!(plan.dry_run);
         assert!(
             plan.collisions.iter().any(|p| p.ends_with("existing.rs")),
@@ -2114,7 +2970,7 @@ components:
 "#,
         )
         .unwrap();
-        let skip = skip_set(&doc, root);
+        let skip = skip_set(&doc, &[], root);
         assert_eq!(skip.len(), 1);
         assert!(skip.iter().any(|p| p.ends_with("existing.rs")));
     }
@@ -2343,7 +3199,7 @@ models:
 "#,
         )
         .unwrap();
-        let err = preflight(&doc, dir.path(), false).unwrap_err();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
         assert!(err.contains("duplicate model"), "got {err}");
 
         let doc: DslDoc = serde_yml::from_str(
@@ -2356,8 +3212,245 @@ models:
 "#,
         )
         .unwrap();
-        let err = preflight(&doc, dir.path(), false).unwrap_err();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
         assert!(err.contains("duplicate field"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn execute_code_expands_resource_into_full_slice() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "resource_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // Minimal Routable enum so route inserts succeed.
+        std::fs::write(
+            root.join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+resources:
+  - name: Product
+    fields:
+      - {name: id, type: i64}
+      - {name: name, type: String}
+      - {name: description, type: String, optional: true}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed");
+
+        // Model
+        assert!(root.join("src/model/product.rs").exists());
+        let model_body = std::fs::read_to_string(root.join("src/model/product.rs")).unwrap();
+        assert!(
+            model_body.contains("Default"),
+            "synthesized resource model should derive Default, got:\n{model_body}"
+        );
+
+        // Store
+        let store_path = root.join("src/state/product_store.rs");
+        assert!(store_path.exists(), "store file should be emitted");
+        let store_body = std::fs::read_to_string(&store_path).unwrap();
+        assert!(store_body.contains(r#"#![cfg(feature = "server")]"#));
+        assert!(store_body.contains("pub struct ProductStore"));
+        assert!(store_body.contains("fn list("));
+        assert!(store_body.contains("fn get("));
+        assert!(store_body.contains("fn create("));
+        assert!(store_body.contains("fn update("));
+        assert!(store_body.contains("fn delete("));
+        assert!(store_body.contains("use crate::model::Product"));
+        assert!(root.join("src/state/mod.rs").exists());
+
+        // 5 server fns
+        for name in [
+            "list_products",
+            "get_product",
+            "create_product",
+            "update_product",
+            "delete_product",
+        ] {
+            let p = root.join("src/server").join(format!("{name}.rs"));
+            assert!(p.exists(), "missing {}", p.display());
+            let body = std::fs::read_to_string(&p).unwrap();
+            assert!(
+                body.contains(r#"#[cfg(feature = "server")]"#)
+                    && body.contains("ProductStore::global()"),
+                "server fn {name} should call into store, got:\n{body}"
+            );
+        }
+
+        // 2 screens, 2 route variants
+        assert!(root.join("src/components/product_list_screen.rs").exists());
+        assert!(root.join("src/components/product_new_screen.rs").exists());
+        let router = std::fs::read_to_string(root.join("src/router.rs")).unwrap();
+        assert!(
+            router.contains("ProductListScreen"),
+            "list screen should be in router, got:\n{router}"
+        );
+        assert!(
+            router.contains("ProductNewScreen"),
+            "new screen should be in router, got:\n{router}"
+        );
+
+        // Helpful next_steps
+        assert!(
+            result
+                .next_steps
+                .iter()
+                .any(|s| s.contains("pub mod state;")),
+            "expected a `pub mod state;` next_step, got {:?}",
+            result.next_steps
+        );
+
+        // The list screen uses use_resource + match ladder bound to list_products.
+        let list_body =
+            std::fs::read_to_string(root.join("src/components/product_list_screen.rs")).unwrap();
+        assert!(
+            list_body.contains("use_resource(")
+                && list_body.contains("list_products()")
+                && list_body.contains("Loading..."),
+            "list screen should be resource-bound, got:\n{list_body}"
+        );
+
+        // The new screen has one input per non-id field and a submit body that
+        // constructs Product and navigates to /products.
+        let new_body =
+            std::fs::read_to_string(root.join("src/components/product_new_screen.rs")).unwrap();
+        assert!(
+            new_body.contains("use_signal") && new_body.contains("create_product"),
+            "new screen should call create_product, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("nav.push(\"/products\")"),
+            "new screen should redirect to /products, got:\n{new_body}"
+        );
+
+        // Every emitted .rs file must at least parse as Rust. This catches
+        // template typos that no behavioural assert covers.
+        for rel in [
+            "src/model/product.rs",
+            "src/state/product_store.rs",
+            "src/server/list_products.rs",
+            "src/server/get_product.rs",
+            "src/server/create_product.rs",
+            "src/server/update_product.rs",
+            "src/server/delete_product.rs",
+            "src/components/product_list_screen.rs",
+            "src/components/product_new_screen.rs",
+        ] {
+            let body = std::fs::read_to_string(root.join(rel)).unwrap();
+            syn::parse_file(&body)
+                .unwrap_or_else(|e| panic!("emitted {rel} does not parse: {e}\n---\n{body}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_dry_run_classifies_all_synth_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "resource_dry"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+resources:
+  - name: Order
+    fields:
+      - {name: id, type: i64}
+      - {name: total, type: f64}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: true,
+            },
+        )
+        .await
+        .expect("dry_run should succeed");
+        assert!(result.dry_run);
+        let paths: Vec<String> = result
+            .would_create
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("order_store.rs")));
+        assert!(paths.iter().any(|p| p.ends_with("list_orders.rs")));
+        assert!(paths.iter().any(|p| p.ends_with("get_order.rs")));
+        assert!(paths.iter().any(|p| p.ends_with("create_order.rs")));
+        assert!(paths.iter().any(|p| p.ends_with("order_list_screen.rs")));
+        assert!(paths.iter().any(|p| p.ends_with("order_new_screen.rs")));
+        assert!(
+            !root.join("src/state/order_store.rs").exists(),
+            "dry_run must not write"
+        );
+    }
+
+    #[test]
+    fn pluralize_handles_common_cases() {
+        assert_eq!(pluralize("product"), "products");
+        assert_eq!(pluralize("order"), "orders");
+        assert_eq!(pluralize("box"), "boxes");
+        assert_eq!(pluralize("category"), "categories");
+        assert_eq!(pluralize("toy"), "toys");
+        assert_eq!(pluralize("bus"), "buses");
+    }
+
+    #[test]
+    fn preflight_rejects_store_referencing_unknown_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+stores:
+  - name: WidgetStore
+    resource: Widget
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(err.contains("unknown model"), "got {err}");
     }
 
     #[tokio::test]
@@ -2398,7 +3491,10 @@ models:
         .expect("dry_run should succeed");
         assert!(result.dry_run);
         assert!(
-            result.would_create.iter().any(|p| p.ends_with("product.rs")),
+            result
+                .would_create
+                .iter()
+                .any(|p| p.ends_with("product.rs")),
             "expected product.rs in would_create, got {:?}",
             result.would_create
         );

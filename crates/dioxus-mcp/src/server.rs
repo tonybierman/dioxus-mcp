@@ -220,7 +220,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Return the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. Call this BEFORE `execute_code` so the model authors a valid YAML doc."
+        description = "Return the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for new CRUD features. Call this BEFORE `execute_code` so the model authors a valid YAML doc."
     )]
     async fn get_dsl_spec(
         &self,
