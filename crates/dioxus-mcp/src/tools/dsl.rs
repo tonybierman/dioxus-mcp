@@ -161,6 +161,38 @@ pub struct DslScreenTemplate {
     /// text, email, password, number, checkbox, textarea.
     #[serde(default)]
     pub fields: Vec<DslFieldDef>,
+    /// Internal: rich-CRUD context populated by `expand_resources` so the list
+    /// and form templates can emit a real table (with edit/delete actions) or
+    /// an edit-by-id form. Not part of the user-facing spec.
+    #[serde(skip)]
+    pub crud: Option<CrudCtx>,
+}
+
+/// Internal context for resource-synthesized CRUD screens. Carries everything
+/// needed for the rich list table and the edit-by-id form.
+#[derive(Debug, Clone)]
+pub struct CrudCtx {
+    /// PascalCase model name (e.g. "Product").
+    pub model_pascal: String,
+    /// All model fields, with their original Rust types and optionality.
+    pub model_fields: Vec<DslModelField>,
+    /// snake_case name of the id field.
+    pub id_field: String,
+    /// Rust type of the id field (e.g. "i64").
+    pub id_type: String,
+    /// snake_case server fn that returns `Vec<Model>` for the list.
+    pub list_endpoint: String,
+    /// snake_case server fn that returns `Option<Model>` by id.
+    pub get_endpoint: String,
+    /// snake_case server fn that updates an existing item.
+    pub update_endpoint: String,
+    /// snake_case server fn that deletes by id, returning `bool`.
+    pub delete_endpoint: String,
+    /// Base route for the resource (e.g. "/products"). Used as the redirect
+    /// target on submit and as the prefix when building edit links.
+    pub list_route: String,
+    /// Full route to the "new" screen (e.g. "/products/new").
+    pub new_route: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -230,6 +262,11 @@ pub struct DslScreen {
     /// `endpoint`) and navigates to `redirect_to`.
     #[serde(default)]
     pub template: Option<DslScreenTemplate>,
+    /// Internal: path-param fields for the Routable variant (e.g.
+    /// `[("id", "i64")]` for `/items/:id`). Set by `expand_resources` for
+    /// edit screens; not part of the user-facing spec.
+    #[serde(skip)]
+    pub route_params: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -241,6 +278,16 @@ pub struct DslFieldDef {
     pub ty: String,
     #[serde(default)]
     pub validation: Option<String>,
+    /// Internal: original Rust type from the source model. Set by
+    /// `expand_resources` so the screen-form template can emit the right
+    /// signal-init, oninput, and submit-side parse / Some() wrapping. Not part
+    /// of the user-facing spec.
+    #[serde(skip)]
+    pub rust_type: Option<String>,
+    /// Internal: whether the original model field was `optional: true`. Drives
+    /// `Some(...)` wrapping at submit time.
+    #[serde(skip)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -418,13 +465,14 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #                                    emit a list + new screen per entry)
 #
 # Re-run semantics:
-#   - By default execute_code REFUSES to overwrite an existing leaf file under
-#     src/components — the call errors with the conflicting path. Pass
-#     `if_missing: true` to silently skip already-present primitives instead;
-#     the response lists each skipped path under `collisions`.
-#   - Models, server fns, signals, sockets, session states still error on the
-#     inner `<target> already exists` check when their target file exists and
-#     `if_missing` is false.
+#   - By default execute_code REFUSES to overwrite an existing leaf file —
+#     models, components, server fns, signals, sockets, stores, and session
+#     states all hard-error with the conflicting path when their target
+#     already exists. Pass `if_missing: true` to silently skip every
+#     already-present primitive instead; the response lists each skipped
+#     path under `collisions`. Re-runs adding one new field to a model
+#     while leaving every other primitive in place are safe with
+#     `if_missing: true`.
 #   - Route inserts are name-keyed and idempotent: a Screen / LoginScreen whose
 #     variant name already exists is skipped.
 #   - mod.rs entries are inserted alphabetically; re-runs produce stable diffs.
@@ -1229,7 +1277,6 @@ pub fn {{ pascal }}() -> Element {
 {%- if wrap_pascal %}
         {{ wrap_pascal }} {
             div { class: "screen {{ snake }}",
-                h1 { "{{ pascal }}" }
                 form {
                     onsubmit: move |evt: FormEvent| {
                         evt.prevent_default();
@@ -1241,8 +1288,13 @@ pub fn {{ pascal }}() -> Element {
 {%- if f.tag == "input" %}
                         r#type: "{{ f.input_type }}",
 {%- endif %}
+{%- if f.is_bool %}
+                        checked: "{{ '{' }}{{ f.name }}(){{ '}' }}",
+                        oninput: move |e| {{ f.name }}.set(e.value() == "true"),
+{%- else %}
                         value: "{{ '{' }}{{ f.name }}(){{ '}' }}",
                         oninput: move |e| {{ f.name }}.set(e.value()),
+{%- endif %}
                     }
 {%- endfor %}
                     button { r#type: "submit", "Submit" }
@@ -1251,7 +1303,6 @@ pub fn {{ pascal }}() -> Element {
         }
 {%- else %}
         div { class: "screen {{ snake }}",
-            h1 { "{{ pascal }}" }
             form {
                 onsubmit: move |evt: FormEvent| {
                     evt.prevent_default();
@@ -1263,14 +1314,240 @@ pub fn {{ pascal }}() -> Element {
 {%- if f.tag == "input" %}
                     r#type: "{{ f.input_type }}",
 {%- endif %}
+{%- if f.is_bool %}
+                    checked: "{{ '{' }}{{ f.name }}(){{ '}' }}",
+                    oninput: move |e| {{ f.name }}.set(e.value() == "true"),
+{%- else %}
                     value: "{{ '{' }}{{ f.name }}(){{ '}' }}",
                     oninput: move |e| {{ f.name }}.set(e.value()),
+{%- endif %}
                 }
 {%- endfor %}
                 button { r#type: "submit", "Submit" }
             }
         }
 {%- endif %}
+    }
+}
+"#;
+
+/// Resource-synthesized list screen with a real table: column headers from the
+/// model fields, keyed rows, per-row Edit link, Delete button (calls the
+/// delete server-fn and bumps a local version signal to refetch), and an
+/// empty-state CTA. Used when `crud_ctx` is set on a `resource_list` template.
+const SCREEN_RESOURCE_CRUD_LIST_TPL: &str = r#"use dioxus::prelude::*;
+{%- if wrap_pascal %}
+use crate::components::{{ wrap_pascal }};
+{%- endif %}
+use crate::server::{{ list_endpoint }};
+use crate::server::{{ delete_endpoint }};
+
+#[component]
+pub fn {{ pascal }}() -> Element {
+    let mut version = use_signal(|| 0u32);
+    let items = use_resource(move || async move {
+        let _ = version();
+        {{ list_endpoint }}().await
+    });
+
+    rsx! {
+{%- if wrap_pascal %}
+        {{ wrap_pascal }} {
+            div { class: "screen {{ snake }}",
+                div { class: "toolbar",
+                    a { href: "{{ new_route }}", "New {{ humanized }}" }
+                }
+                match &*items.read_unchecked() {
+                    None => rsx! { div { "Loading..." } },
+                    Some(Err(e)) => rsx! { div { class: "error", "Error: {e}" } },
+                    Some(Ok(rows)) if rows.is_empty() => rsx! {
+                        div { class: "empty",
+                            p { "No items yet." }
+                            a { href: "{{ new_route }}", "Add your first {{ humanized }}" }
+                        }
+                    },
+                    Some(Ok(rows)) => rsx! {
+                        table { class: "{{ snake }}-table",
+                            thead {
+                                tr {
+{%- for col in columns %}
+                                    th { "{{ col.label }}" }
+{%- endfor %}
+                                    th { "" }
+                                }
+                            }
+                            tbody {
+                                for row in rows.iter() {
+                                    tr { key: "{{ '{' }}row.{{ id_field }}{{ '}' }}",
+{%- for col in columns %}
+                                        td { "{{ '{' }}row.{{ col.name }}{{ col.fmt }}{{ '}' }}" }
+{%- endfor %}
+                                        td {
+                                            a { href: "{{ list_route }}/{{ '{' }}row.{{ id_field }}{{ '}' }}/edit", "Edit" }
+                                            " "
+                                            button {
+                                                onclick: {
+                                                    let row_id = row.{{ id_field }}.clone();
+                                                    move |_| {
+                                                        let row_id = row_id.clone();
+                                                        spawn(async move {
+                                                            if {{ delete_endpoint }}(row_id).await.is_ok() {
+                                                                *version.write() += 1;
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                "Delete"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+{%- else %}
+        div { class: "screen {{ snake }}",
+            div { class: "toolbar",
+                a { href: "{{ new_route }}", "New {{ humanized }}" }
+            }
+            match &*items.read_unchecked() {
+                None => rsx! { div { "Loading..." } },
+                Some(Err(e)) => rsx! { div { class: "error", "Error: {e}" } },
+                Some(Ok(rows)) if rows.is_empty() => rsx! {
+                    div { class: "empty",
+                        p { "No items yet." }
+                        a { href: "{{ new_route }}", "Add your first {{ humanized }}" }
+                    }
+                },
+                Some(Ok(rows)) => rsx! {
+                    table { class: "{{ snake }}-table",
+                        thead {
+                            tr {
+{%- for col in columns %}
+                                th { "{{ col.label }}" }
+{%- endfor %}
+                                th { "" }
+                            }
+                        }
+                        tbody {
+                            for row in rows.iter() {
+                                tr { key: "{{ '{' }}row.{{ id_field }}{{ '}' }}",
+{%- for col in columns %}
+                                    td { "{{ '{' }}row.{{ col.name }}{{ col.fmt }}{{ '}' }}" }
+{%- endfor %}
+                                    td {
+                                        a { href: "{{ list_route }}/{{ '{' }}row.{{ id_field }}{{ '}' }}/edit", "Edit" }
+                                        " "
+                                        button {
+                                            onclick: {
+                                                let row_id = row.{{ id_field }}.clone();
+                                                move |_| {
+                                                    let row_id = row_id.clone();
+                                                    spawn(async move {
+                                                        if {{ delete_endpoint }}(row_id).await.is_ok() {
+                                                            *version.write() += 1;
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            "Delete"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+{%- endif %}
+    }
+}
+"#;
+
+/// Resource-synthesized edit screen. Outer component takes the id path-param,
+/// fetches via the get_* server fn, and renders an inner Form sub-component
+/// (defined in the same file) that takes the loaded item as a prop and
+/// initializes signals from it. Submit constructs the model with the original
+/// id preserved and calls the update_* server fn.
+const SCREEN_RESOURCE_EDIT_FORM_TPL: &str = r#"use dioxus::prelude::*;
+{%- if wrap_pascal %}
+use crate::components::{{ wrap_pascal }};
+{%- endif %}
+use crate::server::{{ get_endpoint }};
+use crate::server::{{ update_endpoint }};
+use crate::model::{{ model_pascal }};
+
+#[component]
+pub fn {{ pascal }}(id: {{ id_type }}) -> Element {
+    let resource = use_resource(move || {
+        let id_v = id.clone();
+        async move { {{ get_endpoint }}(id_v).await }
+    });
+
+    rsx! {
+{%- if wrap_pascal %}
+        {{ wrap_pascal }} {
+            div { class: "screen {{ snake }}",
+                match &*resource.read_unchecked() {
+                    None => rsx! { div { "Loading..." } },
+                    Some(Err(e)) => rsx! { div { class: "error", "Error: {e}" } },
+                    Some(Ok(None)) => rsx! { div { "Not found" } },
+                    Some(Ok(Some(item))) => rsx! {
+                        {{ pascal }}Form { item: item.clone() }
+                    },
+                }
+            }
+        }
+{%- else %}
+        div { class: "screen {{ snake }}",
+            match &*resource.read_unchecked() {
+                None => rsx! { div { "Loading..." } },
+                Some(Err(e)) => rsx! { div { class: "error", "Error: {e}" } },
+                Some(Ok(None)) => rsx! { div { "Not found" } },
+                Some(Ok(Some(item))) => rsx! {
+                    {{ pascal }}Form { item: item.clone() }
+                },
+            }
+        }
+{%- endif %}
+    }
+}
+
+#[component]
+fn {{ pascal }}Form(item: {{ model_pascal }}) -> Element {
+    let nav = navigator();
+    let original_id = item.{{ id_field }}.clone();
+{%- for f in fields %}
+    let mut {{ f.name }} = use_signal(|| {{ f.signal_init_from_item }});
+{%- endfor %}
+
+    rsx! {
+        form {
+            onsubmit: move |evt: FormEvent| {
+                evt.prevent_default();
+{{ submit_body }}
+            },
+{%- for f in fields %}
+            label { "{{ f.label }}" }
+            {{ f.tag }} {
+{%- if f.tag == "input" %}
+                r#type: "{{ f.input_type }}",
+{%- endif %}
+{%- if f.is_bool %}
+                checked: "{{ '{' }}{{ f.name }}(){{ '}' }}",
+                oninput: move |e| {{ f.name }}.set(e.value() == "true"),
+{%- else %}
+                value: "{{ '{' }}{{ f.name }}(){{ '}' }}",
+                oninput: move |e| {{ f.name }}.set(e.value()),
+{%- endif %}
+            }
+{%- endfor %}
+            button { r#type: "submit", "Save" }
+        }
     }
 }
 "#;
@@ -2511,6 +2788,7 @@ async fn generate_login_screen(
             component: pascal.clone(),
             router_file: None,
             project_root: project_root.map(str::to_owned),
+            params: Vec::new(),
         },
     )
     .await?;
@@ -2587,6 +2865,7 @@ async fn generate_screen(
             component: pascal,
             router_file: None,
             project_root: project_root.map(str::to_owned),
+            params: sc.route_params.clone(),
         },
     )
     .await?;
@@ -2611,6 +2890,12 @@ fn render_screen_template(
             },
         ),
         "resource_list" => {
+            // When CRUD ctx is attached (resource-synthesized), emit the rich
+            // table with edit/delete actions. Otherwise fall back to the
+            // simple list ladder for user-authored cases.
+            if let Some(crud) = &t.crud {
+                return render_resource_crud_list(pascal, snake, wrap_pascal, crud);
+            }
             let endpoint = t
                 .endpoint
                 .as_ref()
@@ -2629,6 +2914,15 @@ fn render_screen_template(
                 },
             )
         }
+        "resource_edit_form" => {
+            let crud = t.crud.as_ref().ok_or_else(|| {
+                format!(
+                    "screen {pascal:?} kind=resource_edit_form is an internal template kind \
+                     emitted by `resources:`; it cannot be used directly from a user-authored screen"
+                )
+            })?;
+            render_resource_edit_form(pascal, snake, wrap_pascal, t, crud)
+        }
         "resource_form" => {
             let submit = t
                 .on_submit
@@ -2644,7 +2938,13 @@ fn render_screen_template(
                 .fields
                 .iter()
                 .map(|fd| {
-                    let initial = field_initial(&fd.ty);
+                    let is_bool = fd.ty == "checkbox"
+                        || fd.rust_type.as_deref() == Some("bool");
+                    let initial = if is_bool {
+                        "false".to_string()
+                    } else {
+                        "String::new()".to_string()
+                    };
                     let input_type = match fd.ty.as_str() {
                         "email" => "email",
                         "password" => "password",
@@ -2664,6 +2964,7 @@ fn render_screen_template(
                         input_type => input_type,
                         tag => tag,
                         initial => initial,
+                        is_bool => is_bool,
                     }
                 })
                 .collect();
@@ -2689,9 +2990,221 @@ fn render_screen_template(
     }
 }
 
+fn render_resource_crud_list(
+    pascal: &str,
+    snake: &str,
+    wrap_pascal: Option<&str>,
+    crud: &CrudCtx,
+) -> Result<String, String> {
+    let columns: Vec<_> = crud
+        .model_fields
+        .iter()
+        .map(|f| {
+            let inner = strip_option(&f.ty).unwrap_or(&f.ty);
+            let optional = f.optional || strip_option(&f.ty).is_some();
+            // Option<...> doesn't impl Display; fall back to Debug. Custom
+            // (non-primitive) types may not impl Display either — use Debug to
+            // be safe; users can post-edit if they want a Display format.
+            let is_primitive = matches!(
+                inner,
+                "String"
+                    | "bool"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+                    | "f32"
+                    | "f64"
+                    | "char"
+            );
+            let fmt = if optional || !is_primitive { ":?" } else { "" };
+            context! {
+                name => f.name.to_snake_case(),
+                label => humanize(&f.name),
+                fmt => fmt,
+            }
+        })
+        .collect();
+    render(
+        "screen_resource_crud_list",
+        SCREEN_RESOURCE_CRUD_LIST_TPL,
+        context! {
+            pascal => pascal,
+            snake => snake,
+            wrap_pascal => wrap_pascal,
+            list_endpoint => crud.list_endpoint.clone(),
+            delete_endpoint => crud.delete_endpoint.clone(),
+            new_route => crud.new_route.clone(),
+            list_route => crud.list_route.clone(),
+            id_field => crud.id_field.clone(),
+            humanized => humanize(&crud.model_pascal),
+            columns => columns,
+        },
+    )
+}
+
+fn render_resource_edit_form(
+    pascal: &str,
+    snake: &str,
+    wrap_pascal: Option<&str>,
+    t: &DslScreenTemplate,
+    crud: &CrudCtx,
+) -> Result<String, String> {
+    let fields_ctx: Vec<_> = t
+        .fields
+        .iter()
+        .map(|fd| {
+            let is_bool =
+                fd.ty == "checkbox" || fd.rust_type.as_deref() == Some("bool");
+            let input_type = match fd.ty.as_str() {
+                "email" => "email",
+                "password" => "password",
+                "number" => "number",
+                "checkbox" => "checkbox",
+                "textarea" => "text",
+                _ => "text",
+            };
+            let tag = if fd.ty == "textarea" {
+                "textarea"
+            } else {
+                "input"
+            };
+            let signal_init_from_item = signal_init_from_item(fd);
+            context! {
+                name => fd.name.to_snake_case(),
+                label => fd.name.to_pascal_case(),
+                input_type => input_type,
+                tag => tag,
+                is_bool => is_bool,
+                signal_init_from_item => signal_init_from_item,
+            }
+        })
+        .collect();
+
+    let submit_body = resource_edit_form_submit_body(t, crud);
+
+    render(
+        "screen_resource_edit_form",
+        SCREEN_RESOURCE_EDIT_FORM_TPL,
+        context! {
+            pascal => pascal,
+            snake => snake,
+            wrap_pascal => wrap_pascal,
+            model_pascal => crud.model_pascal.clone(),
+            id_field => crud.id_field.clone(),
+            id_type => crud.id_type.clone(),
+            get_endpoint => crud.get_endpoint.clone(),
+            update_endpoint => crud.update_endpoint.clone(),
+            fields => fields_ctx,
+            submit_body => submit_body,
+        },
+    )
+}
+
+/// Build the `use_signal(|| ...)` initializer expression for an edit-form
+/// signal pre-populated from a loaded `item: Model`. Branches on the field's
+/// rust_type + optional metadata.
+fn signal_init_from_item(f: &DslFieldDef) -> String {
+    let rust_ty = f.rust_type.as_deref().unwrap_or("String");
+    let inner = strip_option(rust_ty).unwrap_or(rust_ty);
+    let optional = f.optional || strip_option(rust_ty).is_some();
+    let field_name = f.name.to_snake_case();
+    let is_bool = inner == "bool";
+    let is_string = inner == "String";
+
+    if is_bool {
+        return if optional {
+            format!("item.{field_name}.unwrap_or(false)")
+        } else {
+            format!("item.{field_name}")
+        };
+    }
+    if is_string {
+        return if optional {
+            format!("item.{field_name}.clone().unwrap_or_default()")
+        } else {
+            format!("item.{field_name}.clone()")
+        };
+    }
+    // Numeric (or unknown): store as String so the input is editable.
+    if optional {
+        format!("item.{field_name}.map(|v| v.to_string()).unwrap_or_default()")
+    } else {
+        format!("item.{field_name}.to_string()")
+    }
+}
+
+/// Build the submit body for the edit form. Preserves the original id and
+/// calls the update_* server fn. Navigates to the list route on success.
+fn resource_edit_form_submit_body(t: &DslScreenTemplate, crud: &CrudCtx) -> String {
+    let indent = "                ";
+    let mut out = String::new();
+    for f in &t.fields {
+        let n = f.name.to_snake_case();
+        out.push_str(&format!("{indent}let {n}_v = {n}();\n"));
+    }
+    out.push_str(&format!(
+        "{indent}let id_v = original_id.clone();\n"
+    ));
+    out.push_str(&format!(
+        "{indent}let item = {} {{\n",
+        crud.model_pascal
+    ));
+    out.push_str(&format!("{indent}    {}: id_v,\n", crud.id_field));
+    for f in &t.fields {
+        let n = f.name.to_snake_case();
+        let val = field_submit_expr(f, &format!("{n}_v"));
+        out.push_str(&format!("{indent}    {n}: {val},\n"));
+    }
+    out.push_str(&format!("{indent}    ..Default::default()\n"));
+    out.push_str(&format!("{indent}}};\n"));
+    let nav_line = format!(
+        "{indent}        nav.push(\"{}\");\n",
+        crud.list_route
+    );
+    out.push_str(&format!(
+        "{indent}spawn(async move {{\n{indent}    if {}(item).await.is_ok() {{\n{nav_line}{indent}    }}\n{indent}}});",
+        crud.update_endpoint
+    ));
+    out
+}
+
+/// "stock_movement" or "StockMovement" → "Stock movement". Used for h1 / link
+/// text on the synthesized CRUD screens.
+fn humanize(s: &str) -> String {
+    let snake = s.to_snake_case();
+    let mut out = String::with_capacity(snake.len());
+    for (i, ch) in snake.chars().enumerate() {
+        if ch == '_' {
+            out.push(' ');
+        } else if i == 0 {
+            for u in ch.to_uppercase() {
+                out.push(u);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Build the rust body that runs inside the form's onsubmit handler.
 /// When `item_type` is set we attempt to construct it from the field signals
 /// and call the submit fn with it. Otherwise we emit a TODO body.
+///
+/// Each field's submit-side expression is computed from its
+/// `rust_type` + `optional` metadata (populated by `expand_resources` from the
+/// source model). This produces compiling code for `String`, `Option<String>`,
+/// integer/float (parsed from the String-backed signal), their Option variants,
+/// and `bool`.
 fn resource_form_submit_body(t: &DslScreenTemplate, submit: &str) -> String {
     let indent = "                ";
     let mut out = String::new();
@@ -2707,15 +3220,10 @@ fn resource_form_submit_body(t: &DslScreenTemplate, submit: &str) -> String {
     if has_item {
         let item_type = t.item_type.as_deref().unwrap();
         out.push_str(&format!("{indent}let item = {item_type} {{\n"));
-        // Best-effort field assignment. Caller must include all required
-        // fields in `fields:` or hand-edit the produced file.
+        // Field assignment driven by the original Rust type when known.
         for f in &t.fields {
             let n = f.name.to_snake_case();
-            let val = if matches!(f.ty.as_str(), "number") {
-                format!("{n}_v.parse().unwrap_or_default()")
-            } else {
-                format!("{n}_v")
-            };
+            let val = field_submit_expr(f, &format!("{n}_v"));
             out.push_str(&format!("{indent}    {n}: {val},\n"));
         }
         out.push_str(&format!("{indent}    ..Default::default()\n"));
@@ -2744,6 +3252,84 @@ fn resource_form_submit_body(t: &DslScreenTemplate, submit: &str) -> String {
     }
 
     out
+}
+
+/// Build the Rust expression that converts a String-backed (or bool-backed)
+/// signal snapshot into the model field's actual type. `signal_var` is the
+/// local that already holds the snapshot (e.g. `"name_v"`).
+fn field_submit_expr(f: &DslFieldDef, signal_var: &str) -> String {
+    let rust_ty = f.rust_type.as_deref().unwrap_or("String");
+    let inner = strip_option(rust_ty).unwrap_or(rust_ty);
+    let is_numeric = matches!(
+        inner,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    );
+    let is_bool = inner == "bool";
+    let is_string = inner == "String";
+
+    let optional = f.optional || strip_option(rust_ty).is_some();
+
+    if is_bool {
+        // bool-backed signal already holds a bool — no parsing needed.
+        return if optional {
+            format!("Some({signal_var})")
+        } else {
+            signal_var.to_string()
+        };
+    }
+
+    if is_numeric {
+        let parse_expr = format!("{signal_var}.parse::<{inner}>().unwrap_or_default()");
+        return if optional {
+            format!(
+                "if {signal_var}.is_empty() {{ None }} else {{ {signal_var}.parse::<{inner}>().ok() }}"
+            )
+        } else {
+            parse_expr
+        };
+    }
+
+    if is_string {
+        return if optional {
+            format!(
+                "if {signal_var}.is_empty() {{ None }} else {{ Some({signal_var}) }}"
+            )
+        } else {
+            signal_var.to_string()
+        };
+    }
+
+    // Unknown type — fall back to a parse attempt for non-optional, or a TODO
+    // wrapper for optional. The generated file is meant to be edited if the
+    // model uses a custom type.
+    if optional {
+        format!(
+            "if {signal_var}.is_empty() {{ None }} else {{ {signal_var}.parse::<{inner}>().ok() }}"
+        )
+    } else {
+        format!("{signal_var}.parse::<{inner}>().unwrap_or_default()")
+    }
+}
+
+/// If `ty` is an `Option<T>` (textually, with optional whitespace) returns `Some("T")`;
+/// otherwise returns `None`. Naive, but adequate for the type strings we emit
+/// from models (e.g. `Option<String>`, `Option<i64>`).
+fn strip_option(ty: &str) -> Option<&str> {
+    let t = ty.trim();
+    let inner = t.strip_prefix("Option<")?.strip_suffix('>')?;
+    Some(inner.trim())
 }
 
 // ---------- store + resource ----------
@@ -2823,7 +3409,13 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
             .map(|f| f.ty.clone())
             .unwrap_or_else(|| "i64".into());
         let plural = pluralize(&res_snake);
-        let route_base = r.route_base.clone().unwrap_or_else(|| format!("/{plural}"));
+        // Default URL slugs are kebab-case (web convention): a model named
+        // `StockMovement` lands at `/stock-movements`, not `/stock_movements`.
+        // User-supplied `route_base` is taken verbatim.
+        let route_base = r
+            .route_base
+            .clone()
+            .unwrap_or_else(|| format!("/{}", plural.replace('_', "-")));
         let store_pascal = format!("{res_pascal}Store");
         let store_snake = format!("{res_snake}_store");
 
@@ -2877,7 +3469,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
             body: mk_body(&format!("{store_path}::global().list()")),
         });
         synth.push(SynthServerFn {
-            name: get_name,
+            name: get_name.clone(),
             args: vec![("id".into(), id_type.clone())],
             return_type: format!("Option<crate::model::{res_pascal}>"),
             method: "post",
@@ -2893,7 +3485,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
             body: mk_body(&format!("{store_path}::global().create(item)")),
         });
         synth.push(SynthServerFn {
-            name: update_name,
+            name: update_name.clone(),
             args: vec![("item".into(), format!("crate::model::{res_pascal}"))],
             return_type: format!("Option<crate::model::{res_pascal}>"),
             method: "post",
@@ -2901,7 +3493,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
             body: mk_body(&format!("{store_path}::global().update(item)")),
         });
         synth.push(SynthServerFn {
-            name: delete_name,
+            name: delete_name.clone(),
             args: vec![("id".into(), id_type.clone())],
             return_type: "bool".into(),
             method: "post",
@@ -2909,10 +3501,12 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
             body: mk_body(&format!("{store_path}::global().delete(id)")),
         });
 
-        // 4. Screens: list + new. Edit/show require URL params which the
-        //    DSL doesn't yet emit.
+        // 4. Screens: list + new + edit. The edit screen takes an `id`
+        //    path-param so the Routable variant has `{ id: <id_type> }`.
         let list_screen = format!("{res_pascal}ListScreen");
         let new_screen = format!("{res_pascal}NewScreen");
+        let edit_screen = format!("{res_pascal}EditScreen");
+        let new_route = format!("{route_base}/new");
         let non_id_fields: Vec<DslFieldDef> = r
             .fields
             .iter()
@@ -2921,8 +3515,23 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 name: f.name.clone(),
                 ty: field_type_for_model_field(&f.ty),
                 validation: None,
+                rust_type: Some(f.ty.clone()),
+                optional: f.optional,
             })
             .collect();
+
+        let crud = CrudCtx {
+            model_pascal: res_pascal.clone(),
+            model_fields: r.fields.clone(),
+            id_field: id_field.clone(),
+            id_type: id_type.clone(),
+            list_endpoint: list_name.clone(),
+            get_endpoint: get_name.clone(),
+            update_endpoint: update_name.clone(),
+            delete_endpoint: delete_name.clone(),
+            list_route: route_base.clone(),
+            new_route: new_route.clone(),
+        };
 
         doc.screens.push(DslScreen {
             name: list_screen,
@@ -2935,20 +3544,41 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 on_submit: None,
                 redirect_to: None,
                 fields: vec![],
+                crud: Some(crud.clone()),
             }),
+            route_params: Vec::new(),
         });
         doc.screens.push(DslScreen {
             name: new_screen,
-            route: format!("{route_base}/new"),
+            route: new_route.clone(),
             wrap_with: None,
             template: Some(DslScreenTemplate {
                 kind: "resource_form".into(),
                 endpoint: Some(create_name.clone()),
-                item_type: Some(format!("crate::model::{res_pascal}")),
-                on_submit: Some(create_name),
+                // Bare model name — the screen template emits the
+                // `use crate::model::{item_type};` import itself.
+                item_type: Some(res_pascal.clone()),
+                on_submit: Some(create_name.clone()),
+                redirect_to: Some(route_base.clone()),
+                fields: non_id_fields.clone(),
+                crud: Some(crud.clone()),
+            }),
+            route_params: Vec::new(),
+        });
+        doc.screens.push(DslScreen {
+            name: edit_screen,
+            route: format!("{route_base}/:id/edit"),
+            wrap_with: None,
+            template: Some(DslScreenTemplate {
+                kind: "resource_edit_form".into(),
+                endpoint: Some(get_name.clone()),
+                item_type: Some(res_pascal.clone()),
+                on_submit: Some(update_name.clone()),
                 redirect_to: Some(route_base.clone()),
                 fields: non_id_fields,
+                crud: Some(crud),
             }),
+            route_params: vec![("id".to_string(), id_type.clone())],
         });
     }
     Ok(synth)
@@ -3541,6 +4171,80 @@ components:
     }
 
     #[tokio::test]
+    async fn if_missing_skips_existing_model_server_fn_signal_session() {
+        // The skip-set machinery covers every primitive — confirm it applies
+        // uniformly so iterative re-runs (add one field, re-run) don't force
+        // the user to manually delete pre-existing files.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("if_missing_all_primitives"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/model")).unwrap();
+        std::fs::create_dir_all(root.join("src/server")).unwrap();
+        std::fs::create_dir_all(root.join("src/signals")).unwrap();
+        std::fs::create_dir_all(root.join("src/auth")).unwrap();
+        // Pre-seed each with hand-written content.
+        std::fs::write(root.join("src/model/widget.rs"), "// hand model\n").unwrap();
+        std::fs::write(
+            root.join("src/server/fetch_widgets.rs"),
+            "// hand server fn\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/signals/counter.rs"), "// hand signal\n").unwrap();
+        std::fs::write(root.join("src/auth/session.rs"), "// hand session\n").unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Widget
+    fields:
+      - {name: id, type: i64}
+server_fns:
+  - name: fetch_widgets
+    return_type: String
+signals:
+  - name: counter
+    type: i32
+    initial: "0"
+session_states:
+  - name: session
+    user_type: String
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: true,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("if_missing should skip pre-existing primitives, not error");
+
+        for stub in [
+            "src/model/widget.rs",
+            "src/server/fetch_widgets.rs",
+            "src/signals/counter.rs",
+            "src/auth/session.rs",
+        ] {
+            assert!(
+                result.collisions.iter().any(|p| p.ends_with(stub)),
+                "expected {stub} in collisions, got {:?}",
+                result.collisions
+            );
+            let body = std::fs::read_to_string(root.join(stub)).unwrap();
+            assert!(
+                body.starts_with("// hand"),
+                "if_missing must not overwrite {stub}, got: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dry_run_returns_plan_without_writing() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
@@ -3885,6 +4589,43 @@ resources:
             "new screen should redirect to /products, got:\n{new_body}"
         );
 
+        // The new screen's `use` for the model type should be a single
+        // segment — emitted as `use crate::model::Product;`, never the
+        // earlier-bug duplicated `use crate::model::crate::model::Product;`.
+        assert!(
+            new_body.contains("use crate::model::Product;"),
+            "new screen should use bare model path, got:\n{new_body}"
+        );
+        assert!(
+            !new_body.contains("crate::model::crate::"),
+            "new screen must not duplicate the crate::model:: prefix, got:\n{new_body}"
+        );
+
+        // The edit screen should also have been emitted with an id prop,
+        // call get_/update_, and route under /products/:id/edit.
+        let edit_path = root.join("src/components/product_edit_screen.rs");
+        assert!(
+            edit_path.exists(),
+            "edit screen file should be emitted"
+        );
+        let edit_body = std::fs::read_to_string(&edit_path).unwrap();
+        assert!(
+            edit_body.contains("pub fn ProductEditScreen(id: i64)"),
+            "edit screen should take id prop, got:\n{edit_body}"
+        );
+        assert!(
+            edit_body.contains("get_product(") && edit_body.contains("update_product"),
+            "edit screen should fetch via get_product and submit via update_product, got:\n{edit_body}"
+        );
+        assert!(
+            router.contains("ProductEditScreen { id: i64 }"),
+            "edit route variant should carry id field, got:\n{router}"
+        );
+        assert!(
+            router.contains("/products/:id/edit"),
+            "edit route path should appear, got:\n{router}"
+        );
+
         // Every emitted .rs file must at least parse as Rust. This catches
         // template typos that no behavioural assert covers.
         for rel in [
@@ -3897,11 +4638,201 @@ resources:
             "src/server/delete_product.rs",
             "src/components/product_list_screen.rs",
             "src/components/product_new_screen.rs",
+            "src/components/product_edit_screen.rs",
         ] {
             let body = std::fs::read_to_string(root.join(rel)).unwrap();
             syn::parse_file(&body)
                 .unwrap_or_else(|e| panic!("emitted {rel} does not parse: {e}\n---\n{body}"));
         }
+    }
+
+    #[tokio::test]
+    async fn resource_form_template_emits_typed_constructor_for_mixed_field_types() {
+        // Mix String / Option<String> / i64 / Option<i64> / f64 / bool so the
+        // new screen exercises every branch of the form-typing fix.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("res_typing_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+resources:
+  - name: Product
+    fields:
+      - {name: id, type: i64}
+      - {name: name, type: String}
+      - {name: description, type: String, optional: true}
+      - {name: quantity, type: i64}
+      - {name: reorder_at, type: i64, optional: true}
+      - {name: price, type: f64}
+      - {name: active, type: bool}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed");
+
+        let new_body = std::fs::read_to_string(
+            root.join("src/components/product_new_screen.rs"),
+        )
+        .unwrap();
+
+        // Signal initializers must be String::new() for text-backed inputs and
+        // `false` for the bool. Crucially: NO `0i64` or `0.0f64` literals —
+        // numeric fields are String-backed and parsed at submit.
+        assert!(
+            new_body.contains("let mut name = use_signal(|| String::new())"),
+            "name should be a String-backed signal, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("let mut description = use_signal(|| String::new())"),
+            "description (Option<String>) should still be String-backed, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("let mut quantity = use_signal(|| String::new())"),
+            "i64 signal should be String-backed, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("let mut price = use_signal(|| String::new())"),
+            "f64 signal should be String-backed, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("let mut active = use_signal(|| false)"),
+            "bool signal should be initialized to false, got:\n{new_body}"
+        );
+        assert!(
+            !new_body.contains("0i64") && !new_body.contains("0.0f64"),
+            "numeric signals must not be initialized with a typed literal, got:\n{new_body}"
+        );
+
+        // Submit-side constructor must wrap Option fields and parse numerics.
+        assert!(
+            new_body.contains("name: name_v,"),
+            "String field assigns raw signal value, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("if description_v.is_empty() { None } else { Some(description_v) }"),
+            "Option<String> must wrap with Some and treat empty as None, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("quantity_v.parse::<i64>().unwrap_or_default()"),
+            "i64 field must be parsed from String, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("price_v.parse::<f64>().unwrap_or_default()"),
+            "f64 field must be parsed from String, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("if reorder_at_v.is_empty() { None } else { reorder_at_v.parse::<i64>().ok() }"),
+            "Option<i64> must parse-or-none on empty, got:\n{new_body}"
+        );
+        assert!(
+            new_body.contains("active: active_v,"),
+            "bool field reads signal directly, got:\n{new_body}"
+        );
+
+        // No duplicated crate::model:: prefix.
+        assert!(
+            !new_body.contains("crate::model::crate::"),
+            "new screen must not duplicate the crate::model:: prefix, got:\n{new_body}"
+        );
+
+        // All synthesized screens must still parse as valid Rust.
+        for rel in [
+            "src/components/product_list_screen.rs",
+            "src/components/product_new_screen.rs",
+            "src/components/product_edit_screen.rs",
+        ] {
+            let body = std::fs::read_to_string(root.join(rel)).unwrap();
+            syn::parse_file(&body)
+                .unwrap_or_else(|e| panic!("emitted {rel} does not parse: {e}\n---\n{body}"));
+        }
+
+        // The list screen should be a real table with column headers, an
+        // edit link, and a delete button — not the placeholder `li{item:?}`.
+        let list_body = std::fs::read_to_string(
+            root.join("src/components/product_list_screen.rs"),
+        )
+        .unwrap();
+        assert!(
+            list_body.contains("table {")
+                && list_body.contains("thead {")
+                && list_body.contains("tbody {"),
+            "list screen should emit a real table, got:\n{list_body}"
+        );
+        assert!(
+            list_body.contains("key: \"{row.id}\""),
+            "rows should be keyed by id, got:\n{list_body}"
+        );
+        assert!(
+            list_body.contains("delete_product("),
+            "delete button should call delete_product, got:\n{list_body}"
+        );
+        assert!(
+            list_body.contains("/products/{row.id}/edit"),
+            "edit link should point at /products/{{id}}/edit, got:\n{list_body}"
+        );
+        assert!(
+            list_body.contains("*version.write() += 1"),
+            "delete should bump a version signal to refetch, got:\n{list_body}"
+        );
+        // No `li { \"{item:?}\" }` placeholder.
+        assert!(
+            !list_body.contains("li { \"{item:?}\" }"),
+            "list should not retain the placeholder li body, got:\n{list_body}"
+        );
+
+        // The edit screen should pre-populate signals from the loaded item,
+        // preserve the original id, and call update_product.
+        let edit_body = std::fs::read_to_string(
+            root.join("src/components/product_edit_screen.rs"),
+        )
+        .unwrap();
+        assert!(
+            edit_body.contains("let mut name = use_signal(|| item.name.clone())"),
+            "edit form should init name from item, got:\n{edit_body}"
+        );
+        assert!(
+            edit_body
+                .contains("let mut description = use_signal(|| item.description.clone().unwrap_or_default())"),
+            "edit form should unwrap Option<String> from item, got:\n{edit_body}"
+        );
+        assert!(
+            edit_body.contains("let mut quantity = use_signal(|| item.quantity.to_string())"),
+            "edit form should convert numeric to String, got:\n{edit_body}"
+        );
+        assert!(
+            edit_body.contains("id: id_v,") && edit_body.contains("let id_v = original_id.clone();"),
+            "edit submit body should preserve the original id, got:\n{edit_body}"
+        );
+        assert!(
+            edit_body.contains("update_product(item)"),
+            "edit submit should call update_product, got:\n{edit_body}"
+        );
     }
 
     #[tokio::test]
@@ -3954,8 +4885,66 @@ resources:
         assert!(paths.iter().any(|p| p.ends_with("order_list_screen.rs")));
         assert!(paths.iter().any(|p| p.ends_with("order_new_screen.rs")));
         assert!(
+            paths.iter().any(|p| p.ends_with("order_edit_screen.rs")),
+            "dry_run should classify the synthesized edit screen, got {paths:?}"
+        );
+        assert!(
             !root.join("src/state/order_store.rs").exists(),
             "dry_run must not write"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_default_route_base_is_kebab_case() {
+        // A `StockMovement` resource without an explicit `route_base` should
+        // default to the kebab-case slug `/stock-movements`, not the
+        // snake_case `/stock_movements` web convention violator.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("kebab_route_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+resources:
+  - name: StockMovement
+    fields:
+      - {name: id, type: i64}
+      - {name: note, type: String}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed");
+
+        let router = std::fs::read_to_string(root.join("src/router.rs")).unwrap();
+        assert!(
+            router.contains("/stock-movements")
+                && !router.contains("/stock_movements"),
+            "default route slug should be kebab-case, got router:\n{router}"
         );
     }
 

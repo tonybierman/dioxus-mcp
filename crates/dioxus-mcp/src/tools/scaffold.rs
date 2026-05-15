@@ -253,6 +253,11 @@ pub struct CreateRouteParams {
     /// Absolute path to the Dioxus project root. Required when the MCP server was not
     /// started in the target project directory.
     pub project_root: Option<String>,
+    /// Optional path-param fields for the variant. Each entry is `(name, type)`
+    /// and lands as `Variant { name: type }` so Dioxus's Routable derive can
+    /// extract the value from the URL. Omit for variants with no path params.
+    #[serde(default)]
+    pub params: Vec<(String, String)>,
 }
 
 pub async fn create_route(
@@ -274,7 +279,7 @@ pub async fn create_route(
         format!("ensure `{variant_name}` exists and is in scope at the routable enum"),
         "consider running `cargo fmt` on the router file".into(),
     ];
-    match plan_route_insertion(&src, &variant_name, &p.path)? {
+    match plan_route_insertion(&src, &variant_name, &p.path, &p.params)? {
         RouteInsertion::AlreadyMatches => Ok(ScaffoldResult {
             next_steps,
             ..Default::default()
@@ -308,6 +313,7 @@ fn plan_route_insertion(
     src: &str,
     variant_name: &str,
     path: &str,
+    params: &[(String, String)],
 ) -> Result<RouteInsertion, String> {
     let file = syn::parse_file(src).map_err(|e| format!("parse: {e}"))?;
     let routable = file
@@ -335,7 +341,17 @@ fn plan_route_insertion(
         }
     }
 
-    let variant = format!("    #[route(\"{path}\")]\n    {variant_name} {{}},\n");
+    let fields = if params.is_empty() {
+        String::new()
+    } else {
+        let inner = params
+            .iter()
+            .map(|(n, t)| format!("{n}: {t}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" {inner} ")
+    };
+    let variant = format!("    #[route(\"{path}\")]\n    {variant_name} {{{fields}}},\n");
     let needle_open = format!("enum {enum_name}");
     let Some(start) = src.find(&needle_open) else {
         return Err(format!("could not locate `enum {enum_name}` in source"));
@@ -602,9 +618,15 @@ pub(crate) enum ModUpsert {
 /// Insert `pub mod {name}; pub use {name}::*;` into `mod_rs`, keeping all
 /// `pub mod` / `pub use` entries sorted by name. Any non-entry lines (comments,
 /// hand-written re-exports, etc.) are preserved verbatim at the top of the file.
+///
+/// A file we create from scratch carries `#![allow(unused_imports)]` at the
+/// top: the blanket `pub use foo::*;` re-export pattern routinely flags as
+/// `unused_imports` when one of the synthesized items (e.g. a delete_* server
+/// fn) isn't called by anything yet, so suppressing the warning at the
+/// re-export site keeps `cargo check` clean during iteration.
 pub(crate) fn upsert_mod_entry(mod_rs: &Path, name: &str) -> Result<ModUpsert, String> {
     if !mod_rs.exists() {
-        let body = format!("pub mod {name};\npub use {name}::*;\n");
+        let body = format!("#![allow(unused_imports)]\npub mod {name};\npub use {name}::*;\n");
         std::fs::write(mod_rs, body).map_err(|e| e.to_string())?;
         return Ok(ModUpsert::Created);
     }
@@ -613,8 +635,13 @@ pub(crate) fn upsert_mod_entry(mod_rs: &Path, name: &str) -> Result<ModUpsert, S
     let mut header: Vec<String> = Vec::new();
     let mut entries: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut header_done = false;
+    let mut had_allow_unused = false;
     for raw in current.lines() {
         let line = raw.trim();
+        if line == "#![allow(unused_imports)]" {
+            had_allow_unused = true;
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("pub mod ")
             && let Some(n) = rest.strip_suffix(';')
         {
@@ -642,6 +669,10 @@ pub(crate) fn upsert_mod_entry(mod_rs: &Path, name: &str) -> Result<ModUpsert, S
         .or_insert_with(|| vec![format!("pub mod {name};"), format!("pub use {name}::*;")]);
 
     let mut rebuilt = String::new();
+    // Re-attach the inner attribute if the existing file had one.
+    if had_allow_unused {
+        rebuilt.push_str("#![allow(unused_imports)]\n");
+    }
     for h in &header {
         rebuilt.push_str(h);
         rebuilt.push('\n');
@@ -677,7 +708,7 @@ pub enum Route {
 
     #[test]
     fn inserts_new_variant() {
-        let r = plan_route_insertion(BASE, "About", "/about").unwrap();
+        let r = plan_route_insertion(BASE, "About", "/about", &[]).unwrap();
         match r {
             RouteInsertion::Insert(new) => {
                 assert!(new.contains("#[route(\"/about\")]"));
@@ -690,14 +721,35 @@ pub enum Route {
     }
 
     #[test]
+    fn inserts_new_variant_with_params() {
+        let r = plan_route_insertion(
+            BASE,
+            "EditUser",
+            "/users/:id/edit",
+            &[("id".into(), "i64".into())],
+        )
+        .unwrap();
+        match r {
+            RouteInsertion::Insert(new) => {
+                assert!(new.contains("#[route(\"/users/:id/edit\")]"));
+                assert!(
+                    new.contains("EditUser { id: i64 }"),
+                    "expected variant with id field, got:\n{new}"
+                );
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
     fn skips_existing_variant_same_path() {
-        let r = plan_route_insertion(BASE, "Home", "/").unwrap();
+        let r = plan_route_insertion(BASE, "Home", "/", &[]).unwrap();
         assert!(matches!(r, RouteInsertion::AlreadyMatches));
     }
 
     #[test]
     fn errors_on_existing_variant_different_path() {
-        let err = plan_route_insertion(BASE, "Home", "/landing").unwrap_err();
+        let err = plan_route_insertion(BASE, "Home", "/landing", &[]).unwrap_err();
         assert!(err.contains("route conflict"), "got: {err}");
         assert!(err.contains("Home"));
     }
@@ -705,7 +757,7 @@ pub enum Route {
     #[test]
     fn errors_without_routable_enum() {
         let src = "pub enum NotRoutable { Foo, Bar }";
-        let err = plan_route_insertion(src, "Foo", "/foo").unwrap_err();
+        let err = plan_route_insertion(src, "Foo", "/foo", &[]).unwrap_err();
         assert!(err.contains("Routable"));
     }
 }
@@ -760,7 +812,14 @@ mod mod_upsert_tests {
         let r = upsert_mod_entry(&p, "foo").unwrap();
         assert_eq!(r, ModUpsert::Created);
         let body = std::fs::read_to_string(&p).unwrap();
-        assert_eq!(body, "pub mod foo;\npub use foo::*;\n");
+        // Freshly-created mod.rs files carry an `#![allow(unused_imports)]`
+        // shield so that wildcard re-exports of as-yet-uncalled items
+        // (e.g. delete_* server fns generated alongside their list/get
+        // siblings) don't trip `cargo check` warnings while iterating.
+        assert_eq!(
+            body,
+            "#![allow(unused_imports)]\npub mod foo;\npub use foo::*;\n"
+        );
     }
 
     #[test]

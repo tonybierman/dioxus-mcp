@@ -343,14 +343,22 @@ fn lint_rsx_tokens(m: &syn::Macro, _src: &str, issues: &mut Vec<RsxIssue>) {
 
 fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
     // 1) `for ... { ... }` without a `key:` attribute somewhere in the body.
+    //    Find the brace-delim body group specifically — earlier versions
+    //    grabbed the first group of any delimiter, which mis-targeted
+    //    `for x in xs.iter() { ... }` at the `()` of `.iter()` instead of
+    //    the body block (causing false positives).
     let mut i = 0;
     while i < tokens.len() {
         if let TokenTree::Ident(id) = &tokens[i]
             && id == "for"
-            && let Some(brace_idx) = find_matching_brace(tokens, i)
+            && let Some(body_idx) = find_for_body(tokens, i)
         {
-            let body_slice = &tokens[i + 1..=brace_idx];
-            if !slice_has_key_attr(body_slice) {
+            let body_group = match &tokens[body_idx] {
+                TokenTree::Group(g) => g,
+                _ => unreachable!("find_for_body returned a non-group index"),
+            };
+            let body_tokens: Vec<TokenTree> = body_group.stream().clone().into_iter().collect();
+            if !slice_has_key_attr(&body_tokens) {
                 let s = id.span().start();
                 issues.push(RsxIssue {
                             line: s.line,
@@ -403,9 +411,14 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
     }
 }
 
-fn find_matching_brace(tokens: &[TokenTree], start_after: usize) -> Option<usize> {
+/// Locate the `{ ... }` body group of a `for` loop. Skips groups with other
+/// delimiters (e.g. the parens from `for x in xs.iter() { ... }`) so the
+/// key-attribute scan inspects the loop's actual child elements.
+fn find_for_body(tokens: &[TokenTree], start_after: usize) -> Option<usize> {
     for (k, tt) in tokens.iter().enumerate().skip(start_after + 1) {
-        if let TokenTree::Group(_) = tt {
+        if let TokenTree::Group(g) = tt
+            && g.delimiter() == proc_macro2::Delimiter::Brace
+        {
             return Some(k);
         }
     }
@@ -614,4 +627,116 @@ async fn resolve_in_project(state: &Arc<State>, file: &str, project_root: Option
             .unwrap_or_else(|| state.project_root.clone())
     };
     base.join(p)
+}
+
+#[cfg(test)]
+mod check_rsx_tests {
+    use super::lint_single_file;
+
+    fn lint(src: &str) -> Vec<String> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("t.rs");
+        std::fs::write(&path, src).unwrap();
+        lint_single_file(&path)
+            .unwrap()
+            .issues
+            .into_iter()
+            .map(|i| i.message)
+            .collect()
+    }
+
+    #[test]
+    fn detects_missing_key_on_loop_child() {
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let _ = rsx! {
+        ul {
+            for x in vec![1, 2, 3] {
+                li { "{x}" }
+            }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().any(|m| m.contains("missing a `key:")),
+            "expected key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_key_on_element_with_other_attrs() {
+        // Element body has `key:` mixed with other attributes — the lint
+        // recurses into the body group and finds it.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let _ = rsx! {
+        table {
+            for p in vec![1] {
+                tr { key: "{p}", class: "row",
+                    td { "{p}" }
+                }
+            }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_for_iterates_via_method_call() {
+        // Regression: `for x in xs.iter() { ... }` used to make the lint
+        // target the `()` of `.iter()` instead of the body, mis-firing
+        // even when the body had a proper `key:` attribute.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let xs: Vec<i32> = vec![];
+    let _ = rsx! {
+        ul {
+            for x in xs.iter() {
+                li { key: "{x}", "{x}" }
+            }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_key_on_component_invocation() {
+        // Component invocation `Row { key: "{p.id}", ... }` is also a brace
+        // group; the recursion into it finds the key.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+#[derive(Clone, PartialEq, Props)]
+struct RowProps { id: i32 }
+fn Row(props: RowProps) -> Element { rsx! {} }
+fn t() {
+    let _ = rsx! {
+        for p in vec![1, 2] {
+            Row { key: "{p}", id: p }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning, got {issues:?}"
+        );
+    }
 }
