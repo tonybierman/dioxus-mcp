@@ -748,6 +748,7 @@ fn tool_get_dsl_spec_core_only() {
     let spec = r["spec"].as_str().unwrap();
     assert!(spec.contains("version: \"1\""), "spec: {spec}");
     assert!(spec.contains("core:"), "spec: {spec}");
+    assert!(spec.contains("Model:"), "spec: {spec}");
     assert!(spec.contains("Component:"), "spec: {spec}");
     assert!(spec.contains("Screen:"), "spec: {spec}");
     assert!(spec.contains("ServerFn:"), "spec: {spec}");

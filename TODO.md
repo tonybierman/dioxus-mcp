@@ -5,7 +5,7 @@ Improvement checklist derived from a real-world build (an inventory management a
 ## High impact — turn the DSL from "file generator" into "feature generator"
 
 - [ ] **Parameterized stub bodies.** Today every generated component body is `div { class: "…", "X component" }` and every server fn body is `Ok(Default::default())`. Every file has to be hand-rewritten. Add a `body:` field or a `template:` enum (`form | list | crud-table | resource-view | empty`) to each primitive so the stub is at least directionally useful.
-- [ ] **`models:` (or `types:`) primitive.** A DSL doc can declare server fns that reference `crate::model::Product`, but the model itself has to be hand-written first. Add a top-level `models:` section that emits Rust structs with serde derives and shared types between client and server.
+- [x] **`models:` (or `types:`) primitive.** A DSL doc can declare server fns that reference `crate::model::Product`, but the model itself has to be hand-written first. Add a top-level `models:` section that emits Rust structs with serde derives and shared types between client and server.
 - [ ] **`store:` primitive.** Server fns currently scaffold as signature-only stubs. Add a store primitive (`store: { kind: in_memory|sqlite, resource: Product }`) that emits a typed CRUD helper *and* wires the matching server fns into it. Combined with `models:`, one YAML doc would describe a full resource slice.
 - [ ] **Client-side hook scaffolding.** A large fraction of hand-written code was `use_resource(...)` + the `match &*res.read_unchecked() { None|Some(Err)|Some(Ok) }` ladder. A "resource-bound screen" primitive that binds a screen to a server fn and emits the loading/error/data branches would eliminate the bulk of repetitive UI plumbing.
 

@@ -34,6 +34,8 @@ pub struct DslDoc {
     /// Spec version. Must equal "1".
     pub version: String,
     #[serde(default)]
+    pub models: Vec<DslModel>,
+    #[serde(default)]
     pub server_fns: Vec<DslServerFn>,
     #[serde(default)]
     pub signals: Vec<DslSignal>,
@@ -57,6 +59,27 @@ pub struct DslDoc {
     pub protected_routes: Vec<DslProtectedRoute>,
     #[serde(default)]
     pub screens: Vec<DslScreen>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslModel {
+    pub name: String,
+    pub fields: Vec<DslModelField>,
+    /// Extra derives beyond the defaults (Debug, Clone, PartialEq, Serialize,
+    /// Deserialize). Duplicates with defaults are de-duplicated.
+    #[serde(default)]
+    pub derives: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslModelField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -246,6 +269,8 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   src/components/{snake}.rs        Component, Form, List, Table, Feed,
 #                                    LoginScreen, ProtectedRoute, Screen
 #   src/components/mod.rs            entries added (sorted), file created if missing
+#   src/model/{snake}.rs             Model (struct with serde derives)
+#   src/model/mod.rs                 entries added (sorted)
 #   src/server/{snake}.rs            ServerFn
 #   src/server/mod.rs                entries added (sorted)
 #   src/signals/{snake}.rs           Signal
@@ -263,14 +288,30 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #     src/components — the call errors with the conflicting path. Pass
 #     `if_missing: true` to silently skip already-present primitives instead;
 #     the response lists each skipped path under `collisions`.
-#   - Server fns, signals, sockets, session states still error on the inner
-#     `<target> already exists` check when their target file exists and
+#   - Models, server fns, signals, sockets, session states still error on the
+#     inner `<target> already exists` check when their target file exists and
 #     `if_missing` is false.
 #   - Route inserts are name-keyed and idempotent: a Screen / LoginScreen whose
 #     variant name already exists is skipped.
 #   - mod.rs entries are inserted alphabetically; re-runs produce stable diffs.
 #   - Pass `dry_run: true` to compute `would_create` + `would_modify` (plus any
 #     `collisions`) without touching disk.
+"#;
+
+const CORE_MODEL: &str = r#"  Model:
+    description: A shared data type with serde derives. Generates src/model/{snake}.rs and exposes the struct as crate::model::{Pascal}. Server fns can name it in their return_type (e.g. `Vec<Product>`); forthcoming `store:` and `resource:` primitives will consume it directly. Project must depend on `serde = { version = "1", features = ["derive"] }`.
+    fields:
+      - {name: name, type: string, required: true}
+      - {name: fields, type: "ModelField[] — each {name, type, optional?}", required: true}
+      - {name: derives, type: "string[] — extra derives appended after Debug, Clone, PartialEq, Serialize, Deserialize", required: false}
+    example:
+      models:
+        - name: Product
+          fields:
+            - {name: id, type: i64}
+            - {name: name, type: String}
+            - {name: description, type: String, optional: true}
+          derives: [Eq, Hash]
 "#;
 
 const CORE_COMPONENT: &str = r#"  Component:
@@ -746,6 +787,20 @@ pub fn {{ pascal }}(children: Element) -> Element {
 }
 "#;
 
+const MODEL_TPL: &str = r#"use serde::{Deserialize, Serialize};
+
+#[derive({{ derives }})]
+pub struct {{ pascal }} {
+{%- for f in fields %}
+{%- if f.optional %}
+    pub {{ f.name }}: Option<{{ f.ty }}>,
+{%- else %}
+    pub {{ f.name }}: {{ f.ty }},
+{%- endif %}
+{%- endfor %}
+}
+"#;
+
 // ===========================================================================
 // `get_dsl_spec`
 // ===========================================================================
@@ -771,6 +826,7 @@ pub async fn get_dsl_spec(
     out.push_str(CORE_PREAMBLE);
     out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
     out.push_str("\ncore:\n");
+    out.push_str(CORE_MODEL);
     out.push_str(CORE_COMPONENT);
     out.push_str(CORE_SCREEN);
     out.push_str(CORE_SERVER_FN);
@@ -899,8 +955,23 @@ pub async fn execute_code(
 
     let mut result = ScaffoldResult::default();
 
-    // Order matters: server fns first (fail-fast on fullstack gating),
-    // then leaf primitives, then screens (which call create_route serially).
+    // Order matters: models first (so server fn return types and stores can
+    // resolve them), then server fns (fail-fast on fullstack gating), then
+    // leaf primitives, then screens (which call create_route serially).
+    let mut models_emitted = false;
+    for m in &doc.models {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/model", &m.name),
+        ) {
+            continue;
+        }
+        let r = generate_model(&crate_root, m)?;
+        merge(&mut result, r);
+        models_emitted = true;
+    }
+
     for sf in &doc.server_fns {
         if skip_or_record(
             &skip,
@@ -1089,6 +1160,15 @@ pub async fn execute_code(
         );
     }
 
+    if models_emitted {
+        result.next_steps.push(
+            "ensure `serde = { version = \"1\", features = [\"derive\"] }` is in your Cargo.toml for the generated model(s)".into(),
+        );
+        result.next_steps.push(
+            "declare `pub mod model;` in your crate root (src/main.rs or src/lib.rs) so the generated types are reachable as `crate::model::*`".into(),
+        );
+    }
+
     Ok(result)
 }
 
@@ -1183,6 +1263,9 @@ fn skip_set(doc: &DslDoc, crate_root: &Path) -> BTreeSet<std::path::PathBuf> {
     for ss in &doc.session_states {
         maybe_add("src/auth", &ss.name);
     }
+    for m in &doc.models {
+        maybe_add("src/model", &m.name);
+    }
     s
 }
 
@@ -1253,6 +1336,9 @@ fn plan_dsl(doc: &DslDoc, crate_root: &Path) -> ScaffoldResult {
     for ss in &doc.session_states {
         leaf(&mut out, &mut mods_touched, "src/auth", &ss.name);
     }
+    for m in &doc.models {
+        leaf(&mut out, &mut mods_touched, "src/model", &m.name);
+    }
 
     // Router file: modified when there are routed primitives (screens or login_screens).
     if (!doc.screens.is_empty() || !doc.login_screens.is_empty())
@@ -1274,6 +1360,7 @@ fn preflight(doc: &DslDoc, crate_root: &Path, if_missing: bool) -> Result<(), St
     let mut sock_names: BTreeSet<String> = BTreeSet::new();
     let mut srv_names: BTreeSet<String> = BTreeSet::new();
     let mut sess_names: BTreeSet<String> = BTreeSet::new();
+    let mut model_names: BTreeSet<String> = BTreeSet::new();
 
     let mut comp_dup = |name: &str| -> Result<(), String> {
         let s = name.to_snake_case();
@@ -1326,6 +1413,22 @@ fn preflight(doc: &DslDoc, crate_root: &Path, if_missing: bool) -> Result<(), St
     for s in &doc.session_states {
         if !sess_names.insert(s.name.to_snake_case()) {
             return Err(format!("duplicate session_state name: {}", s.name));
+        }
+    }
+    for m in &doc.models {
+        let snake = m.name.to_snake_case();
+        if !model_names.insert(snake.clone()) {
+            return Err(format!("duplicate model name: {}", m.name));
+        }
+        let mut seen_field: BTreeSet<String> = BTreeSet::new();
+        for f in &m.fields {
+            let fs = f.name.to_snake_case();
+            if !seen_field.insert(fs) {
+                return Err(format!(
+                    "model {:?} declares duplicate field {:?}",
+                    m.name, f.name
+                ));
+            }
         }
     }
 
@@ -1675,6 +1778,44 @@ fn generate_feed(crate_root: &Path, f: &DslFeed) -> Result<ScaffoldResult, Strin
     write_component_file(crate_root, &snake, body)
 }
 
+fn generate_model(crate_root: &Path, m: &DslModel) -> Result<ScaffoldResult, String> {
+    let pascal = m.name.to_pascal_case();
+    let snake = m.name.to_snake_case();
+
+    let defaults = ["Debug", "Clone", "PartialEq", "Serialize", "Deserialize"];
+    let mut derives: Vec<String> = defaults.iter().map(|s| (*s).to_string()).collect();
+    for extra in &m.derives {
+        let t = extra.trim();
+        if !t.is_empty() && !derives.iter().any(|d| d == t) {
+            derives.push(t.to_string());
+        }
+    }
+    let derives_str = derives.join(", ");
+
+    let fields_ctx: Vec<_> = m
+        .fields
+        .iter()
+        .map(|f| {
+            context! {
+                name => f.name.to_snake_case(),
+                ty => f.ty.clone(),
+                optional => f.optional,
+            }
+        })
+        .collect();
+
+    let body = render(
+        "model",
+        MODEL_TPL,
+        context! {
+            pascal => pascal,
+            derives => derives_str,
+            fields => fields_ctx,
+        },
+    )?;
+    write_module_file(crate_root, "src/model", &snake, body)
+}
+
 fn generate_session(crate_root: &Path, s: &DslSessionState) -> Result<ScaffoldResult, String> {
     let snake = s.name.to_snake_case();
     let body = render(
@@ -1806,6 +1947,7 @@ mod tests {
     #[test]
     fn spec_examples_round_trip() {
         let blocks: &[(&str, &str)] = &[
+            ("CORE_MODEL", CORE_MODEL),
             ("CORE_COMPONENT", CORE_COMPONENT),
             ("CORE_SCREEN", CORE_SCREEN),
             ("CORE_SERVER_FN", CORE_SERVER_FN),
@@ -2087,5 +2229,182 @@ components:
         assert!(has_extra_documents("a: 1\n---\nb: 2"));
         assert!(!has_extra_documents("---\na: 1\nb: 2"));
         assert!(!has_extra_documents("# comment\na: 1"));
+    }
+
+    #[test]
+    fn model_template_emits_struct_with_derives_and_optional_fields() {
+        let m = DslModel {
+            name: "Product".into(),
+            fields: vec![
+                DslModelField {
+                    name: "id".into(),
+                    ty: "i64".into(),
+                    optional: false,
+                },
+                DslModelField {
+                    name: "name".into(),
+                    ty: "String".into(),
+                    optional: false,
+                },
+                DslModelField {
+                    name: "description".into(),
+                    ty: "String".into(),
+                    optional: true,
+                },
+            ],
+            derives: vec!["Eq".into(), "Clone".into()],
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let r = generate_model(dir.path(), &m).unwrap();
+        let path = dir.path().join("src/model/product.rs");
+        assert!(r.files_created.iter().any(|p| p == &path));
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("use serde::{Deserialize, Serialize};"));
+        assert!(body.contains("pub struct Product {"));
+        assert!(body.contains("pub id: i64,"));
+        assert!(body.contains("pub name: String,"));
+        assert!(body.contains("pub description: Option<String>,"));
+        // Defaults + Eq, no duplicate Clone.
+        assert!(body.contains("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]"));
+        // mod.rs should reference the new module.
+        let mod_rs = std::fs::read_to_string(dir.path().join("src/model/mod.rs")).unwrap();
+        assert!(mod_rs.contains("pub mod product;"));
+    }
+
+    #[tokio::test]
+    async fn execute_code_creates_model_files_and_next_steps() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "models_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Product
+    fields:
+      - {name: id, type: i64}
+      - {name: name, type: String}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed with models");
+        assert!(root.join("src/model/product.rs").exists());
+        assert!(root.join("src/model/mod.rs").exists());
+        assert!(
+            result
+                .next_steps
+                .iter()
+                .any(|s| s.contains("serde") && s.contains("derive")),
+            "expected a serde next_step, got {:?}",
+            result.next_steps
+        );
+        assert!(
+            result
+                .next_steps
+                .iter()
+                .any(|s| s.contains("pub mod model;")),
+            "expected a `pub mod model;` next_step, got {:?}",
+            result.next_steps
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_duplicate_model_name_and_duplicate_fields() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+models:
+  - name: Product
+    fields:
+      - {name: id, type: i64}
+  - name: product
+    fields:
+      - {name: id, type: i64}
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, dir.path(), false).unwrap_err();
+        assert!(err.contains("duplicate model"), "got {err}");
+
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+models:
+  - name: Product
+    fields:
+      - {name: id, type: i64}
+      - {name: ID, type: i64}
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, dir.path(), false).unwrap_err();
+        assert!(err.contains("duplicate field"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn dry_run_classifies_model_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "models_dry"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Product
+    fields:
+      - {name: id, type: i64}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: true,
+            },
+        )
+        .await
+        .expect("dry_run should succeed");
+        assert!(result.dry_run);
+        assert!(
+            result.would_create.iter().any(|p| p.ends_with("product.rs")),
+            "expected product.rs in would_create, got {:?}",
+            result.would_create
+        );
+        assert!(
+            !root.join("src/model/product.rs").exists(),
+            "dry_run must not write the file"
+        );
     }
 }
