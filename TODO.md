@@ -18,7 +18,7 @@ Improvement checklist derived from a real-world build (an inventory management a
 ## Iteration & safety
 
 - [x] **`dry_run` / preview mode for `execute_code`.** Today it writes immediately, which makes probing the tool's behaviour destructive. Return a file plan + diffs without committing when `dry_run: true`.
-- [ ] **`modify:` primitive for editing existing items.** Adding a prop, adding a server fn arg, or renaming a variant requires hand-editing. A targeted modify primitive would cover the common iteration case.
+- [x] **`modify:` primitive for editing existing items.** Top-level `modify:` accepts `kind: add_model_field | add_component_prop | add_server_fn_arg` entries that idempotently append to an existing on-disk struct / props struct / server-fn parameter list. Honors `if_missing` and `dry_run`. Renaming a Routable variant is still hand-edit territory — track in a follow-up if needed.
 - [x] **Collision pre-flight surfaced to the caller.** The spec says collisions are pre-flighted, but the response doesn't enumerate what was already present or what would conflict. Return a `collisions: [...]` field even on success.
 
 ## Correctness gaps

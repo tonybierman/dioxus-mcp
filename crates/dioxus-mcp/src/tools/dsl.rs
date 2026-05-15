@@ -65,6 +65,11 @@ pub struct DslDoc {
     /// server fns, and two screens (list + new). Expanded before preflight.
     #[serde(default)]
     pub resources: Vec<DslResource>,
+    /// In-place edits to items that already exist on disk. Useful when
+    /// iterating: add a prop to a generated component, add an arg to a server
+    /// fn, add a field to a model. Each entry is idempotent.
+    #[serde(default)]
+    pub modify: Vec<DslModify>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -322,6 +327,42 @@ pub struct DslProtectedRoute {
     pub requires: Option<String>,
 }
 
+/// In-place edits to an existing on-disk item. Idempotent: a field/prop/arg
+/// that's already present is skipped; identical re-runs produce no diff.
+///
+/// Each variant names the on-disk target by user-facing name (any case) and
+/// carries the list of items to append. Missing target files / items error
+/// unless `if_missing: true` is set on `execute_code`, in which case they are
+/// recorded under `collisions` and the run continues.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::enum_variant_names)] // variants intentionally map to add_* serde tags
+pub enum DslModify {
+    /// Append fields to `crate::model::{Pascal}`'s struct. Requires the model
+    /// to already exist on disk under `src/model/{snake}.rs`.
+    AddModelField {
+        /// Model name (any case). Resolved to `src/model/{snake}.rs`.
+        model: String,
+        fields: Vec<DslModelField>,
+    },
+    /// Append props to `{Pascal}Props` for an existing component under
+    /// `src/components/{snake}.rs`. If the component file does not declare a
+    /// `*Props` struct yet, the edit errors with a clear message — convert the
+    /// component to take props first (e.g. by re-creating it with `props:`).
+    AddComponentProp {
+        /// Component name (any case). Resolved to `src/components/{snake}.rs`.
+        component: String,
+        props: Vec<DslPropDef>,
+    },
+    /// Append arguments to an existing server fn under
+    /// `src/server/{snake}.rs`.
+    AddServerFnArg {
+        /// Server fn name (any case). Resolved to `src/server/{snake}.rs`.
+        server_fn: String,
+        args: Vec<DslArgDef>,
+    },
+}
+
 // ===========================================================================
 // Per-primitive YAML spec blocks (single source of truth, examples are
 // round-trip tested against the structs above).
@@ -373,6 +414,10 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   - Route inserts are name-keyed and idempotent: a Screen / LoginScreen whose
 #     variant name already exists is skipped.
 #   - mod.rs entries are inserted alphabetically; re-runs produce stable diffs.
+#   - `modify:` entries are idempotent: a field/prop/arg already present in the
+#     target item is skipped, and a re-run with no new additions writes nothing.
+#     Missing target files error unless `if_missing: true` (then recorded under
+#     `collisions`). Modify runs *after* all create steps in the same call.
 #   - Pass `dry_run: true` to compute `would_create` + `would_modify` (plus any
 #     `collisions`) without touching disk.
 "#;
@@ -480,6 +525,43 @@ const CORE_RESOURCE: &str = r#"  Resource:
             - {name: id, type: i64}
             - {name: name, type: String}
             - {name: description, type: String, optional: true}
+"#;
+
+const CORE_MODIFY: &str = r#"  Modify:
+    description: "In-place edits to items that already exist on disk. Each entry is idempotent — fields/props/args already present are skipped and identical re-runs produce no diff. Targets must exist on disk; pass `if_missing: true` on execute_code to skip missing targets (they are recorded under `collisions`) instead of erroring. Currently three edit kinds are supported."
+    kinds:
+      add_model_field:
+        description: "Append fields to `crate::model::{Pascal}`'s struct (src/model/{snake}.rs)."
+        fields:
+          - {name: kind, type: "literal `add_model_field`", required: true}
+          - {name: model, type: "Model name (any case)", required: true}
+          - {name: fields, type: "ModelField[] — each {name, type, optional?}", required: true}
+      add_component_prop:
+        description: "Append props to `{Pascal}Props` for a component (src/components/{snake}.rs). Errors if the component doesn't already declare a Props struct — recreate it with `props:` first."
+        fields:
+          - {name: kind, type: "literal `add_component_prop`", required: true}
+          - {name: component, type: "Component name (any case)", required: true}
+          - {name: props, type: "PropDef[] — each {name, type, optional?}", required: true}
+      add_server_fn_arg:
+        description: "Append arguments to a server fn's parameter list (src/server/{snake}.rs)."
+        fields:
+          - {name: kind, type: "literal `add_server_fn_arg`", required: true}
+          - {name: server_fn, type: "Server-fn name (any case)", required: true}
+          - {name: args, type: "ArgDef[] — each {name, type}", required: true}
+    example:
+      modify:
+        - kind: add_model_field
+          model: Product
+          fields:
+            - {name: sku, type: String}
+        - kind: add_component_prop
+          component: UserCard
+          props:
+            - {name: avatar_url, type: String, optional: true}
+        - kind: add_server_fn_arg
+          server_fn: fetch_users
+          args:
+            - {name: page, type: u32}
 "#;
 
 const CRUD_FORM: &str = r#"  Form:
@@ -1153,6 +1235,7 @@ pub async fn get_dsl_spec(
     out.push_str(CORE_COMPONENT);
     out.push_str(CORE_SCREEN);
     out.push_str(CORE_SERVER_FN);
+    out.push_str(CORE_MODIFY);
 
     let want = |k: &str| p.extensions.iter().any(|e| e.eq_ignore_ascii_case(k));
     let any_ext = p.extensions.iter().any(|e| {
@@ -1505,6 +1588,10 @@ pub async fn execute_code(
         merge(&mut result, r);
     }
 
+    for m in &doc.modify {
+        apply_modify(&crate_root, m, p.if_missing, &mut result)?;
+    }
+
     if needs_websys {
         result.next_steps.push(
             "add `web-sys = { version = \"0.3\", features = [\"WebSocket\", \"MessageEvent\", \"BinaryType\", \"ErrorEvent\"] }` and `wasm-bindgen = \"0.2\"` to your Cargo.toml for the generated socket(s)".into(),
@@ -1720,7 +1807,32 @@ fn plan_dsl(doc: &DslDoc, synth_server_fns: &[SynthServerFn], crate_root: &Path)
         out.would_modify.push(router);
     }
 
+    // `modify:` entries — classify each target as would_modify (file present)
+    // or collisions (missing, would error or be skipped in if_missing mode).
+    for m in &doc.modify {
+        let target_path = modify_target_path(m, crate_root);
+        if target_path.exists() {
+            if !out.would_modify.iter().any(|p| p == &target_path) {
+                out.would_modify.push(target_path);
+            }
+        } else {
+            out.collisions.push(target_path);
+        }
+    }
+
     out
+}
+
+fn modify_target_path(m: &DslModify, crate_root: &Path) -> std::path::PathBuf {
+    match m {
+        DslModify::AddModelField { model, .. } => leaf_for(crate_root, "src/model", model),
+        DslModify::AddComponentProp { component, .. } => {
+            leaf_for(crate_root, "src/components", component)
+        }
+        DslModify::AddServerFnArg { server_fn, .. } => {
+            leaf_for(crate_root, "src/server", server_fn)
+        }
+    }
 }
 
 // ---------- pre-flight ----------
@@ -1879,7 +1991,56 @@ fn preflight(
         }
     }
 
-    // 3. Pre-check files that would collide with what's already on disk for
+    // 3. Validate `modify:` entries — non-empty, no duplicate field/arg/prop
+    //    names within a single entry. Cross-doc references aren't required:
+    //    the target item is allowed to exist only on disk.
+    for (i, m) in doc.modify.iter().enumerate() {
+        let (kind, names): (&str, Vec<String>) = match m {
+            DslModify::AddModelField { fields, .. } => {
+                if fields.is_empty() {
+                    return Err(format!(
+                        "modify[{i}] add_model_field: `fields` is empty — nothing to add"
+                    ));
+                }
+                (
+                    "add_model_field",
+                    fields.iter().map(|f| f.name.to_snake_case()).collect(),
+                )
+            }
+            DslModify::AddComponentProp { props, .. } => {
+                if props.is_empty() {
+                    return Err(format!(
+                        "modify[{i}] add_component_prop: `props` is empty — nothing to add"
+                    ));
+                }
+                (
+                    "add_component_prop",
+                    props.iter().map(|p| p.name.to_snake_case()).collect(),
+                )
+            }
+            DslModify::AddServerFnArg { args, .. } => {
+                if args.is_empty() {
+                    return Err(format!(
+                        "modify[{i}] add_server_fn_arg: `args` is empty — nothing to add"
+                    ));
+                }
+                (
+                    "add_server_fn_arg",
+                    args.iter().map(|a| a.name.to_snake_case()).collect(),
+                )
+            }
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for n in &names {
+            if !seen.insert(n.clone()) {
+                return Err(format!(
+                    "modify[{i}] {kind}: duplicate name {n:?} in the entry"
+                ));
+            }
+        }
+    }
+
+    // 4. Pre-check files that would collide with what's already on disk for
     //    each component-target name. (server_fn / signal / socket / state
     //    dirs may not exist yet; existence isn't an error there.) Suppressed
     //    when `if_missing` is set — those collisions become skip entries
@@ -2787,6 +2948,254 @@ async fn generate_synth_server_fn(
 }
 
 // ===========================================================================
+// modify: in-place edits
+// ===========================================================================
+
+fn apply_modify(
+    crate_root: &Path,
+    m: &DslModify,
+    if_missing: bool,
+    result: &mut ScaffoldResult,
+) -> Result<(), String> {
+    match m {
+        DslModify::AddModelField { model, fields } => {
+            let path = leaf_for(crate_root, "src/model", model);
+            let struct_name = model.to_pascal_case();
+            modify_struct_fields(&path, &struct_name, fields, if_missing, result, "model")
+        }
+        DslModify::AddComponentProp { component, props } => {
+            let path = leaf_for(crate_root, "src/components", component);
+            let props_name = format!("{}Props", component.to_pascal_case());
+            modify_props_struct(&path, &props_name, props, if_missing, result)
+        }
+        DslModify::AddServerFnArg { server_fn, args } => {
+            let path = leaf_for(crate_root, "src/server", server_fn);
+            let snake = server_fn.to_snake_case();
+            modify_fn_args(&path, &snake, args, if_missing, result)
+        }
+    }
+}
+
+fn missing_target(
+    path: &Path,
+    kind: &str,
+    if_missing: bool,
+    result: &mut ScaffoldResult,
+) -> Result<bool, String> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if if_missing {
+        result.collisions.push(path.to_path_buf());
+        Ok(true)
+    } else {
+        Err(format!(
+            "modify: target {} for {kind} does not exist on disk; create it first or pass `if_missing: true` to skip",
+            path.display()
+        ))
+    }
+}
+
+fn modify_struct_fields(
+    path: &Path,
+    struct_name: &str,
+    fields: &[DslModelField],
+    if_missing: bool,
+    result: &mut ScaffoldResult,
+    kind_label: &str,
+) -> Result<(), String> {
+    if missing_target(path, kind_label, if_missing, result)? {
+        return Ok(());
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let parsed =
+        syn::parse_file(&src).map_err(|e| format!("modify: parse {}: {e}", path.display()))?;
+    let target = parsed
+        .items
+        .iter()
+        .find_map(|it| match it {
+            syn::Item::Struct(s) if s.ident == struct_name => Some(s),
+            _ => None,
+        })
+        .ok_or_else(|| format!("modify: no struct {struct_name} in {}", path.display()))?;
+    let existing: BTreeSet<String> = target
+        .fields
+        .iter()
+        .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+        .collect();
+    let new_fields: Vec<&DslModelField> = fields
+        .iter()
+        .filter(|f| !existing.contains(&f.name.to_snake_case()))
+        .collect();
+    if new_fields.is_empty() {
+        return Ok(());
+    }
+    let insert_at = find_close_delim(&src, &format!("struct {struct_name}"), '{', '}')?;
+    let mut insertion = String::new();
+    for f in &new_fields {
+        let n = f.name.to_snake_case();
+        if f.optional {
+            insertion.push_str(&format!("    pub {n}: Option<{}>,\n", f.ty));
+        } else {
+            insertion.push_str(&format!("    pub {n}: {},\n", f.ty));
+        }
+    }
+    let new_src = splice(&src, insert_at, &insertion);
+    std::fs::write(path, new_src).map_err(|e| e.to_string())?;
+    if !result.files_modified.iter().any(|p| p == path) {
+        result.files_modified.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn modify_props_struct(
+    path: &Path,
+    struct_name: &str,
+    props: &[DslPropDef],
+    if_missing: bool,
+    result: &mut ScaffoldResult,
+) -> Result<(), String> {
+    if missing_target(path, "component", if_missing, result)? {
+        return Ok(());
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let parsed =
+        syn::parse_file(&src).map_err(|e| format!("modify: parse {}: {e}", path.display()))?;
+    let target = parsed.items.iter().find_map(|it| match it {
+        syn::Item::Struct(s) if s.ident == struct_name => Some(s),
+        _ => None,
+    });
+    let Some(target) = target else {
+        return Err(format!(
+            "modify: no struct {struct_name} in {} — convert the component to take props first (re-create it with `props:` declared) before adding more",
+            path.display()
+        ));
+    };
+    let existing: BTreeSet<String> = target
+        .fields
+        .iter()
+        .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+        .collect();
+    let new_props: Vec<&DslPropDef> = props
+        .iter()
+        .filter(|p| !existing.contains(&p.name.to_snake_case()))
+        .collect();
+    if new_props.is_empty() {
+        return Ok(());
+    }
+    let insert_at = find_close_delim(&src, &format!("struct {struct_name}"), '{', '}')?;
+    let mut insertion = String::new();
+    for p in &new_props {
+        let n = p.name.to_snake_case();
+        if p.optional {
+            insertion.push_str(&format!(
+                "    #[props(default)]\n    pub {n}: Option<{}>,\n",
+                p.ty
+            ));
+        } else {
+            insertion.push_str(&format!("    pub {n}: {},\n", p.ty));
+        }
+    }
+    let new_src = splice(&src, insert_at, &insertion);
+    std::fs::write(path, new_src).map_err(|e| e.to_string())?;
+    if !result.files_modified.iter().any(|p| p == path) {
+        result.files_modified.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn modify_fn_args(
+    path: &Path,
+    snake_name: &str,
+    args: &[DslArgDef],
+    if_missing: bool,
+    result: &mut ScaffoldResult,
+) -> Result<(), String> {
+    if missing_target(path, "server_fn", if_missing, result)? {
+        return Ok(());
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let parsed =
+        syn::parse_file(&src).map_err(|e| format!("modify: parse {}: {e}", path.display()))?;
+    let target_fn = parsed
+        .items
+        .iter()
+        .find_map(|it| match it {
+            syn::Item::Fn(f) if f.sig.ident == snake_name => Some(f),
+            _ => None,
+        })
+        .ok_or_else(|| format!("modify: no fn {snake_name} in {}", path.display()))?;
+    let existing: BTreeSet<String> = target_fn
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pt) => match pt.pat.as_ref() {
+                syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let new_args: Vec<&DslArgDef> = args
+        .iter()
+        .filter(|a| !existing.contains(&a.name.to_snake_case()))
+        .collect();
+    if new_args.is_empty() {
+        return Ok(());
+    }
+    let insert_at = find_close_delim(&src, &format!("fn {snake_name}"), '(', ')')?;
+    // Preserve the parameter list's trailing-comma convention. If the existing
+    // last non-whitespace before the closing `)` is `,`, we just append. If
+    // it's `(` (no args), we still emit fields with leading newline + indent.
+    // Either way the generated lines below carry their own trailing commas.
+    let mut insertion = String::new();
+    for a in &new_args {
+        insertion.push_str(&format!("    {}: {},\n", a.name.to_snake_case(), a.ty));
+    }
+    let new_src = splice(&src, insert_at, &insertion);
+    std::fs::write(path, new_src).map_err(|e| e.to_string())?;
+    if !result.files_modified.iter().any(|p| p == path) {
+        result.files_modified.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+/// Locate the byte position of the matching close delimiter for the opening
+/// `open` that appears after `anchor` in `src`. Naive depth count — adequate
+/// for the generated files we operate on (no string/char literals containing
+/// raw braces or parens). The caller has already syn-parsed the source.
+fn find_close_delim(src: &str, anchor: &str, open: char, close: char) -> Result<usize, String> {
+    let start = src
+        .find(anchor)
+        .ok_or_else(|| format!("could not locate {anchor:?} in source"))?;
+    let after_open = src[start..]
+        .find(open)
+        .map(|i| start + i + open.len_utf8())
+        .ok_or_else(|| format!("malformed {anchor}: no {open:?}"))?;
+    let mut depth: i32 = 1;
+    for (i, ch) in src[after_open..].char_indices() {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(after_open + i);
+            }
+        }
+    }
+    Err(format!("malformed {anchor}: no {close:?}"))
+}
+
+fn splice(src: &str, at: usize, insertion: &str) -> String {
+    let mut out = String::with_capacity(src.len() + insertion.len());
+    out.push_str(&src[..at]);
+    out.push_str(insertion);
+    out.push_str(&src[at..]);
+    out
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -2807,6 +3216,7 @@ mod tests {
             ("CORE_COMPONENT", CORE_COMPONENT),
             ("CORE_SCREEN", CORE_SCREEN),
             ("CORE_SERVER_FN", CORE_SERVER_FN),
+            ("CORE_MODIFY", CORE_MODIFY),
             ("CRUD_FORM", CRUD_FORM),
             ("CRUD_LIST", CRUD_LIST),
             ("CRUD_TABLE", CRUD_TABLE),
@@ -3451,6 +3861,426 @@ stores:
         .unwrap();
         let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
         assert!(err.contains("unknown model"), "got {err}");
+    }
+
+    fn cargo_toml_with_fullstack(name: &str) -> String {
+        format!(
+            r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = {{ version = "0.7", features = ["fullstack"] }}
+"#
+        )
+    }
+
+    #[tokio::test]
+    async fn modify_add_model_field_appends_and_is_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("modify_model_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+
+        // Create the model first.
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Product
+    fields:
+      - {name: id, type: i64}
+      - {name: name, type: String}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+        let path = root.join("src/model/product.rs");
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(!before.contains("pub sku:"));
+
+        // Modify: add sku.
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_model_field
+    model: Product
+    fields:
+      - {name: sku, type: String}
+      - {name: weight, type: f32, optional: true}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("modify should succeed");
+        assert!(result.files_modified.iter().any(|p| p == &path));
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("pub sku: String,"), "got:\n{body}");
+        assert!(body.contains("pub weight: Option<f32>,"), "got:\n{body}");
+        // Existing fields still present.
+        assert!(body.contains("pub id: i64,"));
+        assert!(body.contains("pub name: String,"));
+        // Resulting file must still parse.
+        syn::parse_file(&body).expect("modified model should parse");
+
+        // Re-run identical modify: idempotent — no files_modified, no duplicate.
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_model_field
+    model: Product
+    fields:
+      - {name: sku, type: String}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("idempotent re-run should succeed");
+        assert!(
+            result.files_modified.is_empty(),
+            "re-run should be a no-op, got {:?}",
+            result.files_modified
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        // Only one sku declaration.
+        assert_eq!(after.matches("pub sku:").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn modify_add_component_prop_appends_with_optional() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("modify_comp_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+components:
+  - name: UserCard
+    props:
+      - {name: id, type: i32}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+        let path = root.join("src/components/user_card.rs");
+
+        let _ = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_component_prop
+    component: UserCard
+    props:
+      - {name: avatar_url, type: String, optional: true}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("modify should succeed");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("#[props(default)]") && body.contains("pub avatar_url: Option<String>,"),
+            "got:\n{body}"
+        );
+        syn::parse_file(&body).expect("modified component should parse");
+    }
+
+    #[tokio::test]
+    async fn modify_add_component_prop_errors_when_no_props_struct() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("modify_no_props_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+components:
+  - name: Bare
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_component_prop
+    component: Bare
+    props:
+      - {name: id, type: i32}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect_err("should error when no Props struct exists");
+        assert!(
+            err.contains("convert the component to take props first"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn modify_add_server_fn_arg_appends_to_zero_arg_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("modify_sfn_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+server_fns:
+  - name: fetch_users
+    return_type: "Vec<String>"
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+        let path = root.join("src/server/fetch_users.rs");
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(!before.contains("page"));
+
+        let _ = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_server_fn_arg
+    server_fn: fetch_users
+    args:
+      - {name: page, type: u32}
+      - {name: page_size, type: u32}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("modify should succeed");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("page: u32,"), "got:\n{body}");
+        assert!(body.contains("page_size: u32,"), "got:\n{body}");
+        syn::parse_file(&body).expect("modified server_fn should parse");
+    }
+
+    #[tokio::test]
+    async fn modify_errors_when_target_missing_and_skips_under_if_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("modify_missing_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+
+        let err = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_model_field
+    model: Ghost
+    fields:
+      - {name: x, type: i32}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect_err("should error when target missing");
+        assert!(err.contains("does not exist on disk"), "got: {err}");
+
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_model_field
+    model: Ghost
+    fields:
+      - {name: x, type: i32}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: true,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("if_missing=true should swallow missing target");
+        assert!(
+            result.collisions.iter().any(|p| p.ends_with("ghost.rs")),
+            "expected ghost.rs in collisions, got {:?}",
+            result.collisions
+        );
+    }
+
+    #[tokio::test]
+    async fn modify_dry_run_classifies_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("modify_dry_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/model")).unwrap();
+        std::fs::write(
+            root.join("src/model/product.rs"),
+            "pub struct Product { pub id: i64, }\n",
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+modify:
+  - kind: add_model_field
+    model: Product
+    fields:
+      - {name: sku, type: String}
+  - kind: add_model_field
+    model: Ghost
+    fields:
+      - {name: x, type: i32}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: true,
+            },
+        )
+        .await
+        .expect("dry_run should succeed even with missing target");
+        assert!(result.dry_run);
+        assert!(
+            result
+                .would_modify
+                .iter()
+                .any(|p| p.ends_with("product.rs")),
+            "expected product.rs in would_modify, got {:?}",
+            result.would_modify
+        );
+        assert!(
+            result.collisions.iter().any(|p| p.ends_with("ghost.rs")),
+            "expected ghost.rs in collisions, got {:?}",
+            result.collisions
+        );
+        // Source file must be untouched.
+        let body = std::fs::read_to_string(root.join("src/model/product.rs")).unwrap();
+        assert!(!body.contains("sku"));
+    }
+
+    #[test]
+    fn preflight_rejects_empty_or_duplicate_modify_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+modify:
+  - kind: add_model_field
+    model: Product
+    fields: []
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(err.contains("is empty"), "got {err}");
+
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+modify:
+  - kind: add_server_fn_arg
+    server_fn: fetch
+    args:
+      - {name: page, type: u32}
+      - {name: page, type: u64}
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(err.contains("duplicate name"), "got {err}");
     }
 
     #[tokio::test]
