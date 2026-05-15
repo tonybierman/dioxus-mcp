@@ -110,6 +110,13 @@ pub struct DslStore {
     /// Rust type of the id field. Default: "i64".
     #[serde(default)]
     pub id_type: Option<String>,
+    /// Append a `#[cfg(test)] mod tests` block exercising the CRUD methods to
+    /// the generated store file. The model must derive `Default`. Default:
+    /// false. Set automatically by the `resources:` expansion (which forces
+    /// `Default` on the synthesized model). Plain `stores:` users opt in by
+    /// setting this to true and ensuring the referenced model has `Default`.
+    #[serde(default)]
+    pub emit_tests: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -198,6 +205,13 @@ pub struct DslComponent {
     pub name: String,
     #[serde(default)]
     pub props: Vec<DslPropDef>,
+    /// Stub-body skeleton. One of: `empty` (default), `form`, `list`,
+    /// `crud_table`, `resource_view`. Templates are structural starting
+    /// points only — they don't wire data; pair with `props:` and edit after
+    /// generation. For data-bound screens use `screens:` with a
+    /// `template: { kind: resource_list | resource_form }` instead.
+    #[serde(default)]
+    pub template: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -439,16 +453,20 @@ const CORE_MODEL: &str = r#"  Model:
 "#;
 
 const CORE_COMPONENT: &str = r#"  Component:
-    description: A reusable UI element. Generates src/components/{snake}.rs.
+    description: "A reusable UI element. Generates src/components/{snake}.rs. The `template` field picks a stub-body skeleton — omit (or `empty`) for the historical placeholder div. Other kinds: `form` (form + submit handler), `list` (ul with empty-state), `crud_table` (table + toolbar), `resource_view` (article with field list + edit/delete actions). Templates are structural only — they don't bind to any data; pair with `props:` and edit afterwards. For data-bound screens use `screens:` with a Screen template instead."
     fields:
       - {name: name, type: string, required: true}
       - {name: props, type: "PropDef[]", required: false}
+      - {name: template, type: "empty|form|list|crud_table|resource_view (default: empty)", required: false}
+    template_kinds: [empty, form, list, crud_table, resource_view]
     example:
       components:
         - name: UserCard
           props:
             - {name: id, type: i32}
             - {name: label, type: String, optional: true}
+        - name: ProductTable
+          template: crud_table
 "#;
 
 const CORE_SCREEN: &str = r#"  Screen:
@@ -492,22 +510,25 @@ const CORE_SERVER_FN: &str = r#"  ServerFn:
 "#;
 
 const CORE_STORE: &str = r#"  Store:
-    description: "A typed in-memory CRUD helper over a Model. Generates src/state/{snake}.rs as a server-only file (gated with `#![cfg(feature = \"server\")]`) exposing `{Pascal}Store::global()` with list/get/create/update/delete methods. The model must have an integer id field (default name `id`, default type `i64`). Pair with server fns that call into `{Pascal}Store::global()` to expose the store over the wire. The top-level `resources` primitive emits a model+store+server-fn slice in one entry."
+    description: "A typed in-memory CRUD helper over a Model. Generates src/state/{snake}.rs as a server-only file (gated with `#![cfg(feature = \"server\")]`) exposing `{Pascal}Store::global()` with list/get/create/update/delete methods. The model must have an integer id field (default name `id`, default type `i64`). Pair with server fns that call into `{Pascal}Store::global()` to expose the store over the wire. The top-level `resources` primitive emits a model+store+server-fn slice in one entry — and forces `emit_tests: true` for the synthesized store."
     fields:
       - {name: name, type: string, required: true}
       - {name: resource, type: "Model name in this doc (or synthesized by resources:)", required: true}
       - {name: kind, type: "in_memory (default). sqlite is reserved.", required: false}
       - {name: id_field, type: "string (default \"id\")", required: false}
       - {name: id_type, type: "string (default \"i64\")", required: false}
+      - {name: emit_tests, type: "bool (default false) — appends a `#[cfg(test)] mod tests` block exercising the CRUD methods. Requires the referenced model to derive Default. Set automatically by `resources:`.", required: false}
     example:
       models:
         - name: Product
           fields:
             - {name: id, type: i64}
             - {name: name, type: String}
+          derives: [Default]
       stores:
         - name: ProductStore
           resource: Product
+          emit_tests: true
 "#;
 
 const CORE_RESOURCE: &str = r#"  Resource:
@@ -1069,6 +1090,71 @@ impl {{ store_pascal }} {
         items.len() < before
     }
 }
+{%- if emit_tests %}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each test gets its own store so they don't share state through
+    /// `global()`'s `OnceLock`.
+    fn fresh() -> {{ store_pascal }} {
+        {{ store_pascal }}::new()
+    }
+
+    #[test]
+    fn create_assigns_id_and_appends_to_list() {
+        let s = fresh();
+        let item = s.create({{ res_pascal }}::default());
+        assert_eq!(item.{{ id_field }}, 1);
+        assert_eq!(s.list().len(), 1);
+
+        let next = s.create({{ res_pascal }}::default());
+        assert_eq!(next.{{ id_field }}, 2);
+        assert_eq!(s.list().len(), 2);
+    }
+
+    #[test]
+    fn get_returns_item_when_id_matches_otherwise_none() {
+        let s = fresh();
+        let created = s.create({{ res_pascal }}::default());
+        let fetched = s.get(created.{{ id_field }}).expect("just-created item");
+        assert_eq!(fetched.{{ id_field }}, created.{{ id_field }});
+        assert!(s.get(created.{{ id_field }} + 999).is_none());
+    }
+
+    #[test]
+    fn update_replaces_when_id_matches_returns_none_when_not_found() {
+        let s = fresh();
+        let created = s.create({{ res_pascal }}::default());
+        assert!(s.update(created.clone()).is_some());
+        assert_eq!(s.list().len(), 1);
+
+        let mut ghost = {{ res_pascal }}::default();
+        ghost.{{ id_field }} = created.{{ id_field }} + 999;
+        assert!(s.update(ghost).is_none());
+    }
+
+    #[test]
+    fn delete_removes_matching_item_and_is_idempotent() {
+        let s = fresh();
+        let created = s.create({{ res_pascal }}::default());
+        assert!(s.delete(created.{{ id_field }}));
+        assert!(s.list().is_empty());
+        // Second delete returns false — nothing to remove.
+        assert!(!s.delete(created.{{ id_field }}));
+    }
+
+    #[test]
+    fn list_returns_a_clone_callers_can_mutate_independently() {
+        let s = fresh();
+        s.create({{ res_pascal }}::default());
+        let mut snap = s.list();
+        snap.clear();
+        assert_eq!(s.list().len(), 1, "store should be unaffected by snapshot mutation");
+    }
+}
+{%- endif %}
 "#;
 
 const SCREEN_RESOURCE_LIST_TPL: &str = r#"use dioxus::prelude::*;
@@ -1496,6 +1582,7 @@ pub async fn execute_code(
                     })
                     .collect(),
                 path: None,
+                template: c.template.clone(),
                 project_root: p.project_root.clone(),
             },
         )
@@ -2674,6 +2761,7 @@ fn generate_store(crate_root: &Path, store: &DslStore) -> Result<ScaffoldResult,
     let res_pascal = store.resource.to_pascal_case();
     let id_field = store.id_field.as_deref().unwrap_or("id").to_snake_case();
     let id_type = store.id_type.as_deref().unwrap_or("i64").to_string();
+    let emit_tests = store.emit_tests.unwrap_or(false);
     let body = render(
         "store",
         STORE_TPL,
@@ -2682,12 +2770,18 @@ fn generate_store(crate_root: &Path, store: &DslStore) -> Result<ScaffoldResult,
             res_pascal => res_pascal,
             id_field => id_field,
             id_type => id_type,
+            emit_tests => emit_tests,
         },
     )?;
     let mut r = write_module_file(crate_root, "src/state", &store_snake, body)?;
     r.next_steps.push(format!(
         "declare `pub mod state;` in your crate root so server fns can reach `crate::state::{store_snake}::{store_pascal}`"
     ));
+    if emit_tests {
+        r.next_steps.push(format!(
+            "run `cargo test --features server -p <crate>` to execute the generated CRUD tests for {store_pascal}"
+        ));
+    }
     Ok(r)
 }
 
@@ -2754,6 +2848,9 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 kind: Some("in_memory".into()),
                 id_field: Some(id_field.clone()),
                 id_type: Some(id_type.clone()),
+                // Resource expansion forces Default on the synthesized model,
+                // so the auto-generated CRUD tests will compile.
+                emit_tests: Some(true),
             });
         }
 
@@ -3698,6 +3795,30 @@ resources:
         assert!(store_body.contains("fn update("));
         assert!(store_body.contains("fn delete("));
         assert!(store_body.contains("use crate::model::Product"));
+        // Resource expansion forces emit_tests=true, so the CRUD test block
+        // should land. The synthesized model derives Default, so the tests
+        // compile against `Product::default()`.
+        assert!(
+            store_body.contains("#[cfg(test)]"),
+            "expected test block in store, got:\n{store_body}"
+        );
+        assert!(
+            store_body.contains("create_assigns_id_and_appends_to_list"),
+            "expected create test, got:\n{store_body}"
+        );
+        assert!(
+            store_body.contains("delete_removes_matching_item_and_is_idempotent"),
+            "expected delete test, got:\n{store_body}"
+        );
+        assert!(
+            store_body.contains("Product::default()"),
+            "tests should construct via Default, got:\n{store_body}"
+        );
+        // Sanity: the rendered store must parse as valid Rust — catches
+        // template typos that the unit-render tests can't see.
+        syn::parse_file(&store_body).unwrap_or_else(|e| {
+            panic!("generated store file should parse as Rust: {e}\n--- file ---\n{store_body}")
+        });
         assert!(root.join("src/state/mod.rs").exists());
 
         // 5 server fns

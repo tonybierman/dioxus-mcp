@@ -129,6 +129,19 @@ impl DioxusMcp {
     }
 
     #[tool(
+        description = "Run every project-wide lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`) over the crate's `src/` tree and merge the results. Returns a markdown summary, per-lint issue counts (`issues_by_lint`), the raw report from each lint under its name, deduplicated `parse_errors`, and a `total_issues` count. Use `include` / `exclude` to scope (e.g. `include: [\"check_rsx\", \"signal_lint\"]`), and `dead_component_roots` to mark extra components alive."
+    )]
+    async fn lint_project(
+        &self,
+        Parameters(p): Parameters<tools::lint_project::LintProjectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lint_project::lint_project(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "One-shot project tour: feature-flag audit + route map + component/server-fn index + asset audit, plus a pre-rendered markdown summary. Use `include`/`exclude` to scope, `max_items_per_section` to cap output."
     )]
     async fn project_tour(
@@ -339,7 +352,7 @@ impl ServerHandler for DioxusMcp {
              - Static code analysis (dead code, prop drilling, signal/props lints, \
                asset audit, feature flags, OpenAPI spec) -> dead_components, prop_drill, \
                signal_lint, props_lint, asset_audit, audit_feature_flags, openapi_spec, \
-               explain_signal_graph. \
+               explain_signal_graph. Whole-project lint pass -> lint_project. \
              - Reading Dioxus 0.7 docs / canonical examples -> search_docs, find_example. \
              - Scaffolding new code -> create_component, create_route, create_server_fn. \
              - Bulk scaffolding from a YAML DSL -> get_dsl_spec then execute_code. \

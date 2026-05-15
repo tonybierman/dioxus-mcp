@@ -327,6 +327,85 @@ fn tool_prop_drill() {
 }
 
 #[test]
+fn tool_lint_project() {
+    let r = call_tool("lint_project", json!({}));
+
+    // Every lint should have run.
+    let lints_run: Vec<&str> = r["lints_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    for expected in [
+        "check_rsx",
+        "dead_components",
+        "prop_drill",
+        "signal_lint",
+        "props_lint",
+    ] {
+        assert!(
+            lints_run.contains(&expected),
+            "lints_run missing {expected}: {lints_run:?}"
+        );
+    }
+
+    // Counts should match the underlying tools — fixture has known issues.
+    let counts: std::collections::HashMap<String, u64> = r["issues_by_lint"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["lint"].as_str().unwrap().to_string(),
+                c["issues"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(counts["check_rsx"] >= 2, "check_rsx counts: {counts:?}");
+    assert!(
+        counts["dead_components"] >= 1,
+        "dead_components counts: {counts:?}"
+    );
+    assert!(counts["signal_lint"] >= 1, "signal_lint counts: {counts:?}");
+    assert!(counts["props_lint"] >= 1, "props_lint counts: {counts:?}");
+
+    // Total is the sum of per-lint counts.
+    let total = r["total_issues"].as_u64().unwrap();
+    let sum: u64 = counts.values().sum();
+    assert_eq!(total, sum, "total_issues should equal sum of per-lint");
+
+    // Sub-reports are present and well-formed.
+    assert!(r["check_rsx"]["per_file"].is_array());
+    assert!(r["dead_components"]["dead"].is_array());
+    assert!(r["signal_lint"]["issues"].is_array());
+
+    // Summary is rendered.
+    let summary = r["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Project lint") && summary.contains("Total issues"),
+        "summary: {summary}"
+    );
+}
+
+#[test]
+fn tool_lint_project_include_subset() {
+    let r = call_tool(
+        "lint_project",
+        json!({"include": ["check_rsx", "props_lint"]}),
+    );
+    let lints_run: Vec<&str> = r["lints_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(lints_run, vec!["check_rsx", "props_lint"]);
+    assert!(r["dead_components"].is_null(), "should be omitted");
+    assert!(r["signal_lint"].is_null(), "should be omitted");
+}
+
+#[test]
 fn tool_audit_feature_flags() {
     let r = call_tool("audit_feature_flags", json!({}));
     assert_eq!(r["ok"], true, "audit findings: {:#?}", r["findings"]);
