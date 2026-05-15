@@ -2,3 +2,4 @@
 crates/dioxus-mcp/tests/fixtures/**/target/
 crates/dioxus-mcp/tests/fixtures/**/Cargo.lock
 examples/**/target/
+TODO.md
