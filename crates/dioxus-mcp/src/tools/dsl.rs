@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 use crate::tools::scaffold::{
-    self, ArgSpec, CreateRouteParams, CreateServerFnParams, PropSpec, ScaffoldResult,
+    self, ArgSpec, CreateRouteParams, CreateServerFnParams, ModUpsert, PropSpec, ScaffoldResult,
+    upsert_mod_entry,
 };
 
 // ===========================================================================
@@ -107,8 +108,6 @@ pub struct DslComponent {
 pub struct DslScreen {
     pub name: String,
     pub route: String,
-    #[serde(default)]
-    pub layout: Option<String>,
     /// Optional component name (e.g. a ProtectedRoute guard) that wraps the
     /// screen body. Imported from src/components and rendered around the page.
     #[serde(default)]
@@ -258,17 +257,15 @@ const CORE_COMPONENT: &str = r#"  Component:
 "#;
 
 const CORE_SCREEN: &str = r#"  Screen:
-    description: A top-level routed view. Generates a component file and inserts a route variant in src/router.rs.
+    description: A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The screen's body is wrapped with `wrap_with` (when set) so a guard component like ProtectedRoute can sit at the route layer.
     fields:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
-      - {name: layout, type: "sidebar|topnav|blank", required: false}
       - {name: wrap_with, type: "ComponentName (e.g. a ProtectedRoute guard)", required: false}
     example:
       screens:
         - name: HomeScreen
           route: /
-          layout: sidebar
           wrap_with: Dashboard
 "#;
 
@@ -426,12 +423,12 @@ pub fn {{ pascal }}() -> Element {
     rsx! {
 {%- if wrap_pascal %}
         {{ wrap_pascal }} {
-            div { class: "screen {{ snake }}{% if layout %} layout-{{ layout }}{% endif %}",
+            div { class: "screen {{ snake }}",
                 h1 { "{{ pascal }}" }
             }
         }
 {%- else %}
-        div { class: "screen {{ snake }}{% if layout %} layout-{{ layout }}{% endif %}",
+        div { class: "screen {{ snake }}",
             h1 { "{{ pascal }}" }
         }
 {%- endif %}
@@ -813,6 +810,16 @@ pub struct ExecuteCodeParams {
     /// Absolute path to the Dioxus project root. Required when the MCP server
     /// was not started in the target project directory.
     pub project_root: Option<String>,
+    /// When true, primitives whose leaf file already exists on disk are
+    /// silently skipped (and reported in `collisions`) instead of erroring.
+    /// Makes re-runs safe during iteration. Default: false (strict).
+    #[serde(default)]
+    pub if_missing: bool,
+    /// When true, no files are written. The response contains `would_create`
+    /// and `would_modify` lists describing what *would* happen, plus any
+    /// collisions detected on disk. Default: false.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 pub async fn execute_code(
@@ -836,7 +843,17 @@ pub async fn execute_code(
 
     let crate_root = scaffold::crate_root(state, p.project_root.as_deref()).await?;
 
-    preflight(&doc, &crate_root)?;
+    preflight(&doc, &crate_root, p.if_missing)?;
+
+    if p.dry_run {
+        return Ok(plan_dsl(&doc, &crate_root));
+    }
+
+    let skip: BTreeSet<std::path::PathBuf> = if p.if_missing {
+        skip_set(&doc, &crate_root)
+    } else {
+        BTreeSet::new()
+    };
 
     let versioned_lists: BTreeSet<String> = doc
         .forms
@@ -849,15 +866,18 @@ pub async fn execute_code(
         .map(|s| s.name.to_snake_case())
         .collect();
 
-    let mut result = ScaffoldResult {
-        files_created: vec![],
-        files_modified: vec![],
-        next_steps: vec![],
-    };
+    let mut result = ScaffoldResult::default();
 
     // Order matters: server fns first (fail-fast on fullstack gating),
     // then leaf primitives, then screens (which call create_route serially).
     for sf in &doc.server_fns {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/server", &sf.name),
+        ) {
+            continue;
+        }
         let r = scaffold::create_server_fn(
             state,
             CreateServerFnParams {
@@ -881,23 +901,51 @@ pub async fn execute_code(
     }
 
     for sig in &doc.signals {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/signals", &sig.name),
+        ) {
+            continue;
+        }
         let r = generate_signal(&crate_root, sig)?;
         merge(&mut result, r);
     }
 
     let mut needs_websys = false;
     for s in &doc.sockets {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/sockets", &s.name),
+        ) {
+            continue;
+        }
         let r = generate_socket(&crate_root, s)?;
         merge(&mut result, r);
         needs_websys = true;
     }
 
     for f in &doc.feeds {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &f.name),
+        ) {
+            continue;
+        }
         let r = generate_feed(&crate_root, f)?;
         merge(&mut result, r);
     }
 
     for c in &doc.components {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &c.name),
+        ) {
+            continue;
+        }
         let r = scaffold::create_component(
             state,
             scaffold::CreateComponentParams {
@@ -920,37 +968,86 @@ pub async fn execute_code(
     }
 
     for f in &doc.forms {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &f.name),
+        ) {
+            continue;
+        }
         let r = generate_form(&crate_root, f)?;
         merge(&mut result, r);
     }
 
     for l in &doc.lists {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &l.name),
+        ) {
+            continue;
+        }
         let v = versioned_lists.contains(&l.name.to_snake_case());
         let r = generate_list(&crate_root, l, v)?;
         merge(&mut result, r);
     }
 
     for t in &doc.tables {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &t.name),
+        ) {
+            continue;
+        }
         let r = generate_table(&crate_root, t)?;
         merge(&mut result, r);
     }
 
     for s in &doc.session_states {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/auth", &s.name),
+        ) {
+            continue;
+        }
         let r = generate_session(&crate_root, s)?;
         merge(&mut result, r);
     }
 
     for ls in &doc.login_screens {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &ls.name),
+        ) {
+            continue;
+        }
         let r = generate_login_screen(state, &crate_root, ls, p.project_root.as_deref()).await?;
         merge(&mut result, r);
     }
 
     for pr in &doc.protected_routes {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &pr.name),
+        ) {
+            continue;
+        }
         let r = generate_protected_route(&crate_root, pr, &session_names)?;
         merge(&mut result, r);
     }
 
     for sc in &doc.screens {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/components", &sc.name),
+        ) {
+            continue;
+        }
         let r = generate_screen(state, &crate_root, sc, p.project_root.as_deref()).await?;
         merge(&mut result, r);
     }
@@ -985,11 +1082,160 @@ fn merge(into: &mut ScaffoldResult, from: ScaffoldResult) {
     into.files_created.extend(from.files_created);
     into.files_modified.extend(from.files_modified);
     into.next_steps.extend(from.next_steps);
+    into.collisions.extend(from.collisions);
+    into.would_create.extend(from.would_create);
+    into.would_modify.extend(from.would_modify);
+}
+
+fn leaf_for(crate_root: &Path, subdir: &str, name: &str) -> std::path::PathBuf {
+    let snake = name.to_snake_case();
+    crate_root.join(subdir).join(format!("{snake}.rs"))
+}
+
+/// If `target` is in the skip set, record it as a collision and return true.
+fn skip_or_record(
+    skip: &BTreeSet<std::path::PathBuf>,
+    result: &mut ScaffoldResult,
+    target: std::path::PathBuf,
+) -> bool {
+    if skip.contains(&target) {
+        result.collisions.push(target);
+        true
+    } else {
+        false
+    }
+}
+
+/// Walk the doc and return the set of leaf files that already exist on disk —
+/// the primitives whose target file should be skipped in `if_missing` mode.
+fn skip_set(doc: &DslDoc, crate_root: &Path) -> BTreeSet<std::path::PathBuf> {
+    let mut s = BTreeSet::new();
+    let mut maybe_add = |subdir: &str, name: &str| {
+        let p = leaf_for(crate_root, subdir, name);
+        if p.exists() {
+            s.insert(p);
+        }
+    };
+    for c in &doc.components {
+        maybe_add("src/components", &c.name);
+    }
+    for f in &doc.forms {
+        maybe_add("src/components", &f.name);
+    }
+    for l in &doc.lists {
+        maybe_add("src/components", &l.name);
+    }
+    for t in &doc.tables {
+        maybe_add("src/components", &t.name);
+    }
+    for f in &doc.feeds {
+        maybe_add("src/components", &f.name);
+    }
+    for ls in &doc.login_screens {
+        maybe_add("src/components", &ls.name);
+    }
+    for pr in &doc.protected_routes {
+        maybe_add("src/components", &pr.name);
+    }
+    for sc in &doc.screens {
+        maybe_add("src/components", &sc.name);
+    }
+    for sf in &doc.server_fns {
+        maybe_add("src/server", &sf.name);
+    }
+    for sig in &doc.signals {
+        maybe_add("src/signals", &sig.name);
+    }
+    for sk in &doc.sockets {
+        maybe_add("src/sockets", &sk.name);
+    }
+    for ss in &doc.session_states {
+        maybe_add("src/auth", &ss.name);
+    }
+    s
+}
+
+/// Compute the would-be plan for a dry-run: for every primitive in `doc`,
+/// classify its leaf file as `would_create` (path is free) or `collisions`
+/// (path already exists), and classify the parent `mod.rs` plus any touched
+/// router file as `would_create` / `would_modify`.
+fn plan_dsl(doc: &DslDoc, crate_root: &Path) -> ScaffoldResult {
+    let mut out = ScaffoldResult {
+        dry_run: true,
+        ..Default::default()
+    };
+    let mut mods_touched: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+
+    let leaf = |out: &mut ScaffoldResult,
+                mods_touched: &mut BTreeSet<std::path::PathBuf>,
+                subdir: &str,
+                name: &str| {
+        let leaf_path = leaf_for(crate_root, subdir, name);
+        if leaf_path.exists() {
+            out.collisions.push(leaf_path);
+        } else {
+            out.would_create.push(leaf_path);
+        }
+        let mod_path = crate_root.join(subdir).join("mod.rs");
+        if mods_touched.insert(mod_path.clone()) {
+            if mod_path.exists() {
+                out.would_modify.push(mod_path);
+            } else {
+                out.would_create.push(mod_path);
+            }
+        }
+    };
+
+    for c in &doc.components {
+        leaf(&mut out, &mut mods_touched, "src/components", &c.name);
+    }
+    for f in &doc.forms {
+        leaf(&mut out, &mut mods_touched, "src/components", &f.name);
+    }
+    for l in &doc.lists {
+        leaf(&mut out, &mut mods_touched, "src/components", &l.name);
+    }
+    for t in &doc.tables {
+        leaf(&mut out, &mut mods_touched, "src/components", &t.name);
+    }
+    for f in &doc.feeds {
+        leaf(&mut out, &mut mods_touched, "src/components", &f.name);
+    }
+    for ls in &doc.login_screens {
+        leaf(&mut out, &mut mods_touched, "src/components", &ls.name);
+    }
+    for pr in &doc.protected_routes {
+        leaf(&mut out, &mut mods_touched, "src/components", &pr.name);
+    }
+    for sc in &doc.screens {
+        leaf(&mut out, &mut mods_touched, "src/components", &sc.name);
+    }
+    for sf in &doc.server_fns {
+        leaf(&mut out, &mut mods_touched, "src/server", &sf.name);
+    }
+    for sig in &doc.signals {
+        leaf(&mut out, &mut mods_touched, "src/signals", &sig.name);
+    }
+    for sk in &doc.sockets {
+        leaf(&mut out, &mut mods_touched, "src/sockets", &sk.name);
+    }
+    for ss in &doc.session_states {
+        leaf(&mut out, &mut mods_touched, "src/auth", &ss.name);
+    }
+
+    // Router file: modified when there are routed primitives (screens or login_screens).
+    if (!doc.screens.is_empty() || !doc.login_screens.is_empty())
+        && let Some(router) = scaffold::find_routable(crate_root)
+    {
+        out.would_modify.push(router);
+    }
+
+    out
 }
 
 // ---------- pre-flight ----------
 
-fn preflight(doc: &DslDoc, crate_root: &Path) -> Result<(), String> {
+fn preflight(doc: &DslDoc, crate_root: &Path, if_missing: bool) -> Result<(), String> {
     // 1. Collect every snake_case name across every primitive and reject dups
     //    that would land in the same target directory.
     let mut comp_names: BTreeSet<String> = BTreeSet::new();
@@ -1101,13 +1347,17 @@ fn preflight(doc: &DslDoc, crate_root: &Path) -> Result<(), String> {
 
     // 3. Pre-check files that would collide with what's already on disk for
     //    each component-target name. (server_fn / signal / socket dirs may not
-    //    exist yet; existence isn't an error there.)
-    let comp_dir = crate_root.join("src/components");
-    for n in &comp_names {
-        if comp_dir.join(format!("{n}.rs")).exists() {
-            return Err(format!(
-                "src/components/{n}.rs already exists; refusing to overwrite"
-            ));
+    //    exist yet; existence isn't an error there.) Suppressed when
+    //    `if_missing` is set — those collisions become skip entries instead.
+    if !if_missing {
+        let comp_dir = crate_root.join("src/components");
+        for n in &comp_names {
+            if comp_dir.join(format!("{n}.rs")).exists() {
+                return Err(format!(
+                    "src/components/{n}.rs already exists; refusing to overwrite. \
+                     Pass `if_missing: true` to skip existing primitives instead of erroring."
+                ));
+            }
         }
     }
 
@@ -1130,36 +1380,7 @@ fn write_component_file(
     snake: &str,
     body: String,
 ) -> Result<ScaffoldResult, String> {
-    let dir = crate_root.join("src/components");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let target = dir.join(format!("{snake}.rs"));
-    if target.exists() {
-        return Err(format!("{} already exists", target.display()));
-    }
-    std::fs::write(&target, body).map_err(|e| e.to_string())?;
-    let mod_rs = dir.join("mod.rs");
-    let line = format!("pub mod {snake};\npub use {snake}::*;\n");
-    let mut modified = vec![];
-    let mut created = vec![target.clone()];
-    if mod_rs.exists() {
-        let mut current = std::fs::read_to_string(&mod_rs).map_err(|e| e.to_string())?;
-        if !current.contains(&format!("pub mod {snake};")) {
-            if !current.ends_with('\n') {
-                current.push('\n');
-            }
-            current.push_str(&line);
-            std::fs::write(&mod_rs, current).map_err(|e| e.to_string())?;
-            modified.push(mod_rs);
-        }
-    } else {
-        std::fs::write(&mod_rs, line).map_err(|e| e.to_string())?;
-        created.push(mod_rs);
-    }
-    Ok(ScaffoldResult {
-        files_created: created,
-        files_modified: modified,
-        next_steps: vec![],
-    })
+    write_module_file(crate_root, "src/components", snake, body)
 }
 
 fn write_module_file(
@@ -1176,27 +1397,16 @@ fn write_module_file(
     }
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
     let mod_rs = dir.join("mod.rs");
-    let line = format!("pub mod {snake};\npub use {snake}::*;\n");
-    let mut modified = vec![];
-    let mut created = vec![target.clone()];
-    if mod_rs.exists() {
-        let mut current = std::fs::read_to_string(&mod_rs).map_err(|e| e.to_string())?;
-        if !current.contains(&format!("pub mod {snake};")) {
-            if !current.ends_with('\n') {
-                current.push('\n');
-            }
-            current.push_str(&line);
-            std::fs::write(&mod_rs, current).map_err(|e| e.to_string())?;
-            modified.push(mod_rs);
-        }
-    } else {
-        std::fs::write(&mod_rs, line).map_err(|e| e.to_string())?;
-        created.push(mod_rs);
-    }
+    let upsert = upsert_mod_entry(&mod_rs, snake)?;
+    let (created, modified) = match upsert {
+        ModUpsert::Created => (vec![target, mod_rs], vec![]),
+        ModUpsert::Modified => (vec![target], vec![mod_rs]),
+        ModUpsert::Unchanged => (vec![target], vec![]),
+    };
     Ok(ScaffoldResult {
         files_created: created,
         files_modified: modified,
-        next_steps: vec![],
+        ..Default::default()
     })
 }
 
@@ -1527,7 +1737,6 @@ async fn generate_screen(
         context! {
             pascal => pascal.clone(),
             snake => snake.clone(),
-            layout => sc.layout.clone(),
             wrap_pascal => wrap_pascal.clone(),
         },
     )?;
@@ -1627,6 +1836,219 @@ mod tests {
         )
         .await;
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn screen_template_wraps_with_when_set() {
+        let out = render(
+            "screen",
+            SCREEN_TPL,
+            context! {
+                pascal => "HomeScreen",
+                snake => "home_screen",
+                wrap_pascal => Some("Dashboard"),
+            },
+        )
+        .unwrap();
+        assert!(
+            out.contains("use crate::components::Dashboard;"),
+            "expected import for Dashboard, got:\n{out}"
+        );
+        assert!(
+            out.contains("Dashboard {"),
+            "expected Dashboard {{ ... }} wrapper, got:\n{out}"
+        );
+        let body_start = out.find("rsx!").unwrap();
+        let body = &out[body_start..];
+        let dash_pos = body.find("Dashboard {").unwrap();
+        let div_pos = body.find("div {").unwrap();
+        assert!(
+            dash_pos < div_pos,
+            "Dashboard wrapper must be outside the div, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn screen_template_omits_wrapper_when_unset() {
+        let out = render(
+            "screen",
+            SCREEN_TPL,
+            context! {
+                pascal => "HomeScreen",
+                snake => "home_screen",
+                wrap_pascal => None::<String>,
+            },
+        )
+        .unwrap();
+        assert!(
+            !out.contains("Dashboard"),
+            "expected no wrapper, got:\n{out}"
+        );
+        assert!(!out.contains("use crate::components::"));
+    }
+
+    #[test]
+    fn plan_dsl_classifies_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(root.join("src/components/existing.rs"), "// existing\n").unwrap();
+        std::fs::write(
+            root.join("src/components/mod.rs"),
+            "pub mod existing;\npub use existing::*;\n",
+        )
+        .unwrap();
+
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+components:
+  - name: Existing
+  - name: New
+"#,
+        )
+        .unwrap();
+        let plan = plan_dsl(&doc, root);
+        assert!(plan.dry_run);
+        assert!(
+            plan.collisions.iter().any(|p| p.ends_with("existing.rs")),
+            "expected existing.rs in collisions, got {:?}",
+            plan.collisions
+        );
+        assert!(
+            plan.would_create.iter().any(|p| p.ends_with("new.rs")),
+            "expected new.rs in would_create, got {:?}",
+            plan.would_create
+        );
+        assert!(
+            plan.would_modify.iter().any(|p| p.ends_with("mod.rs")),
+            "expected mod.rs in would_modify, got {:?}",
+            plan.would_modify
+        );
+    }
+
+    #[test]
+    fn skip_set_collects_existing_leaf_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(root.join("src/components/existing.rs"), "").unwrap();
+
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+components:
+  - name: Existing
+  - name: New
+"#,
+        )
+        .unwrap();
+        let skip = skip_set(&doc, root);
+        assert_eq!(skip.len(), 1);
+        assert!(skip.iter().any(|p| p.ends_with("existing.rs")));
+    }
+
+    #[tokio::test]
+    async fn if_missing_skips_existing_and_reports_collisions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "if_missing_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(
+            root.join("src/components/existing.rs"),
+            "// hand-written; do not touch\n",
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+components:
+  - name: Existing
+  - name: NewOne
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: true,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed in if_missing mode");
+
+        assert!(
+            result.collisions.iter().any(|p| p.ends_with("existing.rs")),
+            "expected existing.rs in collisions, got {:?}",
+            result.collisions
+        );
+        let existing_body =
+            std::fs::read_to_string(root.join("src/components/existing.rs")).unwrap();
+        assert_eq!(
+            existing_body, "// hand-written; do not touch\n",
+            "if_missing must not overwrite the existing file"
+        );
+        assert!(
+            root.join("src/components/new_one.rs").exists(),
+            "non-conflicting components should still be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_returns_plan_without_writing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "dry_run_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+components:
+  - name: Widget
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: true,
+            },
+        )
+        .await
+        .expect("dry_run should succeed");
+
+        assert!(result.dry_run);
+        assert!(
+            result.would_create.iter().any(|p| p.ends_with("widget.rs")),
+            "expected widget.rs in would_create, got {:?}",
+            result.would_create
+        );
+        assert!(
+            !root.join("src/components/widget.rs").exists(),
+            "dry_run must not write the file"
+        );
     }
 
     #[test]

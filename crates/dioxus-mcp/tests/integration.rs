@@ -106,8 +106,14 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let name = entry.file_name();
+        // Skip build artifacts and lockfiles — copying them into a tempdir per
+        // test is gigabytes of wasted I/O and fills tmpfs.
+        if matches!(name.to_str(), Some("target") | Some("Cargo.lock")) {
+            continue;
+        }
         let path = entry.path();
-        let target = dst.join(entry.file_name());
+        let target = dst.join(name);
         if entry.file_type()?.is_dir() {
             copy_dir(&path, &target)?;
         } else {
@@ -746,7 +752,6 @@ fn tool_execute_code_screen_and_nav() {
 screens:
   - name: SettingsScreen
     route: /settings
-    layout: sidebar
 "#;
     let r = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
     let created = r["files_created"].as_array().unwrap();

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -47,11 +48,26 @@ pub async fn {{ snake }}(
 }
 "#;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub struct ScaffoldResult {
     pub files_created: Vec<PathBuf>,
     pub files_modified: Vec<PathBuf>,
     pub next_steps: Vec<String>,
+    /// Files that already existed at a target path (populated when running
+    /// `execute_code` with `if_missing: true` and a re-run skipped a primitive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collisions: Vec<PathBuf>,
+    /// Files that would be created — populated only by `execute_code` in
+    /// `dry_run: true` mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub would_create: Vec<PathBuf>,
+    /// Files that would be modified — populated only by `execute_code` in
+    /// `dry_run: true` mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub would_modify: Vec<PathBuf>,
+    /// True when the result is a dry-run plan rather than an applied change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
 }
 
 // ---------- create_component ----------
@@ -108,21 +124,12 @@ pub async fn create_component(
 
     // ensure mod.rs exports it
     let mod_rs = components_dir.join("mod.rs");
-    let mut modified = Vec::new();
-    let line = format!("pub mod {snake};\npub use {snake}::*;\n");
-    if mod_rs.exists() {
-        let mut current = std::fs::read_to_string(&mod_rs).map_err(|e| e.to_string())?;
-        if !current.contains(&format!("pub mod {snake};")) {
-            if !current.ends_with('\n') {
-                current.push('\n');
-            }
-            current.push_str(&line);
-            std::fs::write(&mod_rs, current).map_err(|e| e.to_string())?;
-            modified.push(mod_rs.clone());
-        }
-    } else {
-        std::fs::write(&mod_rs, line).map_err(|e| e.to_string())?;
-    }
+    let upsert = upsert_mod_entry(&mod_rs, &snake)?;
+    let (files_created, files_modified) = match upsert {
+        ModUpsert::Created => (vec![target, mod_rs], vec![]),
+        ModUpsert::Modified => (vec![target], vec![mod_rs]),
+        ModUpsert::Unchanged => (vec![target], vec![]),
+    };
 
     let next_steps = vec![
         format!("`use crate::components::{pascal};` where you want to render it"),
@@ -130,13 +137,10 @@ pub async fn create_component(
     ];
 
     Ok(ScaffoldResult {
-        files_created: if modified.contains(&mod_rs) {
-            vec![target]
-        } else {
-            vec![target, mod_rs]
-        },
-        files_modified: modified,
+        files_created,
+        files_modified,
         next_steps,
+        ..Default::default()
     })
 }
 
@@ -169,27 +173,73 @@ pub async fn create_route(
 
     let src = std::fs::read_to_string(&router_file)
         .map_err(|e| format!("read {}: {e}", router_file.display()))?;
-    let file = syn::parse_file(&src).map_err(|e| format!("parse: {e}"))?;
+    let variant_name = p.component.to_pascal_case();
+    let next_steps = vec![
+        format!("ensure `{variant_name}` exists and is in scope at the routable enum"),
+        "consider running `cargo fmt` on the router file".into(),
+    ];
+    match plan_route_insertion(&src, &variant_name, &p.path)? {
+        RouteInsertion::AlreadyMatches => Ok(ScaffoldResult {
+            next_steps,
+            ..Default::default()
+        }),
+        RouteInsertion::Insert(new_src) => {
+            std::fs::write(&router_file, &new_src).map_err(|e| e.to_string())?;
+            Ok(ScaffoldResult {
+                files_modified: vec![router_file.clone()],
+                next_steps,
+                ..Default::default()
+            })
+        }
+    }
+}
 
-    let enum_name = file
+#[cfg_attr(test, derive(Debug))]
+enum RouteInsertion {
+    /// The variant already exists and points at the same path. No-op.
+    AlreadyMatches,
+    /// Variant doesn't exist; this is the new source with the variant inserted.
+    Insert(String),
+}
+
+/// Inspect `src` for a `#[derive(Routable)]` enum and decide what to do for
+/// `(variant_name, path)`:
+/// - If a variant with the same name already maps to the same path → no-op.
+/// - If a variant with the same name maps to a different path → conflict error.
+/// - Otherwise → return the source with the variant inserted before the enum's
+///   closing brace.
+fn plan_route_insertion(
+    src: &str,
+    variant_name: &str,
+    path: &str,
+) -> Result<RouteInsertion, String> {
+    let file = syn::parse_file(src).map_err(|e| format!("parse: {e}"))?;
+    let routable = file
         .items
         .iter()
         .find_map(|it| match it {
-            syn::Item::Enum(e) if e.attrs.iter().any(|a| has_derive(a, "Routable")) => {
-                Some(e.ident.to_string())
-            }
+            syn::Item::Enum(e) if e.attrs.iter().any(|a| has_derive(a, "Routable")) => Some(e),
             _ => None,
         })
-        .ok_or_else(|| format!("no `#[derive(Routable)]` enum in {}", router_file.display()))?;
+        .ok_or_else(|| "no `#[derive(Routable)]` enum in source".to_string())?;
+    let enum_name = routable.ident.to_string();
 
-    let variant_name = p.component.to_pascal_case();
-    let variant = format!(
-        "    #[route(\"{}\")]\n    {variant} {{}},\n",
-        p.path,
-        variant = variant_name
-    );
+    for v in &routable.variants {
+        if v.ident == variant_name {
+            let existing_path = variant_route_path(v);
+            return match existing_path {
+                Some(p) if p == path => Ok(RouteInsertion::AlreadyMatches),
+                Some(p) => Err(format!(
+                    "route conflict: variant {variant_name} already maps to {p:?}, not {path:?}"
+                )),
+                None => Err(format!(
+                    "variant {variant_name} already exists in {enum_name} but has no #[route(\"...\")] attribute"
+                )),
+            };
+        }
+    }
 
-    // Insert before the final `}` of the enum block. Find the right one by scanning items.
+    let variant = format!("    #[route(\"{path}\")]\n    {variant_name} {{}},\n");
     let needle_open = format!("enum {enum_name}");
     let Some(start) = src.find(&needle_open) else {
         return Err(format!("could not locate `enum {enum_name}` in source"));
@@ -220,19 +270,19 @@ pub async fn create_route(
     }
     new_src.push_str(&variant);
     new_src.push_str(&src[end..]);
-    std::fs::write(&router_file, &new_src).map_err(|e| e.to_string())?;
+    Ok(RouteInsertion::Insert(new_src))
+}
 
-    Ok(ScaffoldResult {
-        files_created: vec![],
-        files_modified: vec![router_file.clone()],
-        next_steps: vec![
-            format!(
-                "ensure `{}` exists and is in scope at the routable enum",
-                variant_name
-            ),
-            "consider running `cargo fmt` on the router file".into(),
-        ],
-    })
+fn variant_route_path(v: &syn::Variant) -> Option<String> {
+    for a in &v.attrs {
+        if !a.path().is_ident("route") {
+            continue;
+        }
+        if let Ok(lit) = a.parse_args::<syn::LitStr>() {
+            return Some(lit.value());
+        }
+    }
+    None
 }
 
 pub(crate) fn has_derive(attr: &syn::Attribute, target: &str) -> bool {
@@ -273,6 +323,59 @@ pub(crate) fn find_routable(crate_root: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The server-fn template already wraps the return type in
+/// `Result<_, ServerFnError>`. Reject callers that pre-wrap it themselves —
+/// the resulting `Result<Result<_, ServerFnError>, ServerFnError>` compiles but
+/// is silently wrong. Returns `Some(error_message)` if the caller's type is
+/// already a server-fn result wrapper, else `None`.
+pub(crate) fn check_inner_return_type(ret: &str) -> Option<String> {
+    let parsed: syn::Type = match syn::parse_str(ret) {
+        Ok(t) => t,
+        // If it doesn't parse, leave validation to the compiler — we don't want
+        // to swallow surprising errors here.
+        Err(_) => return None,
+    };
+    let path = match &parsed {
+        syn::Type::Path(tp) => &tp.path,
+        _ => return None,
+    };
+    let last = path.segments.last()?;
+    let ident = last.ident.to_string();
+    let args = match &last.arguments {
+        syn::PathArguments::AngleBracketed(a) => a,
+        _ => return None,
+    };
+    let type_args: Vec<&syn::Type> = args
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    match (ident.as_str(), type_args.as_slice()) {
+        ("ServerFnResult", [inner]) => {
+            let inner_str = quote::quote!(#inner).to_string();
+            Some(format!(
+                "return_type `{ret}` already wraps the inner type in ServerFnResult; pass just `{inner_str}` instead — the template wraps it in `Result<_, ServerFnError>` for you."
+            ))
+        }
+        ("Result", [inner, err]) => {
+            let err_str = quote::quote!(#err).to_string();
+            let err_norm = err_str.replace(' ', "");
+            if err_norm.ends_with("ServerFnError") {
+                let inner_str = quote::quote!(#inner).to_string();
+                Some(format!(
+                    "return_type `{ret}` already wraps the inner type in `Result<_, ServerFnError>`; pass just `{inner_str}` instead — the template wraps it for you."
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 // ---------- create_server_fn ----------
@@ -329,6 +432,9 @@ pub async fn create_server_fn(
 
     let snake = p.name.to_snake_case();
     let ret = p.return_type.unwrap_or_else(|| "String".into());
+    if let Some(reason) = check_inner_return_type(&ret) {
+        return Err(reason);
+    }
     let method = match p.method.as_deref().map(str::to_ascii_lowercase) {
         Some(m) => {
             if !matches!(m.as_str(), "get" | "post") {
@@ -366,21 +472,12 @@ pub async fn create_server_fn(
 
     // ensure src/server/mod.rs declares it
     let mod_rs = server_dir.join("mod.rs");
-    let line = format!("pub mod {snake};\npub use {snake}::*;\n");
-    let mut modified = Vec::new();
-    if mod_rs.exists() {
-        let mut current = std::fs::read_to_string(&mod_rs).map_err(|e| e.to_string())?;
-        if !current.contains(&format!("pub mod {snake};")) {
-            if !current.ends_with('\n') {
-                current.push('\n');
-            }
-            current.push_str(&line);
-            std::fs::write(&mod_rs, current).map_err(|e| e.to_string())?;
-            modified.push(mod_rs.clone());
-        }
-    } else {
-        std::fs::write(&mod_rs, line).map_err(|e| e.to_string())?;
-    }
+    let upsert = upsert_mod_entry(&mod_rs, &snake)?;
+    let (files_created, files_modified) = match upsert {
+        ModUpsert::Created => (vec![target, mod_rs], vec![]),
+        ModUpsert::Modified => (vec![target], vec![mod_rs]),
+        ModUpsert::Unchanged => (vec![target], vec![]),
+    };
 
     let next_steps = vec![
         format!("call `{snake}(...)` from a client component to invoke it"),
@@ -388,14 +485,253 @@ pub async fn create_server_fn(
     ];
 
     Ok(ScaffoldResult {
-        files_created: if modified.contains(&mod_rs) {
-            vec![target]
-        } else {
-            vec![target, mod_rs]
-        },
-        files_modified: modified,
+        files_created,
+        files_modified,
         next_steps,
+        ..Default::default()
     })
+}
+
+/// Result of upserting an entry into a `mod.rs` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModUpsert {
+    /// The file was created from scratch.
+    Created,
+    /// The file existed and we added the entry (or re-sorted).
+    Modified,
+    /// The file already declared this module — no write.
+    Unchanged,
+}
+
+/// Insert `pub mod {name}; pub use {name}::*;` into `mod_rs`, keeping all
+/// `pub mod` / `pub use` entries sorted by name. Any non-entry lines (comments,
+/// hand-written re-exports, etc.) are preserved verbatim at the top of the file.
+pub(crate) fn upsert_mod_entry(mod_rs: &Path, name: &str) -> Result<ModUpsert, String> {
+    if !mod_rs.exists() {
+        let body = format!("pub mod {name};\npub use {name}::*;\n");
+        std::fs::write(mod_rs, body).map_err(|e| e.to_string())?;
+        return Ok(ModUpsert::Created);
+    }
+
+    let current = std::fs::read_to_string(mod_rs).map_err(|e| e.to_string())?;
+    let mut header: Vec<String> = Vec::new();
+    let mut entries: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut header_done = false;
+    for raw in current.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("pub mod ")
+            && let Some(n) = rest.strip_suffix(';')
+        {
+            header_done = true;
+            entries.entry(n.to_string()).or_default().push(raw.into());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("pub use ")
+            && let Some(n) = rest.strip_suffix("::*;")
+        {
+            header_done = true;
+            entries.entry(n.to_string()).or_default().push(raw.into());
+            continue;
+        }
+        if !header_done {
+            header.push(raw.into());
+        }
+        // Any non-entry line *after* entries started is dropped — we don't want
+        // to scatter free-form comments through a sorted block. If a user has
+        // such comments they should sit above the first entry.
+    }
+
+    entries
+        .entry(name.to_string())
+        .or_insert_with(|| vec![format!("pub mod {name};"), format!("pub use {name}::*;")]);
+
+    let mut rebuilt = String::new();
+    for h in &header {
+        rebuilt.push_str(h);
+        rebuilt.push('\n');
+    }
+    for lines in entries.values() {
+        for l in lines {
+            rebuilt.push_str(l);
+            rebuilt.push('\n');
+        }
+    }
+
+    if rebuilt == current {
+        return Ok(ModUpsert::Unchanged);
+    }
+    std::fs::write(mod_rs, rebuilt).map_err(|e| e.to_string())?;
+    Ok(ModUpsert::Modified)
+}
+
+#[cfg(test)]
+mod plan_route_tests {
+    use super::{RouteInsertion, plan_route_insertion};
+
+    const BASE: &str = r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/users/:id")]
+    User { id: i32 },
+}
+"#;
+
+    #[test]
+    fn inserts_new_variant() {
+        let r = plan_route_insertion(BASE, "About", "/about").unwrap();
+        match r {
+            RouteInsertion::Insert(new) => {
+                assert!(new.contains("#[route(\"/about\")]"));
+                assert!(new.contains("About {}"));
+                assert!(new.contains("Home {}"));
+                assert!(new.contains("User { id: i32 }"));
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn skips_existing_variant_same_path() {
+        let r = plan_route_insertion(BASE, "Home", "/").unwrap();
+        assert!(matches!(r, RouteInsertion::AlreadyMatches));
+    }
+
+    #[test]
+    fn errors_on_existing_variant_different_path() {
+        let err = plan_route_insertion(BASE, "Home", "/landing").unwrap_err();
+        assert!(err.contains("route conflict"), "got: {err}");
+        assert!(err.contains("Home"));
+    }
+
+    #[test]
+    fn errors_without_routable_enum() {
+        let src = "pub enum NotRoutable { Foo, Bar }";
+        let err = plan_route_insertion(src, "Foo", "/foo").unwrap_err();
+        assert!(err.contains("Routable"));
+    }
+}
+
+#[cfg(test)]
+mod return_type_tests {
+    use super::check_inner_return_type;
+
+    #[test]
+    fn accepts_bare_types() {
+        assert!(check_inner_return_type("String").is_none());
+        assert!(check_inner_return_type("Vec<Product>").is_none());
+        assert!(check_inner_return_type("Option<i64>").is_none());
+        assert!(check_inner_return_type("crate::model::Product").is_none());
+    }
+
+    #[test]
+    fn rejects_result_serverfnerror() {
+        let e = check_inner_return_type("Result<Vec<String>, ServerFnError>").unwrap();
+        assert!(e.contains("already wraps"));
+        assert!(e.contains("Vec < String >") || e.contains("Vec<String>"));
+    }
+
+    #[test]
+    fn rejects_serverfnresult() {
+        let e = check_inner_return_type("ServerFnResult<Vec<String>>").unwrap();
+        assert!(e.contains("ServerFnResult"));
+    }
+
+    #[test]
+    fn rejects_qualified_serverfnerror() {
+        let e =
+            check_inner_return_type("Result<Vec<String>, dioxus::prelude::ServerFnError>").unwrap();
+        assert!(e.contains("already wraps"));
+    }
+
+    #[test]
+    fn accepts_result_with_different_error() {
+        assert!(check_inner_return_type("Result<Vec<String>, MyError>").is_none());
+    }
+}
+
+#[cfg(test)]
+mod mod_upsert_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn creates_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        let r = upsert_mod_entry(&p, "foo").unwrap();
+        assert_eq!(r, ModUpsert::Created);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(body, "pub mod foo;\npub use foo::*;\n");
+    }
+
+    #[test]
+    fn inserts_sorted_into_existing() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        std::fs::write(
+            &p,
+            "pub mod alpha;\npub use alpha::*;\npub mod zeta;\npub use zeta::*;\n",
+        )
+        .unwrap();
+        let r = upsert_mod_entry(&p, "mid").unwrap();
+        assert_eq!(r, ModUpsert::Modified);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            body,
+            "pub mod alpha;\npub use alpha::*;\npub mod mid;\npub use mid::*;\npub mod zeta;\npub use zeta::*;\n"
+        );
+    }
+
+    #[test]
+    fn resorts_an_out_of_order_file() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        std::fs::write(
+            &p,
+            "pub mod zeta;\npub use zeta::*;\npub mod alpha;\npub use alpha::*;\n",
+        )
+        .unwrap();
+        let r = upsert_mod_entry(&p, "alpha").unwrap();
+        assert_eq!(r, ModUpsert::Modified);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            body,
+            "pub mod alpha;\npub use alpha::*;\npub mod zeta;\npub use zeta::*;\n"
+        );
+    }
+
+    #[test]
+    fn idempotent_when_already_present_and_sorted() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        let initial = "pub mod alpha;\npub use alpha::*;\npub mod beta;\npub use beta::*;\n";
+        std::fs::write(&p, initial).unwrap();
+        let r = upsert_mod_entry(&p, "alpha").unwrap();
+        assert_eq!(r, ModUpsert::Unchanged);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(body, initial);
+    }
+
+    #[test]
+    fn preserves_header_comments() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        std::fs::write(
+            &p,
+            "// hand-written header\n//! crate doc\npub mod zeta;\npub use zeta::*;\n",
+        )
+        .unwrap();
+        let r = upsert_mod_entry(&p, "alpha").unwrap();
+        assert_eq!(r, ModUpsert::Modified);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            body,
+            "// hand-written header\n//! crate doc\npub mod alpha;\npub use alpha::*;\npub mod zeta;\npub use zeta::*;\n"
+        );
+    }
 }
 
 pub(crate) async fn crate_root(
