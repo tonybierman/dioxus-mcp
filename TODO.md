@@ -32,16 +32,16 @@ Improvement checklist derived from a real-world build (an inventory management a
 
 ## Tooling ergonomics
 
-- [ ] **`check_rsx` batch mode.** Accepts only one `file` at a time. Add a `files: [...]` form (or a project-wide entrypoint) so linting the whole app is a single call.
+- [x] **`check_rsx` batch mode.** Accepts only one `file` at a time. Add a `files: [...]` form (or a project-wide entrypoint) so linting the whole app is a single call.
 - [ ] **Whole-project lint endpoint.** `dead_components`, `prop_drill`, `signal_lint`, `props_lint`, and `check_rsx` all exist but feel siloed. A single `lint_project` that runs them all and merges output would be the natural entry point.
-- [ ] **`find_example` requires undocumented `concept` field.** First call returns a deserialization error with no hint about expected values. Make `concept` optional (search across concepts) or expose the enum in the error message.
+- [x] **`find_example` requires undocumented `concept` field.** First call returns a deserialization error with no hint about expected values. Make `concept` optional (search across concepts) or expose the enum in the error message.
 - [ ] **Generated tests.** Emit a `#[tokio::test]` stub per server fn that exercises the store. Free CI surface and a documentation surface for callers.
 
 ## Documentation & spec
 
-- [ ] **Spec inconsistency on return types.** The spec example in `get_dsl_spec` shows `Vec<String>` as a return type, but doesn't call out that wrapping in `Result<_, ServerFnError>` is forbidden. Add an explicit note plus an example showing the correct form.
-- [ ] **Document re-run semantics.** Whether re-running `execute_code` with a previously-seen name overwrites, skips, or errors is currently learned by experiment. Document it in the spec.
-- [ ] **Document the file layout assumed.** `src/components/*`, `src/server/*`, `src/components/mod.rs`, `src/server/mod.rs`, plus inline edits to `src/main.rs`. New users should know the blast radius before invoking the tool.
+- [x] **Spec inconsistency on return types.** The spec example in `get_dsl_spec` shows `Vec<String>` as a return type, but doesn't call out that wrapping in `Result<_, ServerFnError>` is forbidden. Add an explicit note plus an example showing the correct form.
+- [x] **Document re-run semantics.** Whether re-running `execute_code` with a previously-seen name overwrites, skips, or errors is currently learned by experiment. Document it in the spec.
+- [x] **Document the file layout assumed.** `src/components/*`, `src/server/*`, `src/components/mod.rs`, `src/server/mod.rs`, plus inline edits to `src/main.rs`. New users should know the blast radius before invoking the tool.
 
 ## Nice to have
 

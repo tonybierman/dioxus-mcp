@@ -180,10 +180,17 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct CheckRsxParams {
-    /// Path to a Rust file to scan (absolute, or relative to the project root).
-    pub file: String,
-    /// Absolute path to the Dioxus project root. Required when `file` is relative and the
-    /// server was not started in the target project directory.
+    /// Path to a single Rust file to scan (absolute, or relative to the project
+    /// root). One of `file` or `files` must be provided.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Batch form: multiple file paths. When set, each file is linted and the
+    /// per-file breakdown lands in `per_file`; top-level `issues` is the flat
+    /// merge across files, with each issue annotated with its `file`.
+    #[serde(default)]
+    pub files: Option<Vec<String>>,
+    /// Absolute path to the Dioxus project root. Required when paths are
+    /// relative and the server was not started in the target project directory.
     pub project_root: Option<String>,
 }
 
@@ -192,22 +199,103 @@ pub struct RsxIssue {
     pub line: usize,
     pub column: usize,
     pub message: String,
+    /// Set in batch mode so callers can attribute a merged issue to its file.
+    /// Omitted in single-file mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct CheckRsxReport {
+pub struct CheckRsxFileReport {
     pub file: PathBuf,
     pub rsx_block_count: usize,
     pub issues: Vec<RsxIssue>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CheckRsxReport {
+    /// In single-file mode, the file scanned. In batch mode, the first file.
+    pub file: PathBuf,
+    /// Sum of rsx! blocks across all scanned files.
+    pub rsx_block_count: usize,
+    /// Flat list of issues. In batch mode each carries its `file`.
+    pub issues: Vec<RsxIssue>,
+    /// Per-file breakdown. Empty in single-file mode.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub per_file: Vec<CheckRsxFileReport>,
+}
+
 pub async fn check_rsx(state: &Arc<State>, p: CheckRsxParams) -> Result<CheckRsxReport, String> {
-    let path = resolve_in_project(state, &p.file, p.project_root.as_deref()).await;
-    let src = std::fs::read_to_string(&path)
+    let mut requested: Vec<String> = Vec::new();
+    if let Some(f) = p.file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        requested.push(f.to_owned());
+    }
+    if let Some(fs) = &p.files {
+        for f in fs {
+            let f = f.trim();
+            if !f.is_empty() {
+                requested.push(f.to_owned());
+            }
+        }
+    }
+    if requested.is_empty() {
+        return Err("check_rsx: pass `file` (single path) or `files` (list of paths)".into());
+    }
+
+    let batch_mode = requested.len() > 1 || p.files.is_some();
+    let mut per_file: Vec<CheckRsxFileReport> = Vec::with_capacity(requested.len());
+    for spec in &requested {
+        let path = resolve_in_project(state, spec, p.project_root.as_deref()).await;
+        let report = lint_single_file(&path)?;
+        per_file.push(report);
+    }
+
+    let first = per_file[0].file.clone();
+    let total_blocks: usize = per_file.iter().map(|r| r.rsx_block_count).sum();
+    let issues: Vec<RsxIssue> = if batch_mode {
+        per_file
+            .iter()
+            .flat_map(|r| {
+                r.issues.iter().map(|i| RsxIssue {
+                    line: i.line,
+                    column: i.column,
+                    message: i.message.clone(),
+                    file: Some(r.file.clone()),
+                })
+            })
+            .collect()
+    } else {
+        per_file[0]
+            .issues
+            .iter()
+            .map(|i| RsxIssue {
+                line: i.line,
+                column: i.column,
+                message: i.message.clone(),
+                file: None,
+            })
+            .collect()
+    };
+
+    Ok(CheckRsxReport {
+        file: first,
+        rsx_block_count: total_blocks,
+        issues,
+        per_file: if batch_mode { per_file } else { Vec::new() },
+    })
+}
+
+fn lint_single_file(path: &std::path::Path) -> Result<CheckRsxFileReport, String> {
+    let src = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let file = syn::parse_file(&src).map_err(|e| {
         let s = e.span().start();
-        format!("rust parse error at line {} col {}: {e}", s.line, s.column)
+        format!(
+            "rust parse error in {} at line {} col {}: {e}",
+            path.display(),
+            s.line,
+            s.column
+        )
     })?;
 
     struct Visitor<'a> {
@@ -238,8 +326,8 @@ pub async fn check_rsx(state: &Arc<State>, p: CheckRsxParams) -> Result<CheckRsx
     };
     v.visit_file(&file);
 
-    Ok(CheckRsxReport {
-        file: path,
+    Ok(CheckRsxFileReport {
+        file: path.to_path_buf(),
         rsx_block_count: v.rsx_blocks,
         issues: v.issues,
     })
@@ -268,6 +356,7 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
                             line: s.line,
                             column: s.column,
                             message: "loop in rsx! is missing a `key: ...` attribute on its child element — Dioxus needs keys for stable diffing".into(),
+                            file: None,
                         });
             }
         }
@@ -297,6 +386,7 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
                         message: format!(
                             "`{name}` handler closure takes no parameters; in Dioxus it should accept an Event, e.g. `{name}: move |evt: Event<MouseData>| {{ ... }}`"
                         ),
+                        file: None,
                     });
                 }
             }

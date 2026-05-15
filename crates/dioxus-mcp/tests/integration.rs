@@ -260,6 +260,30 @@ fn tool_check_rsx() {
 }
 
 #[test]
+fn tool_check_rsx_batch() {
+    let r = call_tool(
+        "check_rsx",
+        json!({"files": ["src/lint_demo.rs", "src/main.rs"]}),
+    );
+    let per_file = r["per_file"].as_array().unwrap();
+    assert_eq!(per_file.len(), 2, "expected per_file entry per input");
+    let issues = r["issues"].as_array().unwrap();
+    assert!(
+        issues
+            .iter()
+            .all(|i| i.get("file").is_some()),
+        "batch issues must carry `file`: {issues:?}"
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["file"].as_str().unwrap_or("").ends_with("lint_demo.rs")
+                && i["message"].as_str().unwrap_or("").contains("key:")),
+        "expected missing-key issue tagged to lint_demo.rs: {issues:?}"
+    );
+}
+
+#[test]
 fn tool_signal_lint() {
     let r = call_tool("signal_lint", json!({}));
     let issues = r["issues"].as_array().unwrap();

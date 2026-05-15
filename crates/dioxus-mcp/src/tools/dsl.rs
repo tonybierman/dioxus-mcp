@@ -241,6 +241,36 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   <primitive_section>: [ ... ]   # see core/extensions below
 #
 # All field names are case-sensitive. Unknown fields are rejected.
+#
+# File layout (the blast radius of one execute_code call):
+#   src/components/{snake}.rs        Component, Form, List, Table, Feed,
+#                                    LoginScreen, ProtectedRoute, Screen
+#   src/components/mod.rs            entries added (sorted), file created if missing
+#   src/server/{snake}.rs            ServerFn
+#   src/server/mod.rs                entries added (sorted)
+#   src/signals/{snake}.rs           Signal
+#   src/signals/mod.rs               entries added (sorted)
+#   src/sockets/{snake}.rs           Socket
+#   src/sockets/mod.rs               entries added (sorted)
+#   src/auth/{snake}.rs              SessionState
+#   src/auth/mod.rs                  entries added (sorted)
+#   the project's #[derive(Routable)] enum file
+#                                    new variants inserted for Screen / LoginScreen
+#                                    (deduplicated by variant name)
+#
+# Re-run semantics:
+#   - By default execute_code REFUSES to overwrite an existing leaf file under
+#     src/components — the call errors with the conflicting path. Pass
+#     `if_missing: true` to silently skip already-present primitives instead;
+#     the response lists each skipped path under `collisions`.
+#   - Server fns, signals, sockets, session states still error on the inner
+#     `<target> already exists` check when their target file exists and
+#     `if_missing` is false.
+#   - Route inserts are name-keyed and idempotent: a Screen / LoginScreen whose
+#     variant name already exists is skipped.
+#   - mod.rs entries are inserted alphabetically; re-runs produce stable diffs.
+#   - Pass `dry_run: true` to compute `would_create` + `would_modify` (plus any
+#     `collisions`) without touching disk.
 "#;
 
 const CORE_COMPONENT: &str = r#"  Component:
@@ -274,7 +304,7 @@ const CORE_SERVER_FN: &str = r#"  ServerFn:
     fields:
       - {name: name, type: string, required: true}
       - {name: args, type: "ArgDef[]", required: false}
-      - {name: return_type, type: string, required: false}
+      - {name: return_type, type: "string — the INNER type only; do NOT wrap in Result<_, ServerFnError> or ServerFnResult<_>, the template adds that wrapper for you. Wrapping is rejected with a clear error.", required: false}
       - {name: method, type: "get|post (defaults: post if args else get)", required: false}
       - {name: path, type: "string (default: /api/{snake_name})", required: false}
     example:
@@ -282,6 +312,7 @@ const CORE_SERVER_FN: &str = r#"  ServerFn:
         - name: fetch_users
           args:
             - {name: limit, type: u32}
+          # Pass the inner type, not Result<Vec<String>, ServerFnError>.
           return_type: "Vec<String>"
           method: post
           path: /api/users

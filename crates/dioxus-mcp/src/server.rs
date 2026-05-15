@@ -38,7 +38,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Lint a Rust file's rsx! blocks for common 0.7 mistakes (missing keys on iterators, parameter-less event handlers)."
+        description = "Lint Rust file(s)' rsx! blocks for common 0.7 mistakes (missing keys on iterators, parameter-less event handlers). Pass `file` for a single file (single-file response shape: `file`, `rsx_block_count`, `issues`). Pass `files: [...]` for batch mode (adds `per_file: [...]`; top-level `issues` is the flat merge with each issue tagged by file)."
     )]
     async fn check_rsx(
         &self,
@@ -261,7 +261,7 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     }
 
     #[tool(
-        description = "Find official Dioxus examples on GitHub matching a concept (e.g. 'router', 'fullstack', 'use_signal')."
+        description = "Find official Dioxus examples on GitHub. Pass `concept` to rank by name match (e.g. 'router', 'fullstack', 'use_signal'); omit it for an alphabetically-sorted listing of every example (useful when you don't yet know the folder name). `limit` defaults to 3 with a concept, 100 without."
     )]
     async fn find_example(
         &self,
