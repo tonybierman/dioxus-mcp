@@ -956,6 +956,33 @@ fn t() {
     }
 
     #[test]
+    fn no_warning_when_key_on_component_with_shorthand_prop() {
+        // The exact shape from TODO.md item #1: a component invocation that
+        // uses `key:` plus a shorthand prop (`x` resolving to the prop named
+        // `x`). The shorthand makes the body `{ key: "{x.id}", x }` — the
+        // trailing bare ident must not confuse the key search.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+#[derive(Clone, PartialEq, Props)]
+struct RowProps { x: i32 }
+fn Row(props: RowProps) -> Element { rsx! {} }
+fn t() {
+    let xs: Vec<i32> = vec![];
+    let _ = rsx! {
+        for x in xs {
+            Row { key: "{x}", x }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
     fn no_warning_when_key_on_component_with_tuple_destructure() {
         // Closer to the shape users actually write: `for (id, label) in items`
         // binding via destructure, then a component invocation with multiple

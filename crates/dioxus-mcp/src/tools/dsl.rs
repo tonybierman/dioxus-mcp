@@ -601,11 +601,22 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   Every section is optional. If you only want types and state plumbing
 #   generated — say, models + a client_store, or models + server_fns — omit
 #   `screens:` entirely and execute_code will generate exactly the requested
-#   primitives without touching the router or wiring an App body. This is the
-#   recommended shape when you want hand-rolled UI on top of generated data
-#   types: scaffold the data layer here, then write your components against
-#   `crate::model::*` / `crate::state::*` directly. No `screens:` means no
-#   Routable mutation, no `Router::<...>` injection, no `provide_*` wiring.
+#   primitives without touching the router. This is the recommended shape when
+#   you want hand-rolled UI on top of generated data types: scaffold the data
+#   layer here, then write your components against `crate::model::*` /
+#   `crate::state::*` directly. No `screens:` means no Routable mutation and
+#   no `Router::<...>` injection.
+#
+#   Two mutations still happen automatically so the generated code compiles
+#   and is reachable from your own UI:
+#     - `pub mod model;` / `pub mod state;` / etc. are added to the crate root
+#       (src/main.rs or src/lib.rs) for every top-level subdir we wrote into.
+#     - When `client_stores:` is declared, the matching `provide_{snake}()`
+#       calls are spliced into the top of your `fn App()` body (idempotent —
+#       skipped if `provide_{snake}()` already appears in the file). Without
+#       this, `use_{snake}()` would panic at runtime in the UI you add later.
+#       To opt out, omit `client_stores:` and call `provide_{snake}()`
+#       yourself, or strip the inserted line after the run.
 #
 # Keep-the-wiring, rewrite-the-body workflow:
 #   When a prompt asks for a "designed" or custom-styled Screen, do NOT skip
@@ -2746,22 +2757,42 @@ pub async fn execute_code(
         ));
     }
 
-    // Hint when the run scaffolded a data layer (model / state) but no
-    // src/components dir exists. Common when the user is using the data-layer-
-    // only path and plans to hand-write the UI: a `pub mod components;`
-    // skeleton lets them drop in `use crate::components::Foo;` immediately.
+    // When the run scaffolded a data layer (model / state) but no
+    // src/components dir exists, bootstrap an empty `src/components/mod.rs`
+    // and declare `pub mod components;` in the crate root. Keeps the
+    // components/ subdir symmetric with model/ and state/ — hand-written
+    // components can drop in immediately with `use crate::components::Foo;`
+    // and no follow-up scaffold step.
     {
         let comp_dir = crate_root.join("src/components");
         let data_dir_touched = touched_top_mods
             .iter()
             .any(|m| m == "model" || m == "state");
         if data_dir_touched && !comp_dir.exists() {
-            result.next_steps.push(
-                "scaffolded model/state but `src/components/` doesn't exist yet — when you start \
-                 authoring UI, create `src/components/mod.rs` (and declare `pub mod components;` \
-                 in the crate root) so generated and hand-written components share a home"
-                    .into(),
-            );
+            if let Err(e) = std::fs::create_dir_all(&comp_dir) {
+                result.next_steps.push(format!(
+                    "could not create `src/components/`: {e} — create it yourself and declare \
+                     `pub mod components;` in your crate root"
+                ));
+            } else {
+                let mod_rs = comp_dir.join("mod.rs");
+                if !mod_rs.exists() {
+                    match std::fs::write(&mod_rs, "") {
+                        Ok(()) => result.files_created.push(mod_rs),
+                        Err(e) => result.next_steps.push(format!(
+                            "could not create `src/components/mod.rs`: {e}"
+                        )),
+                    }
+                }
+                match scaffold::upsert_crate_mod(&crate_root, "components") {
+                    Ok(Some(path)) => result.files_modified.push(path),
+                    Ok(None) => {}
+                    Err(e) => result.next_steps.push(format!(
+                        "created `src/components/` but could not declare `pub mod components;` \
+                         in crate root: {e} — add it yourself"
+                    )),
+                }
+            }
         }
     }
 
@@ -7724,6 +7755,168 @@ serde = "1"
                 std::mem::discriminant(&other)
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn data_layer_only_path_bootstraps_components_dir_without_router() {
+        // Doc with only `models:` + `client_stores:` (no screens). Regression
+        // test for the documented data-layer-only behavior:
+        //   - Generates the model + store leaf files.
+        //   - Adds `pub mod model;` / `pub mod state;` / `pub mod components;`
+        //     to the crate root (the last one bootstraps an empty
+        //     components/mod.rs so hand-written UI has a home).
+        //   - Wires `provide_*()` into the App body for declared client_stores.
+        //   - Does NOT touch the router or inject `Router::<...>` (no screens).
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("data_layer_only_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+fn main() {
+    dioxus::launch(App);
+}
+
+#[component]
+fn App() -> Element {
+    rsx! {
+        div { "welcome" }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+                cargo_check: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed on the data-layer-only path");
+
+        // Leaf files landed.
+        let model_path = root.join("src/model/todo.rs");
+        let store_path = root.join("src/state/todo_store.rs");
+        let components_mod = root.join("src/components/mod.rs");
+        assert!(model_path.exists(), "model file should be created");
+        assert!(store_path.exists(), "store file should be created");
+        assert!(
+            components_mod.exists(),
+            "components/mod.rs should be bootstrapped"
+        );
+        assert!(
+            result.files_created.contains(&components_mod),
+            "components/mod.rs should appear in files_created, got {:?}",
+            result.files_created
+        );
+
+        // main.rs got the three `pub mod` declarations (model, state,
+        // components) plus the provide_*() injection — and crucially, no
+        // Router mount.
+        let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("pub mod model;"),
+            "expected `pub mod model;` in main.rs, got:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("pub mod state;"),
+            "expected `pub mod state;` in main.rs, got:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("pub mod components;"),
+            "expected `pub mod components;` in main.rs (components/ bootstrap), \
+             got:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("provide_todo_store()"),
+            "App body should call provide_todo_store(), got:\n{main_rs}"
+        );
+        assert!(
+            !main_rs.contains("Router::<"),
+            "Router must NOT be injected when no screens are declared, got:\n{main_rs}"
+        );
+
+        // Router file must not have been created either (data-layer-only =
+        // no Routable mutation).
+        assert!(
+            !root.join("src/router.rs").exists(),
+            "router.rs must not be created on the data-layer-only path"
+        );
+
+        // No stale "create src/components/mod.rs manually" hint — bootstrap
+        // handled it.
+        assert!(
+            !result.next_steps.iter().any(|s| s.contains("create `src/components/mod.rs`")),
+            "manual-bootstrap hint should be gone after auto-bootstrap, got {:?}",
+            result.next_steps
+        );
+
+        // Re-run is idempotent: nothing new should land, and main.rs must not
+        // accumulate duplicate `pub mod components;` / `provide_*()` lines.
+        let result2 = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: true,
+                dry_run: false,
+                cargo_check: false,
+            },
+        )
+        .await
+        .expect("re-run should succeed");
+        let main_rs_after = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert_eq!(
+            main_rs_after.matches("pub mod components;").count(),
+            1,
+            "pub mod components must not duplicate on re-run:\n{main_rs_after}"
+        );
+        assert_eq!(
+            main_rs_after.matches("provide_todo_store()").count(),
+            1,
+            "provide_todo_store() must not duplicate on re-run:\n{main_rs_after}"
+        );
+        assert!(
+            !result2.files_created.contains(&components_mod),
+            "components/mod.rs must not be re-created on a follow-up run"
+        );
     }
 
     #[tokio::test]
