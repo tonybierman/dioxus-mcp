@@ -272,11 +272,6 @@ pub struct FindExampleParams {
     /// Omit (or pass empty) to return an alphabetically-sorted listing of every
     /// example in the repo — useful for a first call when you don't yet know
     /// which folder name to ask for.
-    ///
-    /// Some concepts also match built-in dioxus-mcp DSL recipes (e.g.
-    /// "todo", "checkbox list", "add remove items") and those recipes are
-    /// returned at the top of the hits with a description pointing at
-    /// `get_dsl_spec`.
     #[serde(default)]
     pub concept: Option<String>,
     /// Branch or tag, e.g. "main" or "v0.7.0". Defaults to "main".
@@ -299,64 +294,6 @@ pub struct FindExampleResult {
     pub concept: Option<String>,
     pub git_ref: String,
     pub hits: Vec<ExampleHit>,
-}
-
-/// Built-in dioxus-mcp recipes that aren't in the upstream examples folder.
-/// Returned at the top of `find_example` hits when the query matches their
-/// keywords. The model can call `get_dsl_spec` to see the runnable YAML body.
-struct LocalRecipe {
-    name: &'static str,
-    description: &'static str,
-    /// Tokens any of which (when matched against the user query) makes this
-    /// recipe a hit. Match is OR; partial / prefix matches count.
-    keywords: &'static [&'static str],
-}
-
-const LOCAL_RECIPES: &[LocalRecipe] = &[LocalRecipe {
-    name: "todo-app (dioxus-mcp DSL recipe)",
-    description: "Client-only todo app (in-memory state, no server fn): one Model + one ClientStore + one client_crud Screen. Call `get_dsl_spec` to see the YAML and hand it to `execute_code`.",
-    keywords: &[
-        "todo",
-        "todos",
-        "checklist",
-        "checkbox",
-        "list",
-        "add",
-        "remove",
-        "items",
-        "in-memory",
-        "client",
-    ],
-}];
-
-fn local_recipe_hits(concept: Option<&str>) -> Vec<ExampleHit> {
-    let Some(concept) = concept else {
-        return Vec::new();
-    };
-    let qterms = tokenize(concept);
-    if qterms.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for recipe in LOCAL_RECIPES {
-        let matched = recipe.keywords.iter().any(|kw| {
-            qterms
-                .iter()
-                .any(|q| q == *kw || kw.starts_with(q.as_str()) || q.starts_with(kw))
-        });
-        if matched {
-            out.push(ExampleHit {
-                name: recipe.name.to_string(),
-                path: "dsl-recipe:todo".into(),
-                // No external URL — the recipe lives in get_dsl_spec's output.
-                url: String::new(),
-                raw_url: recipe.description.to_string(),
-                // Stick at the top; higher than any name-score from upstream.
-                score: 1000.0,
-            });
-        }
-    }
-    out
 }
 
 pub async fn find_example(
@@ -460,47 +397,11 @@ pub async fn find_example(
         });
     }
 
-    // Prepend local recipes when the concept matches their keywords. These
-    // exist for cases the upstream examples folder doesn't cover — most
-    // notably a client-only todo app (TODO4 §2.2).
-    let mut final_hits = local_recipe_hits(concept);
-    final_hits.extend(hits);
-    final_hits.truncate(limit);
+    hits.truncate(limit);
 
     Ok(FindExampleResult {
         concept: concept.map(str::to_owned),
         git_ref,
-        hits: final_hits,
+        hits,
     })
-}
-
-#[cfg(test)]
-mod local_recipe_tests {
-    use super::*;
-
-    #[test]
-    fn todo_query_yields_local_recipe() {
-        let hits = local_recipe_hits(Some("todo"));
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].name.contains("todo"));
-        assert!(hits[0].score > 100.0);
-    }
-
-    #[test]
-    fn checkbox_list_query_yields_local_recipe() {
-        let hits = local_recipe_hits(Some("checkbox list"));
-        assert_eq!(hits.len(), 1);
-    }
-
-    #[test]
-    fn router_query_does_not_yield_local_recipe() {
-        let hits = local_recipe_hits(Some("router"));
-        assert!(hits.is_empty(), "router should not match the todo recipe");
-    }
-
-    #[test]
-    fn empty_concept_yields_no_local_recipe() {
-        assert!(local_recipe_hits(None).is_empty());
-        assert!(local_recipe_hits(Some("")).is_empty());
-    }
 }

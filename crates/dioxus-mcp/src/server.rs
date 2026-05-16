@@ -233,7 +233,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, ClientStore, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for server-backed features. ClientStore + Screen `kind: client_crud` covers client-only apps like todo lists with no server fn round-trip."
+        description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, ClientStore, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for server-backed features. ClientStore + Screen `kind: client_crud` covers client-only in-memory state with no server fn round-trip."
     )]
     async fn get_dsl_spec(
         &self,
@@ -274,7 +274,7 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     }
 
     #[tool(
-        description = "Find official Dioxus examples on GitHub AND built-in dioxus-mcp DSL recipes. Pass `concept` to rank by name match (e.g. 'router', 'fullstack', 'use_signal'); omit it for an alphabetically-sorted listing of every example (useful when you don't yet know the folder name). `limit` defaults to 3 with a concept, 100 without. Some concepts (`todo`, `checkbox list`, `add remove items`) also surface a built-in dioxus-mcp DSL recipe at the top of the results — call `get_dsl_spec` to see the runnable YAML for those."
+        description = "Find official Dioxus examples on GitHub. Pass `concept` to rank by name match (e.g. 'router', 'fullstack', 'use_signal'); omit it for an alphabetically-sorted listing of every example (useful when you don't yet know the folder name). `limit` defaults to 3 with a concept, 100 without."
     )]
     async fn find_example(
         &self,
@@ -351,19 +351,13 @@ impl ServerHandler for DioxusMcp {
              \"wire up CRUD for X\", \"make a feature for X\", or \"build me an app\". \
              The DSL covers both server-fn-backed CRUD (Resource, Store, ServerFn) and \
              client-only state (ClientStore + Screen template `kind: client_crud` — \
-             use this for todo lists, drafts, in-memory selections; no server fn \
-             required). There is no \"too small\" case — single primitives work too. \
-             The `Resource` primitive emits a complete model+store+server-fn+screens \
-             slice in one entry — prefer it for any new server-backed resource. \
-             Per-primitive tools (`create_component`, `create_route`, \
-             `create_server_fn`) exist for narrow agent workflows and are NOT the \
-             default — prefer the DSL. \
-             \
-             FAST PATH for \"build me a tiny app\" prompts (todo, checklist, counter-ish \
-             apps): call `find_example` first with the user's concept (e.g. \
-             `find_example concept:\"todo\"`). Built-in DSL recipes appear at the top \
-             of the hits and tell you which `get_dsl_spec` section to read next. This \
-             avoids hand-mapping primitives for shapes the DSL already covers. \
+             use this for drafts, in-memory selections, or any ephemeral state; no \
+             server fn required). There is no \"too small\" case — single primitives \
+             work too. The `Resource` primitive emits a complete \
+             model+store+server-fn+screens slice in one entry — prefer it for any new \
+             server-backed resource. Per-primitive tools (`create_component`, \
+             `create_route`, `create_server_fn`) exist for narrow agent workflows and \
+             are NOT the default — prefer the DSL. \
              \
              Other routing: \
              - Runtime / behavior questions (panics, crashes, renders, signal writes, \
