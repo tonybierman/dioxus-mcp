@@ -3,32 +3,15 @@
 Thanks for your interest in contributing. This project welcomes bug reports,
 feature requests, and pull requests.
 
-## Contributor License Agreement
+## License of contributions
 
-`dioxus-mcp` is dual-licensed: it is published under
-[GPL-3.0-or-later](LICENSE) for open-source use, and a separate commercial
-license is available for users whose use case is incompatible with GPL
-(see the README). To keep this model viable, every contribution must come
-with broad rights to the project maintainer.
+`dioxus-mcp` is dual-licensed under
+[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) at the user's option.
 
-**By submitting a pull request, opening a patch, or otherwise contributing
-code, documentation, or other content to this repository, you agree that:**
-
-1. Your contribution is your original work, or you have the right to submit
-   it under the terms below.
-2. Your contribution is licensed to the project and its users under the
-   same terms as the project: **GPL-3.0-or-later**.
-3. You additionally grant **Tony Bierman** (the project maintainer) a
-   perpetual, worldwide, non-exclusive, royalty-free, irrevocable license
-   to use, reproduce, modify, sublicense, and distribute your contribution
-   under **any other license terms**, including proprietary or commercial
-   licenses, without further notice or compensation.
-
-This is the same model used by Sidekiq, Qt, and other dual-licensed
-projects. It is what allows the commercial license offering to remain
-available as the project grows.
-
-If you cannot agree to clause 3, please do not submit a contribution.
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms
+or conditions.
 
 ## Pull request process
 
@@ -50,5 +33,4 @@ Open a GitHub issue with:
 
 ## Questions
 
-For commercial licensing inquiries, contact **tonybierman@gmail.com**.
-For everything else, GitHub issues are the right venue.
+GitHub issues are the right venue.

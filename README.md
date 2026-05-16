@@ -1,7 +1,7 @@
 # dioxus-mcp
 
 [![CI](https://github.com/tonybierman/dioxus-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/tonybierman/dioxus-mcp/actions/workflows/ci.yml)
-[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](#license)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 An MCP server that gives Claude Code (and any other MCP client) deep static
 understanding of a Dioxus 0.7 project: route maps, component/server-fn
@@ -148,32 +148,24 @@ test suite layout, see
 
 ## Contributing
 
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) — note
-that, to keep the dual-license model viable, contributors grant the
-maintainer rights to relicense their contributions.
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Copyright (C) 2026 Tony Bierman
+Copyright (c) 2026 Tony Bierman
 
-Licensed under the [GNU General Public License v3.0 or later](LICENSE).
+Licensed under either of
 
-### Commercial licensing
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
 
-A separate commercial license is available when GPL-3.0 doesn't fit.
-Common reasons:
+at your option.
 
-- **You're shipping `dioxus-mcp` inside a proprietary product.** Bundling,
-  embedding, or distributing it as part of closed-source software triggers
-  GPL's copyleft requirements; a commercial license removes them.
-- **Your organization's policy excludes GPL software**, even for internal
-  use. Common in finance, defense, healthcare, and large enterprise IT.
-- **You need commercial terms** — support, warranty, indemnification, or a
-  license your legal team can sign off on without a GPL compliance review.
+### Contribution
 
-> Note: GPL-3.0 already permits **internal corporate use** (including
-> internal SaaS) with no source-disclosure obligation — distribution is
-> what triggers copyleft. The commercial license exists for cases where
-> GPL itself is the friction, not the legal text.
-
-Contact **tonybierman@gmail.com** to discuss terms.
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms
+or conditions.
