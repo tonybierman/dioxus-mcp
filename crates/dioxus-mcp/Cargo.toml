@@ -3,7 +3,7 @@ name = "dioxus-mcp"
 version = "0.2.0"
 edition = "2024"
 description = "MCP server giving LLM clients deep static understanding of Dioxus 0.7 projects: route maps, component/server-fn indexes, dead-code detection, prop-drilling reports, signal/props lints, asset audits, and scaffolding helpers."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/tonybierman/dioxus-mcp"
 
 [dependencies]
