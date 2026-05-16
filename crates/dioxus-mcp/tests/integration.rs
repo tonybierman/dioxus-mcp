@@ -829,9 +829,11 @@ fn tool_get_dsl_spec_core_only() {
     assert!(spec.contains("Component:"), "spec: {spec}");
     assert!(spec.contains("Screen:"), "spec: {spec}");
     assert!(spec.contains("ServerFn:"), "spec: {spec}");
+    // The preamble may legitimately mention `extensions:` in slim-fetch
+    // hints; the section header is emitted on its own line as "\nextensions:\n".
     assert!(
-        !spec.contains("extensions:"),
-        "core-only must not include extensions"
+        !spec.contains("\nextensions:\n"),
+        "core-only must not include the extensions section header"
     );
 }
 

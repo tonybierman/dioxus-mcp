@@ -72,6 +72,48 @@ pub struct DslDoc {
     /// fn, add a field to a model. Each entry is idempotent.
     #[serde(default)]
     pub modify: Vec<DslModify>,
+    /// Delete entire on-disk items: a Routable variant (and its `#[route(...)]`
+    /// attribute), a component file (and its `mod.rs` entry), a model, or a
+    /// server fn. Useful when scaffolding into a starter template (`dx new`)
+    /// to clear demo Route variants / Hero components before adding your own.
+    /// Removes run *first* in an execute_code call — after preflight, before
+    /// any create/modify steps — so a single doc can replace a demo
+    /// component with your own.
+    #[serde(default)]
+    pub remove: Vec<DslRemove>,
+}
+
+/// Top-level remove kinds. Each entry idempotently deletes the named on-disk
+/// item. Targets that don't exist are silently skipped (no `if_missing` toggle
+/// — removal of an absent thing is a no-op by definition).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DslRemove {
+    /// Remove a `#[derive(Routable)]` enum variant (and its `#[route(...)]`
+    /// attribute). The Routable file is located via the same heuristics
+    /// `create_route` uses.
+    RemoveRoute {
+        /// Variant name (any case — normalized to PascalCase).
+        variant: String,
+    },
+    /// Delete `src/components/{snake}.rs` and remove the matching `pub mod` /
+    /// `pub use` lines from `src/components/mod.rs`. Does NOT touch any
+    /// Routable enum — pair with `remove_route` if a screen variant is left
+    /// dangling.
+    RemoveComponent {
+        /// Component name (any case).
+        component: String,
+    },
+    /// Delete `src/model/{snake}.rs` and its `mod.rs` entry.
+    RemoveModel {
+        /// Model name (any case).
+        model: String,
+    },
+    /// Delete `src/server/{snake}.rs` and its `mod.rs` entry.
+    RemoveServerFn {
+        /// Server-fn name (any case).
+        server_fn: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -144,6 +186,14 @@ pub struct DslClientStore {
     /// Rust type of the id field. Default: `i64`.
     #[serde(default)]
     pub id_type: Option<String>,
+    /// When true, the store owns its own monotonic id allocator and exposes a
+    /// `push_new(item)` helper that assigns the next id to `item.{id_field}`
+    /// before pushing. Callers can omit the id field in the struct literal
+    /// (the helper sets it). Requires `id_field` to be set and the id type
+    /// to be a primitive integer (i8..i128/u8..u128/isize/usize). Default:
+    /// false.
+    #[serde(default)]
+    pub auto_id: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -209,6 +259,13 @@ pub struct DslScreenTemplate {
     /// non-toggleable items.
     #[serde(default)]
     pub checkbox_field: Option<String>,
+    /// Optional class name applied to the screen's root `div`, overriding the
+    /// default `"screen {{ snake }}"` pair. Useful when the host project uses
+    /// a design system / utility framework (e.g. Tailwind) and doesn't want
+    /// the generated screens to leak `screen` / `{name}` classes. Applies to
+    /// every screen template kind.
+    #[serde(default)]
+    pub class: Option<String>,
     /// Internal: rich-CRUD context populated by `expand_resources` so the list
     /// and form templates can emit a real table (with edit/delete actions) or
     /// an edit-by-id form. Not part of the user-facing spec.
@@ -440,12 +497,13 @@ pub struct DslProtectedRoute {
 /// that's already present is skipped; identical re-runs produce no diff.
 ///
 /// Each variant names the on-disk target by user-facing name (any case) and
-/// carries the list of items to append. Missing target files / items error
-/// unless `if_missing: true` is set on `execute_code`, in which case they are
-/// recorded under `collisions` and the run continues.
+/// carries the list of items to append or remove. Missing target files /
+/// items error unless `if_missing: true` is set on `execute_code`, in which
+/// case they are recorded under `collisions` and the run continues. The
+/// remove kinds are symmetrically idempotent — a field/prop already absent is
+/// silently skipped.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[allow(clippy::enum_variant_names)] // variants intentionally map to add_* serde tags
 pub enum DslModify {
     /// Append fields to `crate::model::{Pascal}`'s struct. Requires the model
     /// to already exist on disk under `src/model/{snake}.rs`.
@@ -470,6 +528,23 @@ pub enum DslModify {
         server_fn: String,
         args: Vec<DslArgDef>,
     },
+    /// Delete named fields from `crate::model::{Pascal}`'s struct. Idempotent:
+    /// names that aren't present in the struct are silently skipped.
+    RemoveModelField {
+        /// Model name (any case). Resolved to `src/model/{snake}.rs`.
+        model: String,
+        /// Field names to remove (snake_case at compare time).
+        fields: Vec<String>,
+    },
+    /// Delete named props from `{Pascal}Props` for a component. Idempotent.
+    /// Errors only when the file or the `*Props` struct itself is missing
+    /// (handled like the Add* variants).
+    RemoveComponentProp {
+        /// Component name (any case). Resolved to `src/components/{snake}.rs`.
+        component: String,
+        /// Prop names to remove (snake_case at compare time).
+        props: Vec<String>,
+    },
 }
 
 // ===========================================================================
@@ -484,6 +559,16 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 # Author a YAML doc using these primitives, then call execute_code with the
 # whole doc as a string. The tool parses, pre-flights collisions, and emits
 # Dioxus 0.7 source files in one shot.
+#
+# >>> Slim-fetch hints (READ FIRST — this full spec is ~10KB):
+#   - Pass `index_only: true` to get a one-line-per-primitive index of every
+#     section name and its purpose. Use that to decide which sections you
+#     actually need, then re-fetch only those.
+#   - Pass `sections: [model, client_store, ...]` to fetch only the named
+#     sections (extension blocks are auto-included). Most authoring sessions
+#     touch 2–4 primitives — pulling the whole spec wastes tokens.
+#   - Pass `extensions: [crud, realtime, auth]` to also include extension
+#     blocks. Omit for the core surface only.
 #
 # Top-level shape:
 #   version: "1"
@@ -554,6 +639,23 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #     `collisions`). Modify runs *after* all create steps in the same call.
 #   - Pass `dry_run: true` to compute `would_create` + `would_modify` (plus any
 #     `collisions`) without touching disk.
+#
+# Partial-failure semantics:
+#   - execute_code is NOT transactional across primitives. Pre-flight catches
+#     dup names / dup route paths / cross-reference errors before any write,
+#     but once writes start, a mid-run error (e.g. one screen's template
+#     references an undeclared field that only surfaces at render time) leaves
+#     prior primitives already on disk. The response's `files_created` /
+#     `files_modified` lists exactly what landed before the error.
+#   - The top-level `status` field summarizes the outcome:
+#       - "applied"   — every requested primitive was emitted cleanly
+#       - "partial"   — some emitted, some collided (under `if_missing: true`)
+#       - "no_changes" — every requested primitive collided
+#       - absent      — the call errored mid-run; check the error message and
+#                       inspect `files_created` to see how far the write got
+#   - Recovery: re-run with `if_missing: true` to skip everything that landed,
+#     fix the offending primitive, and resume. The router / App / Cargo.toml
+#     wiring is idempotent and converges across re-runs.
 "#;
 
 const CORE_MODEL: &str = r#"  Model:
@@ -590,12 +692,12 @@ const CORE_COMPONENT: &str = r#"  Component:
 "#;
 
 const CORE_SCREEN: &str = r#"  Screen:
-    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=resource_list / kind=resource_form bind to server fns (use these for backend-backed CRUD); kind=client_crud binds to a `client_stores:` entry and emits add/toggle/delete handlers entirely client-side (no server fn needed — ideal for in-memory apps like todo lists)."
+    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=empty with `store:` set wires `use_<store>()` so you get the context plumbing without committing to the stock UI; kind=resource_list / kind=resource_form bind to server fns (use these for backend-backed CRUD); kind=client_crud binds to a `client_stores:` entry and emits add/toggle/delete handlers entirely client-side (no server fn needed — ideal for in-memory apps like todo lists). All template kinds accept `class:` to override the root `div`'s class string when the host project uses a design system (e.g. Tailwind) that conflicts with the default `\"screen {name}\"` pair."
     fields:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
       - {name: wrap_with, type: "ComponentName (e.g. a ProtectedRoute guard)", required: false}
-      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?}", required: false}
+      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?, class?}", required: false}
     template_kinds: [empty, resource_list, resource_form, client_crud]
     client_crud_fields:
       - {name: store, type: "ClientStore name in this doc", required: true}
@@ -665,13 +767,14 @@ const CORE_STORE: &str = r#"  Store:
 "#;
 
 const CORE_CLIENT_STORE: &str = r#"  ClientStore:
-    description: "A typed client-side reactive list. Generates `src/state/{snake}.rs` (no server feature gate) exposing a `Signal<Vec<T>>`-backed store via context — call `provide_{snake}()` once in your root component and `use_{snake}()` from any descendant. Emits `push`, `clear`, and (when `id_field` is set) `remove_by_id` and `update_by_id` helpers. Pair with a Screen template `kind: client_crud` for one-call todo-style apps. NO server fn round-trip — ideal for in-memory state, todo lists, drafts, ephemeral UI selections."
+    description: "A typed client-side reactive list. Generates `src/state/{snake}.rs` (no server feature gate) exposing a `Signal<Vec<T>>`-backed store via context — call `provide_{snake}()` once in your root component and `use_{snake}()` from any descendant. Emits `push`, `clear`, and (when `id_field` is set) `remove_by_id` and `update_by_id` helpers. With `auto_id: true` the store also owns a monotonic id allocator and exposes `push_new(item)` that assigns the next id before pushing — call sites can drop the id field from the struct literal. Pair with a Screen template `kind: client_crud` for one-call todo-style apps. NO server fn round-trip — ideal for in-memory state, todo lists, drafts, ephemeral UI selections."
     fields:
       - {name: name, type: string, required: true}
       - {name: item_type, type: "Rust type (Model in this doc OR a built-in like String / i32). When it matches a Model name, the file emits `use crate::model::{ItemType};`.", required: true}
       - {name: initial, type: "Rust expression for the initial Vec value (default `Vec::new()`)", required: false}
       - {name: id_field, type: "Field name to use for remove_by_id / update_by_id helpers (e.g. `id`). Omit for primitive item types.", required: false}
       - {name: id_type, type: "Rust type of the id field (default `i64`)", required: false}
+      - {name: auto_id, type: "bool (default false) — when true the store owns the id allocator and exposes `push_new(item)`. Requires `id_field` and a primitive-integer `id_type`. The companion client_crud screen template detects this and stops emitting its local `next_id` signal.", required: false}
     example:
       models:
         - name: Todo
@@ -684,6 +787,7 @@ const CORE_CLIENT_STORE: &str = r#"  ClientStore:
           item_type: Todo
           id_field: id
           id_type: i64
+          auto_id: true
 "#;
 
 const CORE_RESOURCE: &str = r#"  Resource:
@@ -709,8 +813,39 @@ const CORE_RESOURCE: &str = r#"  Resource:
             - {name: name, type: String}
 "#;
 
+const CORE_REMOVE: &str = r#"  Remove:
+    description: "Delete entire on-disk items in one call. Useful when scaffolding into a starter template (`dx new`) to clear demo screens/components before adding your own. Removes run FIRST in an execute_code call (after preflight, before create/modify), so a single doc can replace a demo. Each kind is idempotent — naming a target that's already gone is a silent no-op."
+    kinds:
+      remove_route:
+        description: "Drop a variant from the Routable enum (and its `#[route(...)]` attribute). Component file is left alone — pair with `remove_component` if you want both gone."
+        fields:
+          - {name: kind, type: "literal `remove_route`", required: true}
+          - {name: variant, type: "Variant name (any case — normalized to PascalCase)", required: true}
+      remove_component:
+        description: "Delete src/components/{snake}.rs and its mod.rs entry. Does NOT touch Routable variants."
+        fields:
+          - {name: kind, type: "literal `remove_component`", required: true}
+          - {name: component, type: "Component name (any case)", required: true}
+      remove_model:
+        description: "Delete src/model/{snake}.rs and its mod.rs entry."
+        fields:
+          - {name: kind, type: "literal `remove_model`", required: true}
+          - {name: model, type: "Model name (any case)", required: true}
+      remove_server_fn:
+        description: "Delete src/server/{snake}.rs and its mod.rs entry."
+        fields:
+          - {name: kind, type: "literal `remove_server_fn`", required: true}
+          - {name: server_fn, type: "Server-fn name (any case)", required: true}
+    example:
+      remove:
+        - kind: remove_route
+          variant: Home
+        - kind: remove_component
+          component: Hero
+"#;
+
 const CORE_MODIFY: &str = r#"  Modify:
-    description: "In-place edits to items that already exist on disk. Each entry is idempotent — fields/props/args already present are skipped and identical re-runs produce no diff. Targets must exist on disk; pass `if_missing: true` on execute_code to skip missing targets (they are recorded under `collisions`) instead of erroring. Currently three edit kinds are supported."
+    description: "In-place edits to items that already exist on disk. Each entry is idempotent — fields/props/args already present are skipped on add_* kinds, names already absent are skipped on remove_* kinds, and identical re-runs produce no diff. Targets must exist on disk; pass `if_missing: true` on execute_code to skip missing targets (they are recorded under `collisions`) instead of erroring."
     kinds:
       add_model_field:
         description: "Append fields to `crate::model::{Pascal}`'s struct (src/model/{snake}.rs)."
@@ -730,6 +865,18 @@ const CORE_MODIFY: &str = r#"  Modify:
           - {name: kind, type: "literal `add_server_fn_arg`", required: true}
           - {name: server_fn, type: "Server-fn name (any case)", required: true}
           - {name: args, type: "ArgDef[] — each {name, type}", required: true}
+      remove_model_field:
+        description: "Delete named fields from `crate::model::{Pascal}`'s struct. Names already absent are silently skipped."
+        fields:
+          - {name: kind, type: "literal `remove_model_field`", required: true}
+          - {name: model, type: "Model name (any case)", required: true}
+          - {name: fields, type: "string[] — field names to drop (snake_case at compare time)", required: true}
+      remove_component_prop:
+        description: "Delete named props from `{Pascal}Props`. Errors only when the file or the *Props struct is missing."
+        fields:
+          - {name: kind, type: "literal `remove_component_prop`", required: true}
+          - {name: component, type: "Component name (any case)", required: true}
+          - {name: props, type: "string[] — prop names to drop", required: true}
     example:
       modify:
         - kind: add_model_field
@@ -744,6 +891,12 @@ const CORE_MODIFY: &str = r#"  Modify:
           server_fn: fetch_users
           args:
             - {name: page, type: u32}
+        - kind: remove_model_field
+          model: Product
+          fields: [legacy_code]
+        - kind: remove_component_prop
+          component: UserCard
+          props: [obsolete]
 "#;
 
 const CRUD_FORM: &str = r#"  Form:
@@ -876,18 +1029,25 @@ const SCREEN_TPL: &str = r#"use dioxus::prelude::*;
 {%- if wrap_pascal %}
 use crate::components::{{ wrap_pascal }};
 {%- endif %}
+{%- if store_snake %}
+use crate::state::{{ store_snake }}::use_{{ store_snake }};
+{%- endif %}
 
 #[component]
 pub fn {{ pascal }}() -> Element {
+{%- if store_snake %}
+    let _store = use_{{ store_snake }}();
+    // `_store` exposes the ClientStore context; rename and use as needed.
+{%- endif %}
     rsx! {
 {%- if wrap_pascal %}
         {{ wrap_pascal }} {
-            div { class: "screen {{ snake }}",
+            div { class: "{{ root_class }}",
                 h1 { "{{ pascal }}" }
             }
         }
 {%- else %}
-        div { class: "screen {{ snake }}",
+        div { class: "{{ root_class }}",
             h1 { "{{ pascal }}" }
         }
 {%- endif %}
@@ -1447,6 +1607,8 @@ pub fn {{ pascal }}() -> Element {
 /// Client-side reactive list, exposed via context. NOT gated on the server
 /// feature — runs anywhere Dioxus runs. Helpers mirror the spec: `push`,
 /// `clear`, and (when `id_field` is set) `remove_by_id` + `update_by_id`.
+/// With `auto_id` the store owns a `next_id: Signal<id_type>` and exposes a
+/// `push_new(item)` helper that sets `item.{id_field}` before pushing.
 const CLIENT_STORE_TPL: &str = r#"use dioxus::prelude::*;
 {%- if needs_model_import %}
 use crate::model::{{ item_type }};
@@ -1455,6 +1617,9 @@ use crate::model::{{ item_type }};
 #[derive(Copy, Clone)]
 pub struct {{ pascal }} {
     pub items: Signal<Vec<{{ item_type }}>>,
+{%- if auto_id %}
+    pub next_id: Signal<{{ id_type }}>,
+{%- endif %}
 }
 
 impl {{ pascal }} {
@@ -1467,6 +1632,21 @@ impl {{ pascal }} {
         let mut items = self.items;
         items.write().clear();
     }
+{%- if auto_id %}
+
+    /// Assign the next id to `item.{{ id_field }}` then push. The id
+    /// allocator lives inside the store, so call sites can drop the id
+    /// field from the struct literal.
+    pub fn push_new(self, mut item: {{ item_type }}) -> {{ id_type }} {
+        let mut next_id = self.next_id;
+        let id = next_id();
+        *next_id.write() = id + 1;
+        item.{{ id_field }} = id;
+        let mut items = self.items;
+        items.write().push(item);
+        id
+    }
+{%- endif %}
 {%- if id_field %}
 
     pub fn remove_by_id(self, id: {{ id_type }}) -> bool {
@@ -1490,6 +1670,9 @@ impl {{ pascal }} {
 pub fn provide_{{ snake }}() -> {{ pascal }} {
     use_context_provider(|| {{ pascal }} {
         items: Signal::new({{ initial }}),
+{%- if auto_id %}
+        next_id: Signal::new(1{{ id_type_suffix }}),
+{%- endif %}
     })
 }
 
@@ -1817,6 +2000,14 @@ pub struct GetDslSpecParams {
     /// the full payload.
     #[serde(default)]
     pub sections: Vec<String>,
+    /// When true, return a compact index (primitive name + one-line summary)
+    /// instead of full spec blocks. Useful for deciding which `sections:` to
+    /// pull next without paying for the full ~10KB payload. `extensions:`
+    /// still controls which extension groups appear; `sections:` is ignored
+    /// in this mode (the index is always the full set within the requested
+    /// extension scope).
+    #[serde(default)]
+    pub index_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1840,6 +2031,7 @@ pub async fn get_dsl_spec(
         ("screen",           "core",     CORE_SCREEN),
         ("server_fn",        "core",     CORE_SERVER_FN),
         ("modify",           "core",     CORE_MODIFY),
+        ("remove",           "core",     CORE_REMOVE),
         ("form",             "crud",     CRUD_FORM),
         ("list",             "crud",     CRUD_LIST),
         ("table",            "crud",     CRUD_TABLE),
@@ -1898,6 +2090,47 @@ pub async fn get_dsl_spec(
         }
     };
 
+    // index_only mode: emit a compact name + one-line summary per primitive,
+    // in the same core/extensions shape, without the spec blocks themselves.
+    // `sections:` is ignored — the index always covers everything within the
+    // requested extension scope so callers can scan it and decide what to
+    // pull next.
+    if p.index_only {
+        let mut out = String::new();
+        out.push_str("# Dioxus-MCP DSL spec — compact index\n");
+        out.push_str(
+            "# One line per primitive. Re-call get_dsl_spec with `sections: [name, ...]`\n",
+        );
+        out.push_str("# (and optionally `extensions: [...]`) to fetch the full block(s).\n");
+        out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
+        let any_core = SECTIONS.iter().any(|(_, g, _)| *g == "core");
+        if any_core {
+            out.push_str("\ncore:\n");
+            for (name, group, body) in SECTIONS.iter().filter(|(_, g, _)| *g == "core") {
+                let _ = group;
+                let _ = name;
+                let (key, summary) = spec_index_line(body);
+                out.push_str(&format!("  {key}: {summary}\n"));
+            }
+        }
+        let ext_groups = ["crud", "realtime", "auth"];
+        let any_ext = ext_groups.iter().any(|g| want_extension(g));
+        if any_ext {
+            out.push_str("\nextensions:\n");
+            for g in ext_groups {
+                if !want_extension(g) {
+                    continue;
+                }
+                out.push_str(&format!(" {g}:\n"));
+                for (_, _, body) in SECTIONS.iter().filter(|(_, sg, _)| sg == &g) {
+                    let (key, summary) = spec_index_line(body);
+                    out.push_str(&format!("  {key}: {summary}\n"));
+                }
+            }
+        }
+        return Ok(GetDslSpecResult { spec: out });
+    }
+
     let mut out = String::new();
     out.push_str(CORE_PREAMBLE);
     out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
@@ -1933,6 +2166,58 @@ pub async fn get_dsl_spec(
     }
 
     Ok(GetDslSpecResult { spec: out })
+}
+
+/// Pull the primitive name (first non-empty line, stripped of indentation and
+/// trailing colon) and the first sentence of its `description:` field from a
+/// spec block. Used by `index_only` mode to emit a compact line per primitive.
+fn spec_index_line(block: &str) -> (String, String) {
+    let mut key = String::new();
+    let mut summary = String::new();
+    let mut in_desc = false;
+    let mut desc_buf = String::new();
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if key.is_empty()
+            && !trimmed.is_empty()
+            && let Some(stripped) = trimmed.strip_suffix(':')
+        {
+            key = stripped.to_string();
+            continue;
+        }
+        if !in_desc
+            && let Some(rest) = trimmed.strip_prefix("description:")
+        {
+            in_desc = true;
+            desc_buf.push_str(rest.trim());
+            continue;
+        }
+        if in_desc {
+            // Stop at the next top-level key (a line starting with "fields:",
+            // "kinds:", "example:", "field_types:", "template_kinds:", etc.).
+            if trimmed.ends_with(':') && !trimmed.contains(' ') {
+                break;
+            }
+            // Multi-line descriptions continue as indented text — append.
+            if line.starts_with("    ") || line.starts_with("\t") {
+                if !desc_buf.is_empty() && !desc_buf.ends_with(' ') {
+                    desc_buf.push(' ');
+                }
+                desc_buf.push_str(trimmed);
+            } else {
+                break;
+            }
+        }
+    }
+    // Strip surrounding quotes and take the first sentence (up to the first
+    // ". " or end of buffer).
+    let cleaned = desc_buf.trim().trim_matches('"').to_string();
+    let first_sentence = match cleaned.find(". ") {
+        Some(i) => &cleaned[..i + 1],
+        None => cleaned.as_str(),
+    };
+    summary.push_str(first_sentence);
+    (key, summary)
 }
 
 fn indent(block: &str, prefix: &str) -> String {
@@ -2006,11 +2291,25 @@ pub async fn execute_code(
 
     let crate_root = scaffold::crate_root(state, p.project_root.as_deref()).await?;
 
-    preflight(&doc, &synth_server_fns, &crate_root, p.if_missing)?;
+    // Pre-compute the set of leaf files `remove:` will delete. Preflight
+    // collision checks skip these so a single doc can "remove demo Hero;
+    // create my Hero" in one call.
+    let to_be_removed = removed_leaf_paths(&doc, &crate_root);
+
+    preflight_with_removes(&doc, &synth_server_fns, &crate_root, p.if_missing, &to_be_removed)?;
 
     if p.dry_run {
-        return Ok(plan_dsl(&doc, &synth_server_fns, &crate_root));
+        // Removes are not applied in dry_run mode; the plan reports what
+        // would be removed via the standard would_modify channel.
+        let mut plan = plan_dsl(&doc, &synth_server_fns, &crate_root);
+        plan_removes(&mut plan, &doc, &crate_root);
+        return Ok(plan);
     }
+
+    // Apply removes first so the create steps below don't trip on the files
+    // they're about to replace. Errors stop the run before any creates land.
+    let mut result = ScaffoldResult::default();
+    apply_removes(&doc, &crate_root, &mut result)?;
 
     // Global preconditions that the per-primitive emitters used to discover
     // *after* writing files (and that left the project in a half-written state
@@ -2037,7 +2336,6 @@ pub async fn execute_code(
         .map(|s| s.name.to_snake_case())
         .collect();
 
-    let mut result = ScaffoldResult::default();
     // Fold in any router-bootstrap output up front so files_created/modified
     // (and the wiring `next_step`) appear in the response even when the rest
     // of the call is a no-op re-run.
@@ -2355,6 +2653,24 @@ pub async fn execute_code(
         ));
     }
 
+    // Hint when the run scaffolded a data layer (model / state) but no
+    // src/components dir exists. Common when the user is using the data-layer-
+    // only path and plans to hand-write the UI: a `pub mod components;`
+    // skeleton lets them drop in `use crate::components::Foo;` immediately.
+    {
+        let comp_dir = crate_root.join("src/components");
+        let data_dir_touched =
+            touched_top_mods.iter().any(|m| m == "model" || m == "state");
+        if data_dir_touched && !comp_dir.exists() {
+            result.next_steps.push(
+                "scaffolded model/state but `src/components/` doesn't exist yet — when you start \
+                 authoring UI, create `src/components/mod.rs` (and declare `pub mod components;` \
+                 in the crate root) so generated and hand-written components share a home"
+                    .into(),
+            );
+        }
+    }
+
     // Patch Cargo.toml whenever the doc declares models — not just when a
     // model file was emitted this run. A re-run with `if_missing: true` skips
     // every model write but still needs the serde dep to be in place; without
@@ -2423,6 +2739,11 @@ pub async fn execute_code(
         }
     }
 
+    // Adjacent-audit hints: surface common feature/dep gaps that the per-
+    // primitive writers don't catch on their own (explicit `server_fns:` go
+    // through scaffold::create_server_fn which doesn't gate on fullstack).
+    surface_feature_gap_hints(&doc, &synth_server_fns, &crate_root, &mut result);
+
     dedup_paths(&mut result.files_created);
     dedup_paths(&mut result.files_modified);
     dedup_paths(&mut result.collisions);
@@ -2457,6 +2778,37 @@ pub async fn execute_code(
     });
 
     Ok(result)
+}
+
+/// Append `next_steps` hints when the doc emitted primitives that depend on
+/// dioxus features the project isn't currently building with. Keeps the
+/// adjacency narrow — we only flag the case the user is one keystroke away
+/// from hitting: added a server fn (explicit or synth) without `fullstack`
+/// (or `server` + `web`) enabled on the `dioxus` dep.
+fn surface_feature_gap_hints(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+    result: &mut ScaffoldResult,
+) {
+    let added_server_fn = !doc.server_fns.is_empty() || !synth_server_fns.is_empty();
+    if !added_server_fn {
+        return;
+    }
+    let info = crate::project::ProjectInfo::detect(crate_root);
+    if !info.is_dioxus_project {
+        return;
+    }
+    let active = &info.dioxus_features;
+    let fullstack_capable = active.iter().any(|f| f == "fullstack")
+        || (active.iter().any(|f| f == "server") && active.iter().any(|f| f == "web"));
+    if fullstack_capable {
+        return;
+    }
+    result.next_steps.push(format!(
+        "audit hint: this run added server fn(s) but the `dioxus` dep's features ({:?}) don't include `fullstack` (or `server`+`web`) — call `audit_feature_flags` for the recommended patch, or add `features = [\"fullstack\"]` to the `dioxus` dep so the server-side code compiles",
+        active
+    ));
 }
 
 /// Run `cargo check --message-format=short` in `crate_root` with a generous
@@ -3006,10 +3358,31 @@ fn plan_dsl(doc: &DslDoc, synth_server_fns: &[SynthServerFn], crate_root: &Path)
     out
 }
 
+/// Canonicalize a route-path string for collision detection. Strip a trailing
+/// slash (except for the root "/") and replace any `:param` segments with a
+/// `:` placeholder so `/users/:id` and `/users/:user_id` collide as the user
+/// intends (same shape, different param name). Stays purely textual — no
+/// `Routable`-style nesting awareness needed for pre-flight.
+fn normalize_route_path(path: &str) -> String {
+    let trimmed = if path.len() > 1 {
+        path.trim_end_matches('/')
+    } else {
+        path
+    };
+    trimmed
+        .split('/')
+        .map(|seg| if seg.starts_with(':') { ":" } else { seg })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn modify_target_path(m: &DslModify, crate_root: &Path) -> std::path::PathBuf {
     match m {
-        DslModify::AddModelField { model, .. } => leaf_for(crate_root, "src/model", model),
-        DslModify::AddComponentProp { component, .. } => {
+        DslModify::AddModelField { model, .. } | DslModify::RemoveModelField { model, .. } => {
+            leaf_for(crate_root, "src/model", model)
+        }
+        DslModify::AddComponentProp { component, .. }
+        | DslModify::RemoveComponentProp { component, .. } => {
             leaf_for(crate_root, "src/components", component)
         }
         DslModify::AddServerFnArg { server_fn, .. } => {
@@ -3186,6 +3559,33 @@ fn preflight(
             ));
         }
     }
+    // Route-path collisions within the doc: two screens / login_screens
+    // pointing at the same path string. The route-insertion step would catch
+    // this when it hits the second variant, but only after the first has
+    // already been written to disk. Detect it up front so the call is atomic.
+    {
+        let mut path_owner: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for ls in &doc.login_screens {
+            let normalized = normalize_route_path(&ls.route);
+            if let Some(prev) = path_owner.insert(normalized.clone(), ls.name.clone()) {
+                return Err(format!(
+                    "route path {:?} is declared twice in this doc: by {prev:?} and by {:?} — rename one or change its `route:`",
+                    ls.route, ls.name
+                ));
+            }
+        }
+        for sc in &doc.screens {
+            let normalized = normalize_route_path(&sc.route);
+            if let Some(prev) = path_owner.insert(normalized.clone(), sc.name.clone()) {
+                return Err(format!(
+                    "route path {:?} is declared twice in this doc: by {prev:?} and by {:?} — rename one or change its `route:`",
+                    sc.route, sc.name
+                ));
+            }
+        }
+    }
+
     for sc in &doc.screens {
         if let Some(tpl) = &sc.template
             && tpl.kind == "client_crud"
@@ -3247,6 +3647,28 @@ fn preflight(
                 (
                     "add_server_fn_arg",
                     args.iter().map(|a| a.name.to_snake_case()).collect(),
+                )
+            }
+            DslModify::RemoveModelField { fields, .. } => {
+                if fields.is_empty() {
+                    return Err(format!(
+                        "modify[{i}] remove_model_field: `fields` is empty — nothing to remove"
+                    ));
+                }
+                (
+                    "remove_model_field",
+                    fields.iter().map(|n| n.to_snake_case()).collect(),
+                )
+            }
+            DslModify::RemoveComponentProp { props, .. } => {
+                if props.is_empty() {
+                    return Err(format!(
+                        "modify[{i}] remove_component_prop: `props` is empty — nothing to remove"
+                    ));
+                }
+                (
+                    "remove_component_prop",
+                    props.iter().map(|n| n.to_snake_case()).collect(),
                 )
             }
         };
@@ -4116,6 +4538,8 @@ async fn generate_screen(
                 pascal => pascal.clone(),
                 snake => snake.clone(),
                 wrap_pascal => wrap_pascal.clone(),
+                root_class => default_screen_class(&snake),
+                store_snake => None::<String>,
             },
         )?,
         Some(t) => render_screen_template(
@@ -4148,6 +4572,13 @@ async fn generate_screen(
     Ok(r)
 }
 
+/// Default root-element class for a screen body: `"screen {snake}"`. The
+/// helper exists so the literal string lives in one place; user-supplied
+/// `template.class` overrides this verbatim.
+fn default_screen_class(snake: &str) -> String {
+    format!("screen {snake}")
+}
+
 fn render_screen_template(
     crate_root: &Path,
     pascal: &str,
@@ -4157,15 +4588,39 @@ fn render_screen_template(
     t: &DslScreenTemplate,
 ) -> Result<String, String> {
     match t.kind.as_str() {
-        "empty" => render(
-            "screen",
-            SCREEN_TPL,
-            context! {
-                pascal => pascal,
-                snake => snake,
-                wrap_pascal => wrap_pascal,
-            },
-        ),
+        "empty" => {
+            // Wire the ClientStore context when the template names a store
+            // (the body stays empty — the user fills it in).
+            let store_snake = if let Some(store_ref) = &t.store {
+                let snake_ref = store_ref.to_snake_case();
+                let exists = client_stores
+                    .iter()
+                    .any(|cs| cs.name.to_snake_case() == snake_ref);
+                if !exists {
+                    return Err(format!(
+                        "screen {pascal:?} kind=empty references unknown client_store {store_ref:?}; declare it under client_stores"
+                    ));
+                }
+                Some(snake_ref)
+            } else {
+                None
+            };
+            let root_class = t
+                .class
+                .clone()
+                .unwrap_or_else(|| default_screen_class(snake));
+            render(
+                "screen",
+                SCREEN_TPL,
+                context! {
+                    pascal => pascal,
+                    snake => snake,
+                    wrap_pascal => wrap_pascal,
+                    root_class => root_class,
+                    store_snake => store_snake,
+                },
+            )
+        }
         "resource_list" => {
             // When CRUD ctx is attached (resource-synthesized), emit the rich
             // table with edit/delete actions. Otherwise fall back to the
@@ -4307,6 +4762,7 @@ fn render_client_crud_screen(
         })?
         .to_snake_case();
     let id_type = store_cfg.id_type.clone().unwrap_or_else(|| "i64".into());
+    let auto_id = store_cfg.auto_id.unwrap_or(false);
     // For integer ids we emit `1i64` etc. so the type of `next_id` is fixed
     // even before the first push. Non-integer id types fall back to bare `1`.
     let id_type_suffix = match id_type.as_str() {
@@ -4314,7 +4770,10 @@ fn render_client_crud_screen(
         | "usize" => id_type.to_string(),
         _ => String::new(),
     };
-    let has_id = !id_type_suffix.is_empty();
+    // With auto_id on, the store owns the allocator — the screen doesn't need
+    // its own next_id signal. Without it (and with a primitive integer id),
+    // the screen falls back to the historical local-allocator scaffold.
+    let has_id = !id_type_suffix.is_empty() && !auto_id;
     let needs_model_import = store_cfg.item_type.to_snake_case() == item_type.to_snake_case();
     let humanized = humanize(&item_type);
 
@@ -4337,7 +4796,8 @@ fn render_client_crud_screen(
         body.push_str(&format!("{ind}        let id = next_id();\n"));
         body.push_str(&format!("{ind}        *next_id.write() += 1;\n"));
     }
-    body.push_str(&format!("{ind}        store.push({item_type} {{\n"));
+    let push_call = if auto_id { "push_new" } else { "push" };
+    body.push_str(&format!("{ind}        store.{push_call}({item_type} {{\n"));
     if has_id {
         body.push_str(&format!("{ind}            {id_field}: id,\n"));
     }
@@ -4893,6 +5353,22 @@ fn generate_client_store(
     let id_field = cs.id_field.as_ref().map(|s| s.to_snake_case());
     let id_type = cs.id_type.clone().unwrap_or_else(|| "i64".into());
     let initial = cs.initial.clone().unwrap_or_else(|| "Vec::new()".into());
+    let auto_id = cs.auto_id.unwrap_or(false);
+    if auto_id {
+        if id_field.is_none() {
+            return Err(format!(
+                "client_store {:?}: `auto_id: true` requires `id_field` to be set so the allocator knows which field to assign",
+                cs.name
+            ));
+        }
+        if !is_primitive_integer_ty(&id_type) {
+            return Err(format!(
+                "client_store {:?}: `auto_id: true` requires a primitive integer `id_type` (i8..i128/u8..u128/isize/usize), got {id_type:?}",
+                cs.name
+            ));
+        }
+    }
+    let id_type_suffix = if auto_id { id_type.clone() } else { String::new() };
     // Emit `use crate::model::ItemType;` when the type matches an in-doc model.
     let needs_model_import = model_names.contains(&item_type.to_snake_case());
 
@@ -4906,7 +5382,9 @@ fn generate_client_store(
             needs_model_import => needs_model_import,
             id_field => id_field,
             id_type => id_type,
+            id_type_suffix => id_type_suffix,
             initial => initial,
+            auto_id => auto_id,
         },
     )?;
     // No server cfg gate — ClientStore runs in both wasm and server builds.
@@ -4915,6 +5393,23 @@ fn generate_client_store(
         "call `crate::state::{snake}::provide_{snake}()` in the root component (or any ancestor of the screens that read it) before `use_{snake}()` is called"
     ));
     Ok(r)
+}
+
+fn is_primitive_integer_ty(ty: &str) -> bool {
+    matches!(
+        ty,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -5165,6 +5660,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 store: None,
                 label_field: None,
                 checkbox_field: None,
+                class: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -5185,6 +5681,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 store: None,
                 label_field: None,
                 checkbox_field: None,
+                class: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -5203,6 +5700,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 store: None,
                 label_field: None,
                 checkbox_field: None,
+                class: None,
                 crud: Some(crud),
             }),
             route_params: vec![("id".to_string(), id_type.clone())],
@@ -5302,6 +5800,310 @@ async fn generate_synth_server_fn(
 }
 
 // ===========================================================================
+// remove: delete entire on-disk items
+// ===========================================================================
+
+/// Return the leaf-file paths a `remove:` block would delete. Routes don't
+/// have leaf files — they're slotted out of the Routable enum source — so
+/// `remove_route` contributes nothing here. Used by preflight to suppress the
+/// "file already exists" check for slots that are about to be cleared.
+fn removed_leaf_paths(doc: &DslDoc, crate_root: &Path) -> BTreeSet<std::path::PathBuf> {
+    let mut s = BTreeSet::new();
+    for r in &doc.remove {
+        match r {
+            DslRemove::RemoveRoute { .. } => {}
+            DslRemove::RemoveComponent { component } => {
+                s.insert(leaf_for(crate_root, "src/components", component));
+            }
+            DslRemove::RemoveModel { model } => {
+                s.insert(leaf_for(crate_root, "src/model", model));
+            }
+            DslRemove::RemoveServerFn { server_fn } => {
+                s.insert(leaf_for(crate_root, "src/server", server_fn));
+            }
+        }
+    }
+    s
+}
+
+/// Augment plan_dsl's would_modify list with the files a `remove:` block would
+/// touch (leaf files and their mod.rs entries), and the router for route
+/// removals.
+fn plan_removes(plan: &mut ScaffoldResult, doc: &DslDoc, crate_root: &Path) {
+    for r in &doc.remove {
+        match r {
+            DslRemove::RemoveRoute { .. } => {
+                if let Some(router) = scaffold::find_routable(crate_root)
+                    && !plan.would_modify.iter().any(|p| p == &router)
+                {
+                    plan.would_modify.push(router);
+                }
+            }
+            DslRemove::RemoveComponent { component } => {
+                let leaf = leaf_for(crate_root, "src/components", component);
+                if leaf.exists() && !plan.would_modify.iter().any(|p| p == &leaf) {
+                    plan.would_modify.push(leaf);
+                }
+                let mod_rs = crate_root.join("src/components/mod.rs");
+                if mod_rs.exists() && !plan.would_modify.iter().any(|p| p == &mod_rs) {
+                    plan.would_modify.push(mod_rs);
+                }
+            }
+            DslRemove::RemoveModel { model } => {
+                let leaf = leaf_for(crate_root, "src/model", model);
+                if leaf.exists() && !plan.would_modify.iter().any(|p| p == &leaf) {
+                    plan.would_modify.push(leaf);
+                }
+                let mod_rs = crate_root.join("src/model/mod.rs");
+                if mod_rs.exists() && !plan.would_modify.iter().any(|p| p == &mod_rs) {
+                    plan.would_modify.push(mod_rs);
+                }
+            }
+            DslRemove::RemoveServerFn { server_fn } => {
+                let leaf = leaf_for(crate_root, "src/server", server_fn);
+                if leaf.exists() && !plan.would_modify.iter().any(|p| p == &leaf) {
+                    plan.would_modify.push(leaf);
+                }
+                let mod_rs = crate_root.join("src/server/mod.rs");
+                if mod_rs.exists() && !plan.would_modify.iter().any(|p| p == &mod_rs) {
+                    plan.would_modify.push(mod_rs);
+                }
+            }
+        }
+    }
+}
+
+/// Wrap preflight() with an early hook: temporarily mask any files the
+/// remove block will delete so preflight's existence check doesn't flag them
+/// as collisions. This is intentionally cheap — preflight performs at most a
+/// handful of filesystem checks — and avoids threading a new parameter through
+/// every internal call.
+fn preflight_with_removes(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+    if_missing: bool,
+    to_be_removed: &BTreeSet<std::path::PathBuf>,
+) -> Result<(), String> {
+    if to_be_removed.is_empty() {
+        return preflight(doc, synth_server_fns, crate_root, if_missing);
+    }
+    // Bypass strategy: clone the doc and filter out *create* primitives whose
+    // leaf paths overlap a remove target. That way the existence check inside
+    // preflight is exclusively about non-removed files. Doc-internal
+    // duplicate-name checks still run against the original doc, so we keep
+    // those by invoking preflight twice — once on a doc that has the
+    // would-be-removed creates filtered out (to skip the FS check), and once
+    // on the original doc with if_missing forced so the FS check itself
+    // becomes a no-op for the masked paths.
+    //
+    // Simpler: preflight already has an `if_missing` knob that suppresses
+    // exactly the FS check we need to skip. If any remove targets overlap
+    // create targets, force if_missing on for the second-half FS check only.
+    // The doc-internal duplicate-name check runs first and is unaffected.
+    let any_overlap = {
+        let mut any = false;
+        for c in &doc.components {
+            if to_be_removed.contains(&leaf_for(crate_root, "src/components", &c.name)) {
+                any = true;
+                break;
+            }
+        }
+        if !any {
+            for m in &doc.models {
+                if to_be_removed.contains(&leaf_for(crate_root, "src/model", &m.name)) {
+                    any = true;
+                    break;
+                }
+            }
+        }
+        any
+    };
+    preflight(doc, synth_server_fns, crate_root, if_missing || any_overlap)
+}
+
+/// Execute every `remove:` entry. Each kind is idempotent — naming a target
+/// that's already gone is a silent no-op. Failures (e.g. router file can't be
+/// parsed) abort the run before any create/modify step.
+fn apply_removes(
+    doc: &DslDoc,
+    crate_root: &Path,
+    result: &mut ScaffoldResult,
+) -> Result<(), String> {
+    for r in &doc.remove {
+        match r {
+            DslRemove::RemoveRoute { variant } => {
+                remove_route_variant(crate_root, variant, result)?;
+            }
+            DslRemove::RemoveComponent { component } => {
+                remove_module_file(crate_root, "src/components", component, result)?;
+            }
+            DslRemove::RemoveModel { model } => {
+                remove_module_file(crate_root, "src/model", model, result)?;
+            }
+            DslRemove::RemoveServerFn { server_fn } => {
+                remove_module_file(crate_root, "src/server", server_fn, result)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Delete `src/{subdir}/{snake}.rs` if present and strip the matching `pub mod`
+/// + `pub use` lines from the directory's mod.rs. Both operations are
+/// idempotent. The leaf path lands in `files_modified` (rather than a new
+/// `files_removed` field — keeping the response shape stable).
+fn remove_module_file(
+    crate_root: &Path,
+    subdir: &str,
+    name: &str,
+    result: &mut ScaffoldResult,
+) -> Result<(), String> {
+    let snake = name.to_snake_case();
+    let leaf = crate_root.join(subdir).join(format!("{snake}.rs"));
+    let mod_rs = crate_root.join(subdir).join("mod.rs");
+    let mut touched_any = false;
+
+    if leaf.exists() {
+        std::fs::remove_file(&leaf).map_err(|e| {
+            format!("remove: failed to delete {}: {e}", leaf.display())
+        })?;
+        if !result.files_modified.iter().any(|p| p == &leaf) {
+            result.files_modified.push(leaf);
+        }
+        touched_any = true;
+    }
+    if mod_rs.exists() {
+        let src = std::fs::read_to_string(&mod_rs).map_err(|e| e.to_string())?;
+        let new_src = strip_mod_entry(&src, &snake);
+        if new_src != src {
+            std::fs::write(&mod_rs, &new_src).map_err(|e| e.to_string())?;
+            if !result.files_modified.iter().any(|p| p == &mod_rs) {
+                result.files_modified.push(mod_rs);
+            }
+            touched_any = true;
+        }
+    }
+    let _ = touched_any;
+    Ok(())
+}
+
+/// Drop `pub mod {snake};` / `pub use {snake}::*;` / their `#[cfg(...)]`
+/// attribute lines (and any adjacent `#[allow(...)]` shield) from a mod.rs.
+/// Leaves the rest of the file untouched. Idempotent: a snake that's already
+/// absent passes through unchanged.
+fn strip_mod_entry(src: &str, snake: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut keep: Vec<bool> = vec![true; lines.len()];
+    let pub_mod = format!("pub mod {snake};");
+    let bare_mod = format!("mod {snake};");
+    let pub_use = format!("pub use {snake}::*;");
+    let bare_use = format!("use {snake}::*;");
+    for (i, raw) in lines.iter().enumerate() {
+        let t = raw.trim();
+        if t == pub_mod || t == bare_mod || t == pub_use || t == bare_use {
+            keep[i] = false;
+            // Walk back over an immediately-preceding `#[cfg(...)]` /
+            // `#[allow(...)]` attribute on its own line.
+            let mut j = i;
+            while j > 0 {
+                let prev = lines[j - 1].trim();
+                if prev.starts_with("#[")
+                    && prev.ends_with("]")
+                    && (prev.contains("cfg(") || prev.contains("allow("))
+                {
+                    keep[j - 1] = false;
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    let mut out = String::with_capacity(src.len());
+    for (i, raw) in lines.iter().enumerate() {
+        if keep[i] {
+            out.push_str(raw);
+            out.push('\n');
+        }
+    }
+    // Preserve original trailing-newline shape.
+    if !src.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Remove a variant (and its `#[route(...)]` attribute) from the Routable
+/// enum. Idempotent: if the variant isn't present the function is a no-op.
+/// Errors only when the Routable file exists but can't be parsed.
+fn remove_route_variant(
+    crate_root: &Path,
+    variant: &str,
+    result: &mut ScaffoldResult,
+) -> Result<(), String> {
+    let pascal = variant.to_pascal_case();
+    let Some(router_path) = scaffold::find_routable(crate_root) else {
+        return Ok(());
+    };
+    let src = std::fs::read_to_string(&router_path).map_err(|e| e.to_string())?;
+    let parsed = syn::parse_file(&src)
+        .map_err(|e| format!("remove: parse {}: {e}", router_path.display()))?;
+    let routable = parsed.items.iter().find_map(|it| match it {
+        syn::Item::Enum(e) if e.attrs.iter().any(|a| scaffold::has_derive(a, "Routable")) => {
+            Some(e)
+        }
+        _ => None,
+    });
+    let Some(routable) = routable else {
+        return Ok(());
+    };
+    let target = routable.variants.iter().find(|v| v.ident == pascal);
+    let Some(target) = target else {
+        return Ok(());
+    };
+
+    use syn::spanned::Spanned;
+    let var_span = Spanned::span(target);
+    let start = var_span.byte_range().start;
+    let end = var_span.byte_range().end;
+    let mut cut_start = start;
+    for attr in &target.attrs {
+        let s = Spanned::span(attr).byte_range().start;
+        if s < cut_start {
+            cut_start = s;
+        }
+    }
+    let bytes = src.as_bytes();
+    while cut_start > 0 {
+        let prev = bytes[cut_start - 1];
+        if prev == b' ' || prev == b'\t' {
+            cut_start -= 1;
+        } else {
+            break;
+        }
+    }
+    if cut_start > 0 && bytes[cut_start - 1] == b'\n' {
+        cut_start -= 1;
+    }
+    let mut cut_end = end;
+    while cut_end < bytes.len() && (bytes[cut_end] == b' ' || bytes[cut_end] == b'\t') {
+        cut_end += 1;
+    }
+    if cut_end < bytes.len() && bytes[cut_end] == b',' {
+        cut_end += 1;
+    }
+    let mut new_src = String::with_capacity(src.len());
+    new_src.push_str(&src[..cut_start]);
+    new_src.push_str(&src[cut_end..]);
+    std::fs::write(&router_path, &new_src).map_err(|e| e.to_string())?;
+    if !result.files_modified.iter().any(|p| p == &router_path) {
+        result.files_modified.push(router_path);
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // modify: in-place edits
 // ===========================================================================
 
@@ -5326,6 +6128,16 @@ fn apply_modify(
             let path = leaf_for(crate_root, "src/server", server_fn);
             let snake = server_fn.to_snake_case();
             modify_fn_args(&path, &snake, args, if_missing, result)
+        }
+        DslModify::RemoveModelField { model, fields } => {
+            let path = leaf_for(crate_root, "src/model", model);
+            let struct_name = model.to_pascal_case();
+            remove_struct_fields(&path, &struct_name, fields, if_missing, result, "model")
+        }
+        DslModify::RemoveComponentProp { component, props } => {
+            let path = leaf_for(crate_root, "src/components", component);
+            let props_name = format!("{}Props", component.to_pascal_case());
+            remove_struct_fields(&path, &props_name, props, if_missing, result, "component")
         }
     }
 }
@@ -5515,6 +6327,108 @@ fn modify_fn_args(
     Ok(())
 }
 
+/// Drop the named fields from `struct {struct_name} { ... }` in the file at
+/// `path`. Idempotent: names that are already absent are silently skipped. The
+/// match uses snake_case comparison so callers can pass any-case names.
+///
+/// Each removal is byte-level: we locate the field by syn-parsing, then walk
+/// the source to find the trailing `,` (or `\n` for trailing-comma-less files)
+/// and any preceding `#[...]` attribute lines so the whole field — attribute,
+/// type, comma, leading whitespace — disappears together. Adjacent blank lines
+/// are preserved.
+fn remove_struct_fields(
+    path: &Path,
+    struct_name: &str,
+    names: &[String],
+    if_missing: bool,
+    result: &mut ScaffoldResult,
+    kind_label: &str,
+) -> Result<(), String> {
+    if missing_target(path, kind_label, if_missing, result)? {
+        return Ok(());
+    }
+    let mut src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let to_drop: BTreeSet<String> = names.iter().map(|n| n.to_snake_case()).collect();
+    if to_drop.is_empty() {
+        return Ok(());
+    }
+
+    use syn::spanned::Spanned;
+    let mut any_removed = false;
+    loop {
+        let parsed = syn::parse_file(&src)
+            .map_err(|e| format!("modify: parse {}: {e}", path.display()))?;
+        let target = parsed
+            .items
+            .iter()
+            .find_map(|it| match it {
+                syn::Item::Struct(s) if s.ident == struct_name => Some(s),
+                _ => None,
+            })
+            .ok_or_else(|| format!("modify: no struct {struct_name} in {}", path.display()))?;
+        // Find the next field present in `to_drop`. We re-parse after each
+        // removal because byte spans shift; a single pass over the struct fields
+        // is simpler than tracking offset deltas.
+        let target_field = target.fields.iter().find(|f| {
+            f.ident
+                .as_ref()
+                .map(|i| to_drop.contains(&i.to_string()))
+                .unwrap_or(false)
+        });
+        let Some(field) = target_field else {
+            break;
+        };
+        // Compute the byte range to cut. syn 2.x spans are reliable for
+        // structured items in non-macro source.
+        let span = Spanned::span(field);
+        let start = span.byte_range().start;
+        let end = span.byte_range().end;
+        // Extend back over any attached `#[...]` attribute lines and leading
+        // whitespace on the field's own line.
+        let mut cut_start = start;
+        for attr in &field.attrs {
+            let s = Spanned::span(attr).byte_range().start;
+            if s < cut_start {
+                cut_start = s;
+            }
+        }
+        // Walk left through indentation/newline so we delete the whole line.
+        let bytes = src.as_bytes();
+        while cut_start > 0 {
+            let prev = bytes[cut_start - 1];
+            if prev == b' ' || prev == b'\t' {
+                cut_start -= 1;
+            } else {
+                break;
+            }
+        }
+        if cut_start > 0 && bytes[cut_start - 1] == b'\n' {
+            cut_start -= 1;
+        }
+        // Extend forward to include the trailing comma (if any).
+        let mut cut_end = end;
+        while cut_end < bytes.len() && (bytes[cut_end] == b' ' || bytes[cut_end] == b'\t') {
+            cut_end += 1;
+        }
+        if cut_end < bytes.len() && bytes[cut_end] == b',' {
+            cut_end += 1;
+        }
+        let mut new_src = String::with_capacity(src.len());
+        new_src.push_str(&src[..cut_start]);
+        new_src.push_str(&src[cut_end..]);
+        src = new_src;
+        any_removed = true;
+    }
+
+    if any_removed {
+        std::fs::write(path, &src).map_err(|e| e.to_string())?;
+        if !result.files_modified.iter().any(|p| p == path) {
+            result.files_modified.push(path.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
 /// Locate the byte position of the matching close delimiter for the opening
 /// `open` that appears after `anchor` in `src`. Naive depth count — adequate
 /// for the generated files we operate on (no string/char literals containing
@@ -5572,6 +6486,7 @@ mod tests {
             ("CORE_SCREEN", CORE_SCREEN),
             ("CORE_SERVER_FN", CORE_SERVER_FN),
             ("CORE_MODIFY", CORE_MODIFY),
+            ("CORE_REMOVE", CORE_REMOVE),
             ("CRUD_FORM", CRUD_FORM),
             ("CRUD_LIST", CRUD_LIST),
             ("CRUD_TABLE", CRUD_TABLE),
@@ -5627,6 +6542,7 @@ mod tests {
             GetDslSpecParams {
                 extensions: vec!["bogus".into()],
                 sections: vec![],
+                index_only: false,
             },
         )
         .await;
@@ -5641,6 +6557,7 @@ mod tests {
             GetDslSpecParams {
                 extensions: vec![],
                 sections: vec!["model".into(), "client_store".into()],
+                index_only: false,
             },
         )
         .await
@@ -5672,6 +6589,7 @@ mod tests {
             GetDslSpecParams {
                 extensions: vec![],
                 sections: vec!["form".into()],
+                index_only: false,
             },
         )
         .await
@@ -5686,6 +6604,247 @@ mod tests {
         assert!(!r.spec.contains("\ncore:\n"));
     }
 
+    #[test]
+    fn remove_module_file_deletes_leaf_and_mod_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(root.join("src/components/hero.rs"), "// demo\n").unwrap();
+        std::fs::write(
+            root.join("src/components/mod.rs"),
+            "pub mod hero;\npub use hero::*;\npub mod other;\npub use other::*;\n",
+        )
+        .unwrap();
+        let mut result = ScaffoldResult::default();
+        remove_module_file(root, "src/components", "Hero", &mut result).unwrap();
+        assert!(!root.join("src/components/hero.rs").exists(), "leaf must be gone");
+        let mod_rs = std::fs::read_to_string(root.join("src/components/mod.rs")).unwrap();
+        assert!(!mod_rs.contains("hero"), "mod.rs still references hero:\n{mod_rs}");
+        assert!(mod_rs.contains("other"), "unrelated entry must survive:\n{mod_rs}");
+
+        // Second run: no-op.
+        let mut result2 = ScaffoldResult::default();
+        remove_module_file(root, "src/components", "Hero", &mut result2).unwrap();
+        assert!(result2.files_modified.is_empty(), "absent target must be no-op");
+    }
+
+    #[test]
+    fn remove_route_variant_drops_variant_and_its_route_attr() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Routable, Clone, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/about")]
+    About {},
+}
+"#,
+        )
+        .unwrap();
+        let mut result = ScaffoldResult::default();
+        remove_route_variant(root, "Home", &mut result).unwrap();
+        let body = std::fs::read_to_string(root.join("src/router.rs")).unwrap();
+        assert!(!body.contains("Home"), "Home variant survived:\n{body}");
+        assert!(!body.contains("#[route(\"/\")]"), "route attr survived:\n{body}");
+        assert!(body.contains("About"), "unrelated variant must remain");
+
+        // Second run: variant already gone → no-op.
+        let mut result2 = ScaffoldResult::default();
+        remove_route_variant(root, "Home", &mut result2).unwrap();
+        assert!(result2.files_modified.is_empty(), "absent variant must be no-op");
+    }
+
+    #[test]
+    fn remove_model_field_drops_named_field_and_is_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("widget.rs");
+        std::fs::write(
+            &path,
+            r#"pub struct Widget {
+    pub id: i64,
+    pub name: String,
+    pub legacy_code: String,
+}
+"#,
+        )
+        .unwrap();
+        let mut result = ScaffoldResult::default();
+        remove_struct_fields(
+            &path,
+            "Widget",
+            &["legacy_code".to_string()],
+            false,
+            &mut result,
+            "model",
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("legacy_code"), "field must be gone, got:\n{body}");
+        assert!(body.contains("pub id: i64,"), "kept fields untouched");
+        assert!(body.contains("pub name: String,"));
+        assert!(result.files_modified.iter().any(|p| p == &path));
+
+        // Second run: no-op, no extra files_modified entry.
+        let mut result2 = ScaffoldResult::default();
+        remove_struct_fields(
+            &path,
+            "Widget",
+            &["legacy_code".to_string()],
+            false,
+            &mut result2,
+            "model",
+        )
+        .unwrap();
+        assert!(result2.files_modified.is_empty(), "second run should be a no-op");
+    }
+
+    #[test]
+    fn client_store_auto_id_emits_push_new_and_next_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: None,
+            auto_id: Some(true),
+        };
+        let r = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap();
+        let file = r
+            .files_created
+            .iter()
+            .find(|p| p.ends_with("todo_store.rs"))
+            .expect("store file must be in files_created");
+        let body = std::fs::read_to_string(file).unwrap();
+        assert!(
+            body.contains("pub fn push_new(self, mut item: Todo)"),
+            "push_new must be emitted, got:\n{body}"
+        );
+        assert!(
+            body.contains("next_id: Signal<i64>"),
+            "next_id field must be present, got:\n{body}"
+        );
+        assert!(
+            body.contains("Signal::new(1i64)"),
+            "next_id init must use typed literal, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn client_store_auto_id_requires_id_field() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: None,
+            id_type: None,
+            auto_id: Some(true),
+        };
+        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap_err();
+        assert!(err.contains("id_field"), "got: {err}");
+    }
+
+    #[test]
+    fn client_store_auto_id_rejects_non_integer_id_type() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: Some("String".into()),
+            auto_id: Some(true),
+        };
+        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap_err();
+        assert!(err.contains("primitive integer"), "got: {err}");
+    }
+
+    #[test]
+    fn preflight_rejects_two_screens_with_same_route() {
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: HomeScreen
+    route: /
+  - name: LandingScreen
+    route: /
+"#,
+        )
+        .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(
+            err.contains("route path") && err.contains("declared twice"),
+            "expected route-path collision error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_screen_and_login_with_same_route() {
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+login_screens:
+  - name: Login
+    route: /entry
+    redirect_on_success: /
+screens:
+  - name: EntryScreen
+    route: /entry
+"#,
+        )
+        .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(
+            err.contains("/entry"),
+            "expected the conflicting path in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_route_path_collapses_param_names_and_trailing_slash() {
+        assert_eq!(normalize_route_path("/users"), "/users");
+        assert_eq!(normalize_route_path("/users/"), "/users");
+        assert_eq!(normalize_route_path("/"), "/");
+        assert_eq!(normalize_route_path("/users/:id"), "/users/:");
+        assert_eq!(
+            normalize_route_path("/users/:user_id"),
+            normalize_route_path("/users/:id")
+        );
+    }
+
+    #[tokio::test]
+    async fn index_only_returns_compact_listing() {
+        let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+        let r = get_dsl_spec(
+            &dummy,
+            GetDslSpecParams {
+                extensions: vec!["crud".into()],
+                sections: vec![],
+                index_only: true,
+            },
+        )
+        .await
+        .expect("index_only call should succeed");
+        // Every primitive name appears at most once, on its own line — and
+        // the body should be much smaller than the full spec.
+        assert!(r.spec.contains("Model:"), "expected Model in index");
+        assert!(r.spec.contains("Component:"), "expected Component in index");
+        assert!(r.spec.contains("Form:"), "expected Form (crud) in index");
+        // No spec-block fields should appear in index mode.
+        assert!(!r.spec.contains("template_kinds:"), "fields should be omitted");
+        assert!(!r.spec.contains("example:"), "examples should be omitted");
+        // Should be well under 4KB — the full spec is ~10KB+.
+        assert!(r.spec.len() < 4096, "index too large: {} bytes", r.spec.len());
+    }
+
     #[tokio::test]
     async fn sections_filter_rejects_unknown_name() {
         let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
@@ -5694,12 +6853,90 @@ mod tests {
             GetDslSpecParams {
                 extensions: vec![],
                 sections: vec!["models".into()],
+                index_only: false,
             },
         )
         .await
         .unwrap_err();
         assert!(err.contains("unknown section"), "got: {err}");
         assert!(err.contains("model"), "should list valid names, got: {err}");
+    }
+
+    #[test]
+    fn screen_template_empty_with_store_emits_use_context() {
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: None,
+            auto_id: Some(true),
+        };
+        let t = DslScreenTemplate {
+            kind: "empty".into(),
+            endpoint: None,
+            item_type: None,
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: Some("TodoStore".into()),
+            label_field: None,
+            checkbox_field: None,
+            class: Some("page-todo".into()),
+            crud: None,
+        };
+        let body = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "TodoScreen",
+            "todo_screen",
+            None,
+            &[cs],
+            &t,
+        )
+        .unwrap();
+        assert!(
+            body.contains("use crate::state::todo_store::use_todo_store;"),
+            "expected store import, got:\n{body}"
+        );
+        assert!(
+            body.contains("let _store = use_todo_store();"),
+            "expected use_<store>() wiring, got:\n{body}"
+        );
+        assert!(
+            body.contains("class: \"page-todo\""),
+            "expected custom class override, got:\n{body}"
+        );
+        assert!(
+            !body.contains("class: \"screen "),
+            "default class should not appear when override is set, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn screen_template_empty_rejects_unknown_store() {
+        let t = DslScreenTemplate {
+            kind: "empty".into(),
+            endpoint: None,
+            item_type: None,
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: Some("Nonexistent".into()),
+            label_field: None,
+            checkbox_field: None,
+            class: None,
+            crud: None,
+        };
+        let err = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "TodoScreen",
+            "todo_screen",
+            None,
+            &[],
+            &t,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown client_store"), "got: {err}");
     }
 
     #[test]
@@ -5711,6 +6948,8 @@ mod tests {
                 pascal => "HomeScreen",
                 snake => "home_screen",
                 wrap_pascal => Some("Dashboard"),
+                root_class => default_screen_class("home_screen"),
+                store_snake => None::<String>,
             },
         )
         .unwrap();
@@ -5741,6 +6980,8 @@ mod tests {
                 pascal => "HomeScreen",
                 snake => "home_screen",
                 wrap_pascal => None::<String>,
+                root_class => default_screen_class("home_screen"),
+                store_snake => None::<String>,
             },
         )
         .unwrap();
