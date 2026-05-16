@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "dioxus-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cargo_toml",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "dioxus-mcp-probe"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
