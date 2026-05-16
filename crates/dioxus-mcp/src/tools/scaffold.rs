@@ -226,7 +226,7 @@ pub async fn create_component(
 
     // ensure mod.rs exports it
     let mod_rs = components_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None, false)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -676,7 +676,7 @@ pub async fn create_server_fn(
 
     // ensure src/server/mod.rs declares it
     let mod_rs = server_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None, true)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -711,11 +711,12 @@ pub(crate) enum ModUpsert {
 /// `pub mod` / `pub use` entries sorted by name. Any non-entry lines (comments,
 /// hand-written re-exports, etc.) are preserved verbatim at the top of the file.
 ///
-/// A file we create from scratch carries `#![allow(unused_imports)]` at the
-/// top: the blanket `pub use foo::*;` re-export pattern routinely flags as
-/// `unused_imports` when one of the synthesized items (e.g. a delete_* server
-/// fn) isn't called by anything yet, so suppressing the warning at the
-/// re-export site keeps `cargo check` clean during iteration.
+/// When `allow_unused` is true, the file (whether newly created or being
+/// rewritten) carries an `#![allow(unused_imports)]` shield: the blanket
+/// `pub use foo::*;` re-export pattern routinely flags as `unused_imports`
+/// when one of the synthesized items (e.g. a delete_* server fn) isn't called
+/// by anything yet. Set to false for `src/components/mod.rs` where every
+/// re-export is a real component the user will reference by name.
 ///
 /// When `cfg_attr` is `Some(attr)`, each emitted `pub mod` / `pub use` line is
 /// prefixed with that attribute on its own line — used for `src/state/mod.rs`
@@ -725,9 +726,13 @@ pub(crate) fn upsert_mod_entry(
     mod_rs: &Path,
     name: &str,
     cfg_attr: Option<&str>,
+    allow_unused: bool,
 ) -> Result<ModUpsert, String> {
     if !mod_rs.exists() {
-        let mut body = String::from("#![allow(unused_imports)]\n");
+        let mut body = String::new();
+        if allow_unused {
+            body.push_str("#![allow(unused_imports)]\n");
+        }
         for line in [format!("pub mod {name};"), format!("pub use {name}::*;")] {
             if let Some(cfg) = cfg_attr {
                 body.push_str(cfg);
@@ -783,8 +788,12 @@ pub(crate) fn upsert_mod_entry(
         .or_insert_with(|| vec![format!("pub mod {name};"), format!("pub use {name}::*;")]);
 
     let mut rebuilt = String::new();
-    // Re-attach the inner attribute if the existing file had one.
-    if had_allow_unused {
+    // The caller's `allow_unused` is authoritative: pass true to add the
+    // attribute (or keep it if already there), pass false to drop it. This
+    // lets callers (e.g. components/mod.rs) clean up the attribute from
+    // previously-generated files on the next scaffold write.
+    let _ = had_allow_unused;
+    if allow_unused {
         rebuilt.push_str("#![allow(unused_imports)]\n");
     }
     for h in &header {
@@ -927,16 +936,51 @@ mod mod_upsert_tests {
     fn creates_when_missing() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("mod.rs");
-        let r = upsert_mod_entry(&p, "foo", None).unwrap();
+        let r = upsert_mod_entry(&p, "foo", None, true).unwrap();
         assert_eq!(r, ModUpsert::Created);
         let body = std::fs::read_to_string(&p).unwrap();
-        // Freshly-created mod.rs files carry an `#![allow(unused_imports)]`
-        // shield so that wildcard re-exports of as-yet-uncalled items
-        // (e.g. delete_* server fns generated alongside their list/get
-        // siblings) don't trip `cargo check` warnings while iterating.
+        // With `allow_unused: true`, freshly-created mod.rs files carry an
+        // `#![allow(unused_imports)]` shield so that wildcard re-exports of
+        // as-yet-uncalled items (e.g. delete_* server fns generated alongside
+        // their list/get siblings) don't trip `cargo check` warnings while
+        // iterating.
         assert_eq!(
             body,
             "#![allow(unused_imports)]\npub mod foo;\npub use foo::*;\n"
+        );
+    }
+
+    #[test]
+    fn creates_without_allow_unused() {
+        // `src/components/mod.rs` passes `allow_unused: false` because every
+        // re-exported item is a real component the user will reference by
+        // name — no wildcard footgun to shield against.
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        let r = upsert_mod_entry(&p, "foo", None, false).unwrap();
+        assert_eq!(r, ModUpsert::Created);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(body, "pub mod foo;\npub use foo::*;\n");
+    }
+
+    #[test]
+    fn strips_existing_allow_unused_when_disabled() {
+        // If a previously-generated mod.rs carries the attribute but the
+        // current caller passes `allow_unused: false`, we clean it up — the
+        // caller's directive is authoritative.
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        std::fs::write(
+            &p,
+            "#![allow(unused_imports)]\npub mod alpha;\npub use alpha::*;\n",
+        )
+        .unwrap();
+        let r = upsert_mod_entry(&p, "beta", None, false).unwrap();
+        assert_eq!(r, ModUpsert::Modified);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            body,
+            "pub mod alpha;\npub use alpha::*;\npub mod beta;\npub use beta::*;\n"
         );
     }
 
@@ -949,7 +993,7 @@ mod mod_upsert_tests {
             "pub mod alpha;\npub use alpha::*;\npub mod zeta;\npub use zeta::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(&p, "mid", None).unwrap();
+        let r = upsert_mod_entry(&p, "mid", None, false).unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(
@@ -967,7 +1011,7 @@ mod mod_upsert_tests {
             "pub mod zeta;\npub use zeta::*;\npub mod alpha;\npub use alpha::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(&p, "alpha", None).unwrap();
+        let r = upsert_mod_entry(&p, "alpha", None, false).unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(
@@ -982,7 +1026,7 @@ mod mod_upsert_tests {
         let p = dir.path().join("mod.rs");
         let initial = "pub mod alpha;\npub use alpha::*;\npub mod beta;\npub use beta::*;\n";
         std::fs::write(&p, initial).unwrap();
-        let r = upsert_mod_entry(&p, "alpha", None).unwrap();
+        let r = upsert_mod_entry(&p, "alpha", None, false).unwrap();
         assert_eq!(r, ModUpsert::Unchanged);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(body, initial);
@@ -997,7 +1041,7 @@ mod mod_upsert_tests {
             "// hand-written header\n//! crate doc\npub mod zeta;\npub use zeta::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(&p, "alpha", None).unwrap();
+        let r = upsert_mod_entry(&p, "alpha", None, false).unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(
@@ -1010,8 +1054,13 @@ mod mod_upsert_tests {
     fn cfg_attr_emitted_for_fresh_file() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("mod.rs");
-        let r =
-            upsert_mod_entry(&p, "product_store", Some("#[cfg(feature = \"server\")]")).unwrap();
+        let r = upsert_mod_entry(
+            &p,
+            "product_store",
+            Some("#[cfg(feature = \"server\")]"),
+            true,
+        )
+        .unwrap();
         assert_eq!(r, ModUpsert::Created);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(
@@ -1033,7 +1082,13 @@ mod mod_upsert_tests {
              #[cfg(feature = \"server\")]\npub use alpha::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(&p, "beta", Some("#[cfg(feature = \"server\")]")).unwrap();
+        let r = upsert_mod_entry(
+            &p,
+            "beta",
+            Some("#[cfg(feature = \"server\")]"),
+            true,
+        )
+        .unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(

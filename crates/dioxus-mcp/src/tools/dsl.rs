@@ -489,6 +489,20 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   version: "1"
 #   <primitive_section>: [ ... ]   # see core/extensions below
 #
+# Picking the right tool for CRUD-like UIs:
+#   - Client-only / in-memory apps (todo lists, drafts, ephemeral selections):
+#     use a `client_stores:` entry + a `screens:` entry with
+#     `template.kind: client_crud`. No server fns are generated and no
+#     `server` feature is required. This is almost always what you want for
+#     web-only / wasm-target projects without a backend.
+#   - Backend-backed CRUD (a real database, REST endpoint, etc.): use a
+#     `resources:` entry — it expands to a model + server-feature-gated store
+#     + 5 server fns + 2 screens — or hand-author a Model + Store + server
+#     fns + a `screens:` entry with `template.kind: resource_list` /
+#     `resource_form`. The `crud` extension exposes Form/List/Table component
+#     templates that pair with those server fns; do NOT load the `crud`
+#     extension for a client-only app — `client_crud` already covers it.
+#
 # All field names are case-sensitive. Unknown fields are rejected.
 #
 # File layout (the blast radius of one execute_code call):
@@ -1906,6 +1920,12 @@ pub async fn execute_code(
     }
 
     let synth_server_fns = expand_resources(&mut doc)?;
+    // The `client_crud` Screen template emits `..Default::default()` in its
+    // "add" form constructor. If the referenced model is declared in this
+    // same doc but the user forgot to derive `Default` on it, the generated
+    // body fails to compile (E0277). Quietly promote `Default` onto those
+    // models so the doc-level wiring is self-consistent.
+    ensure_default_on_client_crud_models(&mut doc);
 
     let crate_root = scaffold::crate_root(state, p.project_root.as_deref()).await?;
 
@@ -1920,6 +1940,7 @@ pub async fn execute_code(
     // on failure). Run these first so the call is atomic — either everything
     // applies or nothing does.
     let bootstrap = bootstrap_router_if_needed(&doc, &crate_root)?;
+    let app_wiring = wire_app_if_needed(&doc, &crate_root)?;
 
     let skip: BTreeSet<std::path::PathBuf> = if p.if_missing {
         skip_set(&doc, &synth_server_fns, &crate_root)
@@ -1947,6 +1968,10 @@ pub async fn execute_code(
     if let Some(s) = bootstrap.next_step {
         result.next_steps.push(s);
     }
+    // App-wiring output: any main.rs/lib.rs edits land in files_modified, and
+    // hints for cases we couldn't auto-wire land in next_steps.
+    result.files_modified.extend(app_wiring.modified);
+    result.next_steps.extend(app_wiring.next_steps);
 
     // Order matters: models first (so server fn return types and stores can
     // resolve them), then server fns (fail-fast on fullstack gating), then
@@ -2281,6 +2306,42 @@ pub async fn execute_code(
         }
     }
 
+    // Patch Cargo.toml's `dioxus` features to include `router` whenever the
+    // doc declares any routable primitive (Screen / LoginScreen). Parity with
+    // the serde patch above: we run on the declared doc, not just the
+    // files-actually-emitted set, so a partial-run / re-run still converges.
+    if !doc.screens.is_empty() || !doc.login_screens.is_empty() {
+        match ensure_dioxus_router_in_cargo_toml(&crate_root) {
+            Ok(DioxusRouterPatch::AlreadyOk) => {}
+            Ok(DioxusRouterPatch::Patched(path)) => {
+                result.files_modified.push(path);
+                result
+                    .next_steps
+                    .push("patched Cargo.toml to enable the `router` feature on the `dioxus` dep (required by the generated screen(s))".into());
+            }
+            Ok(DioxusRouterPatch::DioxusNotATable) => {
+                result.next_steps.push(
+                    "your Cargo.toml's `dioxus` dep is a bare version string — switch it to a table and add `features = [\"router\"]` so the generated screen(s) compile".into(),
+                );
+            }
+            Ok(DioxusRouterPatch::DioxusMissing) => {
+                result.next_steps.push(
+                    "your Cargo.toml has no `dioxus` dep — add one with `features = [\"router\"]` (or `\"fullstack\"`) so the generated screen(s) compile".into(),
+                );
+            }
+            Ok(DioxusRouterPatch::NoCargoToml) => {
+                result.next_steps.push(
+                    "no Cargo.toml found at the crate root — ensure `dioxus` is declared with the `router` feature somewhere upstream for the generated screen(s)".into(),
+                );
+            }
+            Err(e) => {
+                result.next_steps.push(format!(
+                    "could not auto-patch Cargo.toml for dioxus/router: {e} — add `router` to the `dioxus` dep's features array manually"
+                ));
+            }
+        }
+    }
+
     dedup_paths(&mut result.files_created);
     dedup_paths(&mut result.files_modified);
     dedup_paths(&mut result.collisions);
@@ -2391,6 +2452,130 @@ fn ensure_serde_in_cargo_toml(crate_root: &Path) -> Result<SerdePatch, String> {
             Ok(SerdePatch::Patched(path))
         }
     }
+}
+
+enum DioxusRouterPatch {
+    /// `dioxus` already has either `router` or `fullstack` in its features
+    /// array — fullstack pulls router in transitively in Dioxus 0.7.
+    AlreadyOk,
+    Patched(std::path::PathBuf),
+    /// `dioxus` is declared as a bare version string (e.g. `dioxus = "0.7"`),
+    /// so we have nowhere to insert a features array without rewriting the
+    /// user's line. Hint instead.
+    DioxusNotATable,
+    DioxusMissing,
+    NoCargoToml,
+}
+
+/// Add `"router"` to the `dioxus` dep's `features` array when any Screen /
+/// LoginScreen has been declared in the doc. Parity with
+/// [`ensure_serde_in_cargo_toml`] — same shape, same idempotency contract.
+///
+/// We only edit the line in place when `dioxus` is already a table with a
+/// `features = [...]` array; a bare-version `dioxus = "0.7"` is left alone
+/// (the caller surfaces a hint).
+fn ensure_dioxus_router_in_cargo_toml(crate_root: &Path) -> Result<DioxusRouterPatch, String> {
+    let path = crate_root.join("Cargo.toml");
+    if !path.exists() {
+        return Ok(DioxusRouterPatch::NoCargoToml);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let parsed: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+
+    let dx = parsed
+        .get("dependencies")
+        .and_then(|d| d.as_table())
+        .and_then(|t| t.get("dioxus"));
+    let Some(dx) = dx else {
+        return Ok(DioxusRouterPatch::DioxusMissing);
+    };
+    let Some(dx_table) = dx.as_table() else {
+        return Ok(DioxusRouterPatch::DioxusNotATable);
+    };
+    let features = dx_table
+        .get("features")
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if features
+        .iter()
+        .any(|f| f == "router" || f == "fullstack")
+    {
+        return Ok(DioxusRouterPatch::AlreadyOk);
+    }
+
+    let new_text = inject_router_feature(&text)?;
+    if new_text == text {
+        // Nothing matched — line we expected to patch wasn't in the format
+        // we know how to rewrite. Treat as "not a table" so caller hints.
+        return Ok(DioxusRouterPatch::DioxusNotATable);
+    }
+    std::fs::write(&path, new_text).map_err(|e| e.to_string())?;
+    Ok(DioxusRouterPatch::Patched(path))
+}
+
+/// Find the `dioxus = { ... features = [...] ... }` line in raw Cargo.toml
+/// text and append `"router"` to that inline features array. Operating on
+/// the textual representation (rather than re-serializing the parsed `toml`)
+/// preserves the user's comments, key order, and quoting style.
+fn inject_router_feature(text: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut patched = false;
+    let mut in_deps = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_deps = trimmed == "[dependencies]";
+        }
+        if !patched
+            && in_deps
+            && let Some(rest) = trimmed.strip_prefix("dioxus")
+            && rest.trim_start().starts_with('=')
+        {
+            // Look for an inline `features = [ ... ]` on this line and append
+            // `"router"` to it. If features isn't on this line, leave it
+            // alone — the table is presumably split across multiple lines or
+            // uses a sub-table, and a textual patch isn't safe.
+            if let Some(feat_start) = line.find("features") {
+                let after = &line[feat_start..];
+                if let Some(open) = after.find('[')
+                    && let Some(close_rel) = after[open..].find(']')
+                {
+                    let close = feat_start + open + close_rel;
+                    let inner_start = feat_start + open + 1;
+                    let inner = &line[inner_start..close];
+                    let inner_trim = inner.trim();
+                    let new_inner = if inner_trim.is_empty() {
+                        "\"router\"".to_string()
+                    } else {
+                        format!("{}, \"router\"", inner.trim_end())
+                    };
+                    let mut new_line = String::new();
+                    new_line.push_str(&line[..inner_start]);
+                    new_line.push_str(&new_inner);
+                    new_line.push_str(&line[close..]);
+                    out.push_str(&new_line);
+                    out.push('\n');
+                    patched = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    // Preserve original trailing-newline state.
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    if !patched {
+        return Ok(text.to_string());
+    }
+    Ok(out)
 }
 
 /// Append a new dep line into an existing `[dependencies]` table (or create
@@ -3013,7 +3198,13 @@ fn bootstrap_router_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<Bootstr
     if entries.is_empty() {
         return Ok(BootstrapRouter::default());
     }
-    let mut body = String::from("use dioxus::prelude::*;\n\n");
+    let mut body = String::from("use dioxus::prelude::*;\n");
+    // Routable's derive expands each variant to `ComponentName(props)` — the
+    // identifier must be in scope at the enum's site. Wildcard-importing the
+    // components module covers every screen we emit (Screen / LoginScreen /
+    // crud-generated *NewScreen etc.) without needing to enumerate names
+    // here, and matches the mod.rs wildcard re-export pattern.
+    body.push_str("use crate::components::*;\n\n");
     body.push_str("#[derive(Routable, Clone, PartialEq)]\n");
     body.push_str("pub enum Route {\n");
     for SeedRoute {
@@ -3069,6 +3260,222 @@ struct BootstrapRouter {
     next_step: Option<String>,
 }
 
+#[derive(Default)]
+struct WireApp {
+    modified: Vec<std::path::PathBuf>,
+    next_steps: Vec<String>,
+}
+
+/// Inject `Router::<crate::router::Route> {}` and any
+/// `crate::state::{store_snake}::provide_{store_snake}()` calls into the
+/// project's `App` component (in src/main.rs or src/lib.rs) the first time
+/// a scaffold run emits a Screen / LoginScreen or a ClientStore. Idempotent
+/// against re-runs: if a Router invocation or the specific provide_* call
+/// is already textually present anywhere in the file, we skip it.
+///
+/// We rely on the `dx new` shape:
+///     #[component]
+///     fn App() -> Element {
+///         rsx! { ... }
+///     }
+/// — found by scanning for `fn App(` and brace-balancing the body. If the
+/// file doesn't match (no App fn, or rsx! macro not where expected) we fall
+/// back to surfacing a next_steps hint so the user wires it manually.
+fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String> {
+    let needs_router = !doc.screens.is_empty() || !doc.login_screens.is_empty();
+    let store_snakes: Vec<String> = doc
+        .client_stores
+        .iter()
+        .map(|cs| cs.name.to_snake_case())
+        .collect();
+    if !needs_router && store_snakes.is_empty() {
+        return Ok(WireApp::default());
+    }
+
+    let Some(path) = scaffold::find_crate_root_file(crate_root) else {
+        // No main.rs / lib.rs to wire — bootstrap_router_if_needed already
+        // surfaces the Router mounting hint, so we add provide_* hints here.
+        let mut out = WireApp::default();
+        for s in &store_snakes {
+            out.next_steps.push(format!(
+                "call `crate::state::{s}::provide_{s}()` in your App component before rendering any screen that calls `use_{s}()`"
+            ));
+        }
+        return Ok(out);
+    };
+    let original = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+
+    let mut out = WireApp::default();
+    let mut text = original.clone();
+
+    // Locate `fn App(` and its body. If absent, fall back to hints — the
+    // dx-new template always emits one, so absence means the user is in a
+    // hand-rolled shape we shouldn't rewrite.
+    let app_body_range = match find_fn_body_range(&text, "App") {
+        Some(r) => r,
+        None => {
+            if needs_router {
+                out.next_steps.push(
+                    "no `fn App()` found in your crate root — mount the router manually with `Router::<crate::router::Route> {}` in your top-level component".into(),
+                );
+            }
+            for s in &store_snakes {
+                out.next_steps.push(format!(
+                    "call `crate::state::{s}::provide_{s}()` in your App component before rendering any screen that calls `use_{s}()`"
+                ));
+            }
+            return Ok(out);
+        }
+    };
+
+    // 1. Inject any missing `provide_*` calls at the top of the App body.
+    //    Idempotent: skip if the literal `provide_{snake}()` is anywhere in
+    //    the file (App body or otherwise — user may have wired it manually).
+    let mut to_provide: Vec<String> = Vec::new();
+    for s in &store_snakes {
+        if !text.contains(&format!("provide_{s}()")) {
+            to_provide.push(s.clone());
+        }
+    }
+    if !to_provide.is_empty() {
+        // Indent matches the first non-empty line inside the body, or four
+        // spaces as a fallback.
+        let indent = detect_body_indent(&text, app_body_range.clone()).unwrap_or_else(|| "    ".into());
+        let mut insertion = String::new();
+        for s in &to_provide {
+            insertion.push_str(&format!(
+                "{indent}let _ = crate::state::{s}::provide_{s}();\n"
+            ));
+        }
+        // Splice in just after the opening `{` of the App body — that is,
+        // at `app_body_range.start` + 1 (the byte after `{`). Drop any
+        // leading newline so we don't double up blank lines.
+        let insert_at = app_body_range.start + 1;
+        // Ensure there's a newline directly after `{`. If the next byte is
+        // already a newline we keep alignment; otherwise prepend one.
+        let needs_lead_nl = text.as_bytes().get(insert_at).copied() != Some(b'\n');
+        let payload = if needs_lead_nl {
+            format!("\n{insertion}")
+        } else {
+            insertion
+        };
+        text.insert_str(insert_at, &payload);
+    }
+
+    // 2. Inject Router::<crate::router::Route> {} as the first child of the
+    //    App body's rsx! block, if any. Skip when Router is already mounted.
+    if needs_router && !text.contains("Router::<") {
+        // Re-locate the body — its range may have shifted by `provide_*`
+        // insertions above.
+        if let Some(body) = find_fn_body_range(&text, "App")
+            && let Some(rsx_inner) = find_rsx_inner_range(&text, body.clone())
+        {
+            let indent = detect_rsx_indent(&text, rsx_inner.clone()).unwrap_or_else(|| "        ".into());
+            let payload = format!("\n{indent}Router::<crate::router::Route> {{}}");
+            // Insert right after the rsx body's opening `{`.
+            text.insert_str(rsx_inner.start, &payload);
+        } else if needs_router {
+            out.next_steps.push(
+                "couldn't find an `rsx! { ... }` block inside `fn App()` — mount the router manually with `Router::<crate::router::Route> {}`".into(),
+            );
+        }
+    }
+
+    if text != original {
+        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        out.modified.push(path);
+    }
+    Ok(out)
+}
+
+/// Find the byte range of `fn {name}(...)`'s outer body braces. The returned
+/// `start` is the byte index of the opening `{`, and `end` is the index of
+/// the matching `}` (i.e. `text[start..=end]` covers the whole body). Returns
+/// None when the function isn't found or the braces don't balance.
+fn find_fn_body_range(text: &str, name: &str) -> Option<std::ops::Range<usize>> {
+    let needle = format!("fn {name}(");
+    let fn_idx = text.find(&needle)?;
+    // From there, the next `{` opens the body.
+    let open_rel = text[fn_idx..].find('{')?;
+    let open = fn_idx + open_rel;
+    let close = match_brace(text, open)?;
+    Some(open..close)
+}
+
+/// Within a function body range (start = `{`, end = `}`), find the inner
+/// brace range of the first `rsx! { ... }` macro call. Returns `start..end`
+/// where start is the `{` after `rsx!` and end is the matching `}`.
+fn find_rsx_inner_range(
+    text: &str,
+    body: std::ops::Range<usize>,
+) -> Option<std::ops::Range<usize>> {
+    let slice = &text[body.start..body.end];
+    let rsx_rel = slice.find("rsx!")?;
+    let after_macro = body.start + rsx_rel + "rsx!".len();
+    // Skip whitespace, then expect `{`.
+    let bytes = text.as_bytes();
+    let mut i = after_macro;
+    while i < text.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= text.len() || bytes[i] != b'{' {
+        return None;
+    }
+    let open = i;
+    let close = match_brace(text, open)?;
+    Some(open..close)
+}
+
+/// Given the byte index of `{`, return the index of its matching `}`.
+/// Counts nested braces but does NOT skip strings / chars / comments —
+/// fine for our targeted use (App body / rsx! inner block) where odd brace
+/// counts in string literals would be unusual.
+fn match_brace(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(open).copied() != Some(b'{') {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Indent of the first non-empty line inside a `{ ... }` body, or None if
+/// the body has no body lines yet. `range.start` is the `{`, `range.end` is
+/// the `}` byte index.
+fn detect_body_indent(text: &str, range: std::ops::Range<usize>) -> Option<String> {
+    let body = &text[range.start + 1..range.end];
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let lead: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+        if !lead.is_empty() {
+            return Some(lead);
+        }
+    }
+    None
+}
+
+/// Same as detect_body_indent but for an rsx body — we want children to line
+/// up with whatever's already in the rsx block.
+fn detect_rsx_indent(text: &str, range: std::ops::Range<usize>) -> Option<String> {
+    detect_body_indent(text, range)
+}
+
 // ---------- per-primitive generators ----------
 
 fn render(name: &str, tpl: &str, ctx: minijinja::Value) -> Result<String, String> {
@@ -3122,7 +3529,13 @@ fn write_module_file_with_cfg(
     }
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
     let mod_rs = dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, snake, cfg_attr)?;
+    // Components are referenced by name (`use crate::components::Foo;`), so
+    // the wildcard re-export is always "used" — no need to shield with
+    // `#![allow(unused_imports)]`. Server fns / state stores may have
+    // alongside-the-fact items (delete_*, etc.) that aren't called yet, so
+    // those keep the shield.
+    let allow_unused = subdir != "src/components";
+    let upsert = upsert_mod_entry(&mod_rs, snake, cfg_attr, allow_unused)?;
     let (created, modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -4316,6 +4729,60 @@ struct SynthServerFn {
     body: String,
 }
 
+/// For every `screens:` entry with `template.kind: client_crud`, find the
+/// model the screen will construct (via the referenced client_store's
+/// `item_type`) and ensure `Default` is in its `derives:` list. The generated
+/// body uses `..Default::default()` on the rest of the struct, which silently
+/// breaks compilation when the user-authored model only derives the usual
+/// `Debug, Clone, Serialize, Deserialize, PartialEq` set.
+///
+/// Case-insensitive dedup so users who already typed `derives: [Default]`
+/// don't end up with `derives: [Default, Default]`.
+fn ensure_default_on_client_crud_models(doc: &mut DslDoc) {
+    if doc.screens.is_empty() {
+        return;
+    }
+    // Collect (item_type) names from client_crud screens that resolve through
+    // a known client_store. Iterate immutably first so we can mutate `models`
+    // afterwards without aliasing.
+    let mut needs_default: BTreeSet<String> = BTreeSet::new();
+    for sc in &doc.screens {
+        let Some(t) = sc.template.as_ref() else {
+            continue;
+        };
+        if t.kind != "client_crud" {
+            continue;
+        }
+        let item_type = t
+            .item_type
+            .clone()
+            .or_else(|| {
+                t.store.as_ref().and_then(|store_ref| {
+                    let key = store_ref.to_snake_case();
+                    doc.client_stores
+                        .iter()
+                        .find(|cs| cs.name.to_snake_case() == key)
+                        .map(|cs| cs.item_type.clone())
+                })
+            });
+        if let Some(it) = item_type {
+            needs_default.insert(it.to_snake_case());
+        }
+    }
+    for m in &mut doc.models {
+        if !needs_default.contains(&m.name.to_snake_case()) {
+            continue;
+        }
+        let has_default = m
+            .derives
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case("Default"));
+        if !has_default {
+            m.derives.push("Default".to_string());
+        }
+    }
+}
+
 /// Expand each `resources:` entry into the equivalent model + store + 5 server
 /// fns + 2 screens. Synth server fns are returned separately because they
 /// carry custom bodies that the standard server-fn generator can't emit.
@@ -4623,7 +5090,7 @@ async fn generate_synth_server_fn(
     )?;
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
     let mod_rs = server_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None, true)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -5427,6 +5894,289 @@ serde = "1"
                 "expected PresentWithoutDeriveFeature, got {:?}",
                 std::mem::discriminant(&other)
             ),
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_app_injects_router_and_provide_into_dx_new_app() {
+        // Simulates the dx-new main.rs shape: an `App` component with an
+        // rsx! body. After execute_code lands a client_crud Screen, the App
+        // body should carry `Router::<...>` and `provide_*_store()` without
+        // the user touching main.rs.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("wire_app_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+fn main() {
+    dioxus::launch(App);
+}
+
+#[component]
+fn App() -> Element {
+    rsx! {
+        div { "welcome" }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed against a dx-new-shaped main.rs");
+
+        let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("Router::<crate::router::Route> {}"),
+            "App body should mount the Router, got:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("provide_todo_store()"),
+            "App body should call provide_todo_store(), got:\n{main_rs}"
+        );
+        // Existing welcome content shouldn't be clobbered — Router is inserted
+        // *alongside* the original children.
+        assert!(
+            main_rs.contains(r#"div { "welcome" }"#),
+            "original rsx children should be preserved, got:\n{main_rs}"
+        );
+
+        // Re-run is idempotent: a second execute_code with `if_missing: true`
+        // shouldn't append duplicate Router/provide_* lines.
+        let _ = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: true,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("rerun should succeed");
+        let main_rs_after = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert_eq!(
+            main_rs_after.matches("Router::<crate::router::Route>").count(),
+            1,
+            "Router mount must not duplicate on re-run:\n{main_rs_after}"
+        );
+        assert_eq!(
+            main_rs_after.matches("provide_todo_store()").count(),
+            1,
+            "provide_todo_store() must not duplicate on re-run:\n{main_rs_after}"
+        );
+    }
+
+    #[test]
+    fn client_crud_screen_auto_adds_default_to_referenced_model() {
+        // The client_crud Screen body uses `..Default::default()` in the
+        // "add" form constructor. If the user-authored model didn't include
+        // `Default` in `derives:`, we should add it during the pre-pass so
+        // the generated code compiles.
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+      - {name: done, type: bool}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#,
+        )
+        .unwrap();
+        // Sanity: user didn't ask for Default.
+        assert!(doc.models[0].derives.is_empty());
+
+        ensure_default_on_client_crud_models(&mut doc);
+        assert!(
+            doc.models[0].derives.iter().any(|d| d == "Default"),
+            "expected `Default` auto-added to Todo model, got derives = {:?}",
+            doc.models[0].derives
+        );
+
+        // Idempotent: running the pre-pass again is a no-op.
+        ensure_default_on_client_crud_models(&mut doc);
+        let default_count = doc.models[0]
+            .derives
+            .iter()
+            .filter(|d| *d == "Default")
+            .count();
+        assert_eq!(
+            default_count, 1,
+            "auto-add must be idempotent, got derives = {:?}",
+            doc.models[0].derives
+        );
+    }
+
+    #[test]
+    fn client_crud_screen_respects_existing_default_derive() {
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#,
+        )
+        .unwrap();
+        ensure_default_on_client_crud_models(&mut doc);
+        assert_eq!(doc.models[0].derives, vec!["Default".to_string()]);
+    }
+
+    #[test]
+    fn ensure_dioxus_router_skips_when_fullstack_already_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "rt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        match ensure_dioxus_router_in_cargo_toml(root).unwrap() {
+            DioxusRouterPatch::AlreadyOk => {}
+            _ => panic!("expected AlreadyOk for dioxus with fullstack feature"),
+        }
+    }
+
+    #[test]
+    fn ensure_dioxus_router_appends_router_to_features() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let initial = r#"[package]
+name = "rt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+"#;
+        std::fs::write(root.join("Cargo.toml"), initial).unwrap();
+        let r = ensure_dioxus_router_in_cargo_toml(root).unwrap();
+        assert!(matches!(r, DioxusRouterPatch::Patched(_)), "expected Patched");
+        let new_text = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(
+            new_text
+                .contains(r#"dioxus = { version = "0.7", features = ["web", "router"] }"#),
+            "expected router appended to features, got:\n{new_text}"
+        );
+        // Re-running is a no-op.
+        match ensure_dioxus_router_in_cargo_toml(root).unwrap() {
+            DioxusRouterPatch::AlreadyOk => {}
+            _ => panic!("expected AlreadyOk on second run"),
+        }
+    }
+
+    #[test]
+    fn ensure_dioxus_router_hints_when_bare_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "rt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = "0.7"
+"#,
+        )
+        .unwrap();
+        match ensure_dioxus_router_in_cargo_toml(root).unwrap() {
+            DioxusRouterPatch::DioxusNotATable => {}
+            _ => panic!("expected DioxusNotATable for bare-version dep"),
         }
     }
 
