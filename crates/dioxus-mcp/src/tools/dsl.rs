@@ -38,6 +38,8 @@ pub struct DslDoc {
     #[serde(default)]
     pub stores: Vec<DslStore>,
     #[serde(default)]
+    pub client_stores: Vec<DslClientStore>,
+    #[serde(default)]
     pub server_fns: Vec<DslServerFn>,
     #[serde(default)]
     pub signals: Vec<DslSignal>,
@@ -119,6 +121,31 @@ pub struct DslStore {
     pub emit_tests: Option<bool>,
 }
 
+/// Client-side reactive list. Generates `src/state/{snake}.rs` (no
+/// `#[cfg(feature = "server")]` gate) exposing a `Signal<Vec<T>>`-backed
+/// store as context. The companion `client_crud` Screen template wires
+/// add/toggle/delete handlers against it.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslClientStore {
+    pub name: String,
+    /// Rust item type for the list (e.g. `Todo`). When the name matches a
+    /// Model declared in the same doc the generated file emits a
+    /// `use crate::model::{ItemType};`. Built-in types (`String`, integers)
+    /// pass through unchanged.
+    pub item_type: String,
+    /// Rust expression for the initial Vec value. Defaults to `Vec::new()`.
+    #[serde(default)]
+    pub initial: Option<String>,
+    /// Field name on the item type to use for `remove_by_id` / `update_by_id`.
+    /// When unset those helpers are omitted.
+    #[serde(default)]
+    pub id_field: Option<String>,
+    /// Rust type of the id field. Default: `i64`.
+    #[serde(default)]
+    pub id_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DslResource {
@@ -169,6 +196,19 @@ pub struct DslScreenTemplate {
     /// text, email, password, number, checkbox, textarea.
     #[serde(default)]
     pub fields: Vec<DslFieldDef>,
+    /// For client_crud: name of a `client_stores:` entry in this doc (any case)
+    /// the screen reads/writes. Required for client_crud.
+    #[serde(default)]
+    pub store: Option<String>,
+    /// For client_crud: field on the item type that the "add" input writes
+    /// into, and that the rendered list item displays. Required.
+    #[serde(default)]
+    pub label_field: Option<String>,
+    /// For client_crud: optional bool field on the item type rendered as a
+    /// checkbox; toggling it flips the field via `update_by_id`. Omit for
+    /// non-toggleable items.
+    #[serde(default)]
+    pub checkbox_field: Option<String>,
     /// Internal: rich-CRUD context populated by `expand_resources` so the list
     /// and form templates can emit a real table (with edit/delete actions) or
     /// an edit-by-id form. Not part of the user-facing spec.
@@ -526,13 +566,18 @@ const CORE_COMPONENT: &str = r#"  Component:
 "#;
 
 const CORE_SCREEN: &str = r#"  Screen:
-    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=resource_list emits a use_resource + loading/error/data ladder bound to the named endpoint; kind=resource_form emits a controlled form that calls on_submit (or endpoint) and navigates to redirect_to."
+    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=resource_list / kind=resource_form bind to server fns (use these for backend-backed CRUD); kind=client_crud binds to a `client_stores:` entry and emits add/toggle/delete handlers entirely client-side (no server fn needed — ideal for in-memory apps like todo lists)."
     fields:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
       - {name: wrap_with, type: "ComponentName (e.g. a ProtectedRoute guard)", required: false}
-      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?}", required: false}
-    template_kinds: [empty, resource_list, resource_form]
+      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?}", required: false}
+    template_kinds: [empty, resource_list, resource_form, client_crud]
+    client_crud_fields:
+      - {name: store, type: "ClientStore name in this doc", required: true}
+      - {name: item_type, type: "Rust item type (Model in this doc or a built-in like String)", required: true}
+      - {name: label_field, type: "Field on the item the add input writes / the row label reads", required: true}
+      - {name: checkbox_field, type: "Optional bool field rendered as a per-row checkbox", required: false}
     example:
       screens:
         - name: HomeScreen
@@ -544,6 +589,14 @@ const CORE_SCREEN: &str = r#"  Screen:
             kind: resource_list
             endpoint: list_products
             item_type: Product
+        - name: TodoScreen
+          route: /
+          template:
+            kind: client_crud
+            store: TodoStore
+            item_type: Todo
+            label_field: title
+            checkbox_field: done
 "#;
 
 const CORE_SERVER_FN: &str = r#"  ServerFn:
@@ -587,6 +640,28 @@ const CORE_STORE: &str = r#"  Store:
           emit_tests: true
 "#;
 
+const CORE_CLIENT_STORE: &str = r#"  ClientStore:
+    description: "A typed client-side reactive list. Generates `src/state/{snake}.rs` (no server feature gate) exposing a `Signal<Vec<T>>`-backed store via context — call `provide_{snake}()` once in your root component and `use_{snake}()` from any descendant. Emits `push`, `clear`, and (when `id_field` is set) `remove_by_id` and `update_by_id` helpers. Pair with a Screen template `kind: client_crud` for one-call todo-style apps. NO server fn round-trip — ideal for in-memory state, todo lists, drafts, ephemeral UI selections."
+    fields:
+      - {name: name, type: string, required: true}
+      - {name: item_type, type: "Rust type (Model in this doc OR a built-in like String / i32). When it matches a Model name, the file emits `use crate::model::{ItemType};`.", required: true}
+      - {name: initial, type: "Rust expression for the initial Vec value (default `Vec::new()`)", required: false}
+      - {name: id_field, type: "Field name to use for remove_by_id / update_by_id helpers (e.g. `id`). Omit for primitive item types.", required: false}
+      - {name: id_type, type: "Rust type of the id field (default `i64`)", required: false}
+    example:
+      models:
+        - name: Todo
+          fields:
+            - {name: id, type: i64}
+            - {name: title, type: String}
+            - {name: done, type: bool}
+      client_stores:
+        - name: TodoStore
+          item_type: Todo
+          id_field: id
+          id_type: i64
+"#;
+
 const CORE_RESOURCE: &str = r#"  Resource:
     description: "A meta-primitive that fans out into a Model + Store + 5 server fns (list/get/create/update/delete) + 3 screens (list at `{route_base}`, new at `{route_base}/new`, edit at `{route_base}/:id/edit`). One entry yields a full CRUD slice. The list screen renders a rich table with edit/delete actions; the new screen submits via create_{snake} and redirects to the list; the edit screen takes an `id` URL param, fetches via get_{snake}, and submits via update_{snake}. The model must declare an integer id field (defaults to `id: i64`)."
     fields:
@@ -608,6 +683,42 @@ const CORE_RESOURCE: &str = r#"  Resource:
           fields:
             - {name: id, type: i64}
             - {name: name, type: String}
+"#;
+
+/// Canonical end-to-end recipes. These are *complete* DSL docs the caller can
+/// hand to `execute_code` verbatim — one call, one app. Added because the
+/// per-primitive examples assumed server-fn-backed CRUD and never demonstrated
+/// the client-only "hello world beyond a counter" shape (TODO4 §3).
+const CORE_RECIPES: &str = r#"  recipes:
+    todo_app:
+      description: "A client-only todo app — one Model, one ClientStore, one Screen. No server fn round-trip. Pass this YAML verbatim to execute_code; the result is a runnable app once you wire `provide_todo_store()` into your root component."
+      one_call_to: execute_code
+      yaml: |
+        version: "1"
+        models:
+          - name: Todo
+            derives: [Default]
+            fields:
+              - {name: id, type: i64}
+              - {name: title, type: String}
+              - {name: done, type: bool}
+        client_stores:
+          - name: TodoStore
+            item_type: Todo
+            id_field: id
+            id_type: i64
+        screens:
+          - name: TodoScreen
+            route: /
+            template:
+              kind: client_crud
+              store: TodoStore
+              item_type: Todo
+              label_field: title
+              checkbox_field: done
+      next_steps:
+        - "Call `crate::state::todo_store::provide_todo_store()` once in your app's root component (above the `Router` / above `TodoScreen`)."
+        - "No `Cargo.toml` changes required beyond what `dx new` already gives you."
 "#;
 
 const CORE_MODIFY: &str = r#"  Modify:
@@ -1345,6 +1456,96 @@ pub fn {{ pascal }}() -> Element {
 }
 "#;
 
+/// Client-side reactive list, exposed via context. NOT gated on the server
+/// feature — runs anywhere Dioxus runs. Helpers mirror the spec: `push`,
+/// `clear`, and (when `id_field` is set) `remove_by_id` + `update_by_id`.
+const CLIENT_STORE_TPL: &str = r#"use dioxus::prelude::*;
+{%- if needs_model_import %}
+use crate::model::{{ item_type }};
+{%- endif %}
+
+#[derive(Copy, Clone)]
+pub struct {{ pascal }} {
+    pub items: Signal<Vec<{{ item_type }}>>,
+}
+
+impl {{ pascal }} {
+    pub fn push(self, item: {{ item_type }}) {
+        let mut items = self.items;
+        items.write().push(item);
+    }
+
+    pub fn clear(self) {
+        let mut items = self.items;
+        items.write().clear();
+    }
+{%- if id_field %}
+
+    /// Returns true if an item was removed.
+    pub fn remove_by_id(self, id: {{ id_type }}) -> bool {
+        let mut items = self.items;
+        let before = items.read().len();
+        items.write().retain(|x| x.{{ id_field }} != id);
+        items.read().len() < before
+    }
+
+    pub fn update_by_id(self, id: {{ id_type }}, f: impl FnOnce(&mut {{ item_type }})) {
+        let mut items = self.items;
+        let mut guard = items.write();
+        if let Some(item) = guard.iter_mut().find(|x| x.{{ id_field }} == id) {
+            f(item);
+        }
+    }
+{%- endif %}
+}
+
+pub fn provide_{{ snake }}() -> {{ pascal }} {
+    use_context_provider(|| {{ pascal }} {
+        items: Signal::new({{ initial }}),
+    })
+}
+
+pub fn use_{{ snake }}() -> {{ pascal }} {
+    use_context::<{{ pascal }}>()
+}
+"#;
+
+/// Screen template that wires an "add input + list with delete (and optional
+/// checkbox)" UI to a ClientStore. No server fn round-trip — all state lives
+/// in the Signal-backed context store.
+const CLIENT_CRUD_SCREEN_TPL: &str = r#"use dioxus::prelude::*;
+{%- if wrap_pascal %}
+use crate::components::{{ wrap_pascal }};
+{%- endif %}
+use crate::state::{{ store_snake }}::use_{{ store_snake }};
+{%- if needs_model_import %}
+use crate::model::{{ item_type }};
+{%- endif %}
+
+#[component]
+pub fn {{ pascal }}() -> Element {
+    let store = use_{{ store_snake }}();
+    let mut draft = use_signal(|| String::new());
+{%- if has_id %}
+    let mut next_id = use_signal(|| 1{{ id_type_suffix }});
+{%- endif %}
+
+    rsx! {
+{%- if wrap_pascal %}
+        {{ wrap_pascal }} {
+            div { class: "screen {{ snake }}",
+{{ body }}
+            }
+        }
+{%- else %}
+        div { class: "screen {{ snake }}",
+{{ body }}
+        }
+{%- endif %}
+    }
+}
+"#;
+
 /// Resource-synthesized list screen with a real table: column headers from the
 /// model fields, keyed rows, per-row Edit link, Delete button (calls the
 /// delete server-fn and bumps a local version signal to refetch), and an
@@ -1635,11 +1836,13 @@ pub async fn get_dsl_spec(
     out.push_str("\ncore:\n");
     out.push_str(CORE_MODEL);
     out.push_str(CORE_STORE);
+    out.push_str(CORE_CLIENT_STORE);
     out.push_str(CORE_RESOURCE);
     out.push_str(CORE_COMPONENT);
     out.push_str(CORE_SCREEN);
     out.push_str(CORE_SERVER_FN);
     out.push_str(CORE_MODIFY);
+    out.push_str(CORE_RECIPES);
 
     let want = |k: &str| p.extensions.iter().any(|e| e.eq_ignore_ascii_case(k));
     let any_ext = p.extensions.iter().any(|e| {
@@ -1826,6 +2029,23 @@ pub async fn execute_code(
         merge(&mut result, r);
     }
 
+    let model_names_for_imports: BTreeSet<String> = doc
+        .models
+        .iter()
+        .map(|m| m.name.to_snake_case())
+        .collect();
+    for cs in &doc.client_stores {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/state", &cs.name),
+        ) {
+            continue;
+        }
+        let r = generate_client_store(&crate_root, cs, &model_names_for_imports)?;
+        merge(&mut result, r);
+    }
+
     for sf in &synth_server_fns {
         if skip_or_record(
             &skip,
@@ -1987,7 +2207,14 @@ pub async fn execute_code(
         ) {
             continue;
         }
-        let r = generate_screen(state, &crate_root, sc, p.project_root.as_deref()).await?;
+        let r = generate_screen(
+            state,
+            &crate_root,
+            sc,
+            &doc.client_stores,
+            p.project_root.as_deref(),
+        )
+        .await?;
         merge(&mut result, r);
     }
 
@@ -2055,7 +2282,48 @@ pub async fn execute_code(
     dedup_paths(&mut result.files_modified);
     dedup_paths(&mut result.collisions);
 
+    // Surface hand-edit hotspots: for every newly-created file the scaffolder
+    // wrote, find `// TODO` markers and add one `next_steps` entry per
+    // occurrence, formatted `path:line — message`. Lets the caller jump
+    // straight to the body lines that still need a human (TODO4 §4.2).
+    append_todo_next_steps(&mut result, &crate_root);
+
     Ok(result)
+}
+
+/// Scan every freshly-created file for `// TODO` markers and surface
+/// `path:line — message` entries on `next_steps`. Paths are emitted relative
+/// to the crate root so they paste cleanly into editors.
+fn append_todo_next_steps(result: &mut ScaffoldResult, crate_root: &Path) {
+    let mut hotspots: Vec<String> = Vec::new();
+    for path in &result.files_created {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("// TODO") {
+                let message = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+                let rel = path.strip_prefix(crate_root).unwrap_or(path);
+                let entry = if message.is_empty() {
+                    format!("{}:{} — TODO", rel.display(), i + 1)
+                } else {
+                    format!("{}:{} — TODO {}", rel.display(), i + 1, message)
+                };
+                hotspots.push(entry);
+            }
+        }
+    }
+    // Stable order: by path then line — the per-file scan above already gives
+    // us this, but if multiple files emit hits we sort to keep output reviewable.
+    hotspots.sort();
+    if !hotspots.is_empty() {
+        result.next_steps.push(format!(
+            "{} hand-edit hotspot(s) marked `// TODO` in generated files:",
+            hotspots.len()
+        ));
+        result.next_steps.extend(hotspots);
+    }
 }
 
 enum SerdePatch {
@@ -2289,6 +2557,9 @@ fn skip_set(
     for st in &doc.stores {
         maybe_add("src/state", &st.name);
     }
+    for cs in &doc.client_stores {
+        maybe_add("src/state", &cs.name);
+    }
     for sf in synth_server_fns {
         maybe_add("src/server", &sf.name);
     }
@@ -2367,6 +2638,9 @@ fn plan_dsl(doc: &DslDoc, synth_server_fns: &[SynthServerFn], crate_root: &Path)
     }
     for st in &doc.stores {
         leaf(&mut out, &mut mods_touched, "src/state", &st.name);
+    }
+    for cs in &doc.client_stores {
+        leaf(&mut out, &mut mods_touched, "src/state", &cs.name);
     }
     for sf in synth_server_fns {
         leaf(&mut out, &mut mods_touched, "src/server", &sf.name);
@@ -2489,6 +2763,19 @@ fn preflight(
             return Err(format!("duplicate store name: {}", s.name));
         }
     }
+    let mut client_store_names: BTreeSet<String> = BTreeSet::new();
+    for cs in &doc.client_stores {
+        let snake = cs.name.to_snake_case();
+        if !client_store_names.insert(snake.clone()) {
+            return Err(format!("duplicate client_store name: {}", cs.name));
+        }
+        if store_names.contains(&snake) {
+            return Err(format!(
+                "client_store {:?} collides with store {:?} — both write to src/state/{snake}.rs; rename one",
+                cs.name, cs.name
+            ));
+        }
+    }
     for s in &doc.session_states {
         if !sess_names.insert(s.name.to_snake_case()) {
             return Err(format!("duplicate session_state name: {}", s.name));
@@ -2565,6 +2852,30 @@ fn preflight(
             ));
         }
     }
+    for sc in &doc.screens {
+        if let Some(tpl) = &sc.template
+            && tpl.kind == "client_crud"
+        {
+            let store = tpl.store.as_deref().ok_or_else(|| {
+                format!(
+                    "screen {:?} kind=client_crud requires `store:` (a client_stores name)",
+                    sc.name
+                )
+            })?;
+            if !client_store_names.contains(&store.to_snake_case()) {
+                return Err(format!(
+                    "screen {:?} references unknown client_store {:?}; declare it under client_stores",
+                    sc.name, store
+                ));
+            }
+            if tpl.label_field.is_none() {
+                return Err(format!(
+                    "screen {:?} kind=client_crud requires `label_field`",
+                    sc.name
+                ));
+            }
+        }
+    }
 
     // 3. Validate `modify:` entries — non-empty, no duplicate field/arg/prop
     //    names within a single entry. Cross-doc references aren't required:
@@ -2639,6 +2950,14 @@ fn preflight(
                 ));
             }
         }
+        for n in &client_store_names {
+            if state_dir.join(format!("{n}.rs")).exists() {
+                return Err(format!(
+                    "src/state/{n}.rs already exists; refusing to overwrite. \
+                     Pass `if_missing: true` to skip existing primitives instead of erroring."
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -2669,6 +2988,26 @@ fn write_module_file(
     snake: &str,
     body: String,
 ) -> Result<ScaffoldResult, String> {
+    // src/state/ entries declare server-only store modules; without the
+    // matching cfg gate on the `pub mod`/`pub use` lines, the wasm (web-only)
+    // build fails with E0432 because the file is `#![cfg(feature = "server")]`
+    // and effectively absent. ClientStore lives in the same dir but is NOT
+    // server-only; it uses `write_module_file_with_cfg(... None)` directly.
+    let cfg_attr = if subdir == "src/state" {
+        Some("#[cfg(feature = \"server\")]")
+    } else {
+        None
+    };
+    write_module_file_with_cfg(crate_root, subdir, snake, body, cfg_attr)
+}
+
+fn write_module_file_with_cfg(
+    crate_root: &Path,
+    subdir: &str,
+    snake: &str,
+    body: String,
+    cfg_attr: Option<&str>,
+) -> Result<ScaffoldResult, String> {
     let dir = crate_root.join(subdir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let target = dir.join(format!("{snake}.rs"));
@@ -2676,15 +3015,6 @@ fn write_module_file(
         return Err(format!("{} already exists", target.display()));
     }
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
-    // src/state/ entries declare server-only store modules; without the
-    // matching cfg gate on the `pub mod`/`pub use` lines, the wasm (web-only)
-    // build fails with E0432 because the file is `#![cfg(feature = "server")]`
-    // and effectively absent.
-    let cfg_attr = if subdir == "src/state" {
-        Some("#[cfg(feature = \"server\")]")
-    } else {
-        None
-    };
     let mod_rs = dir.join("mod.rs");
     let upsert = upsert_mod_entry(&mod_rs, snake, cfg_attr)?;
     let (created, modified) = match upsert {
@@ -3054,6 +3384,7 @@ async fn generate_screen(
     state: &Arc<State>,
     crate_root: &Path,
     sc: &DslScreen,
+    client_stores: &[DslClientStore],
     project_root: Option<&str>,
 ) -> Result<ScaffoldResult, String> {
     let pascal = sc.name.to_pascal_case();
@@ -3070,7 +3401,14 @@ async fn generate_screen(
                 wrap_pascal => wrap_pascal.clone(),
             },
         )?,
-        Some(t) => render_screen_template(crate_root, &pascal, &snake, wrap_pascal.as_deref(), t)?,
+        Some(t) => render_screen_template(
+            crate_root,
+            &pascal,
+            &snake,
+            wrap_pascal.as_deref(),
+            client_stores,
+            t,
+        )?,
     };
     let mut r = write_component_file(crate_root, &snake, body)?;
     if let Some(w) = &wrap_pascal {
@@ -3098,6 +3436,7 @@ fn render_screen_template(
     pascal: &str,
     snake: &str,
     wrap_pascal: Option<&str>,
+    client_stores: &[DslClientStore],
     t: &DslScreenTemplate,
 ) -> Result<String, String> {
     match t.kind.as_str() {
@@ -3205,10 +3544,181 @@ fn render_screen_template(
                 },
             )
         }
+        "client_crud" => {
+            render_client_crud_screen(pascal, snake, wrap_pascal, client_stores, t)
+        }
         other => Err(format!(
-            "unknown screen template kind {other:?} (expected: empty, resource_list, resource_form)"
+            "unknown screen template kind {other:?} (expected: empty, resource_list, resource_form, client_crud)"
         )),
     }
+}
+
+fn render_client_crud_screen(
+    pascal: &str,
+    snake: &str,
+    wrap_pascal: Option<&str>,
+    client_stores: &[DslClientStore],
+    t: &DslScreenTemplate,
+) -> Result<String, String> {
+    let store_ref = t.store.as_deref().ok_or_else(|| {
+        format!(
+            "screen {pascal:?} kind=client_crud requires `store:` (a client_stores entry name)"
+        )
+    })?;
+    let store_snake = store_ref.to_snake_case();
+    let store_cfg = client_stores
+        .iter()
+        .find(|cs| cs.name.to_snake_case() == store_snake)
+        .ok_or_else(|| {
+            format!(
+                "screen {pascal:?} references unknown client_store {store_ref:?}; declare it under client_stores"
+            )
+        })?;
+    let item_type = t
+        .item_type
+        .clone()
+        .or_else(|| Some(store_cfg.item_type.clone()))
+        .ok_or_else(|| {
+            format!("screen {pascal:?} kind=client_crud requires `item_type`")
+        })?;
+    let label_field = t
+        .label_field
+        .as_deref()
+        .ok_or_else(|| {
+            format!("screen {pascal:?} kind=client_crud requires `label_field`")
+        })?
+        .to_snake_case();
+    let checkbox_field = t
+        .checkbox_field
+        .as_deref()
+        .map(|s| s.to_snake_case());
+    let id_field = store_cfg
+        .id_field
+        .as_deref()
+        .ok_or_else(|| {
+            format!(
+                "screen {pascal:?} kind=client_crud requires the referenced client_store {store_ref:?} to declare `id_field` (delete/checkbox actions key off it)"
+            )
+        })?
+        .to_snake_case();
+    let id_type = store_cfg
+        .id_type
+        .clone()
+        .unwrap_or_else(|| "i64".into());
+    // For integer ids we emit `1i64` etc. so the type of `next_id` is fixed
+    // even before the first push. Non-integer id types fall back to bare `1`.
+    let id_type_suffix = match id_type.as_str() {
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+        | "u128" | "usize" => id_type.to_string(),
+        _ => String::new(),
+    };
+    let has_id = !id_type_suffix.is_empty();
+    let needs_model_import = store_cfg.item_type.to_snake_case() == item_type.to_snake_case();
+    let humanized = humanize(&item_type);
+
+    // Render the inner rsx body programmatically — the surrounding wrapper
+    // (h1 / wrap_with / div) is filled in by CLIENT_CRUD_SCREEN_TPL.
+    let mut body = String::new();
+    let ind = if wrap_pascal.is_some() { "                " } else { "            " };
+    body.push_str(&format!("{ind}h1 {{ \"{pascal}\" }}\n"));
+    // "Add" form
+    body.push_str(&format!("{ind}form {{ class: \"add\",\n"));
+    body.push_str(&format!(
+        "{ind}    onsubmit: move |evt: FormEvent| {{\n"
+    ));
+    body.push_str(&format!("{ind}        evt.prevent_default();\n"));
+    body.push_str(&format!("{ind}        let value = draft();\n"));
+    body.push_str(&format!("{ind}        if value.is_empty() {{ return; }}\n"));
+    if has_id {
+        body.push_str(&format!("{ind}        let id = next_id();\n"));
+        body.push_str(&format!("{ind}        *next_id.write() += 1;\n"));
+    }
+    body.push_str(&format!("{ind}        store.push({item_type} {{\n"));
+    if has_id {
+        body.push_str(&format!("{ind}            {id_field}: id,\n"));
+    }
+    body.push_str(&format!("{ind}            {label_field}: value,\n"));
+    body.push_str(&format!("{ind}            ..Default::default()\n"));
+    body.push_str(&format!("{ind}        }});\n"));
+    body.push_str(&format!("{ind}        draft.set(String::new());\n"));
+    body.push_str(&format!("{ind}    }},\n"));
+    body.push_str(&format!("{ind}    input {{\n"));
+    body.push_str(&format!("{ind}        r#type: \"text\",\n"));
+    body.push_str(&format!("{ind}        value: \"{{draft()}}\",\n"));
+    body.push_str(&format!(
+        "{ind}        placeholder: \"New {humanized}\",\n"
+    ));
+    body.push_str(&format!(
+        "{ind}        oninput: move |e| draft.set(e.value()),\n"
+    ));
+    body.push_str(&format!("{ind}    }}\n"));
+    body.push_str(&format!("{ind}    button {{ r#type: \"submit\", \"Add\" }}\n"));
+    body.push_str(&format!("{ind}}}\n"));
+    // List
+    body.push_str(&format!(
+        "{ind}ul {{ class: \"{snake}-items\",\n"
+    ));
+    body.push_str(&format!(
+        "{ind}    for item in store.items.read().iter() {{\n"
+    ));
+    body.push_str(&format!(
+        "{ind}        li {{ key: \"{{item.{id_field}}}\",\n"
+    ));
+    if let Some(cb) = &checkbox_field {
+        body.push_str(&format!("{ind}            input {{\n"));
+        body.push_str(&format!("{ind}                r#type: \"checkbox\",\n"));
+        body.push_str(&format!(
+            "{ind}                checked: \"{{item.{cb}}}\",\n"
+        ));
+        body.push_str(&format!("{ind}                oninput: {{\n"));
+        body.push_str(&format!(
+            "{ind}                    let id = item.{id_field}.clone();\n"
+        ));
+        body.push_str(&format!("{ind}                    move |_| {{\n"));
+        body.push_str(&format!("{ind}                        let id = id.clone();\n"));
+        body.push_str(&format!(
+            "{ind}                        store.update_by_id(id, |t| t.{cb} = !t.{cb});\n"
+        ));
+        body.push_str(&format!("{ind}                    }}\n"));
+        body.push_str(&format!("{ind}                }},\n"));
+        body.push_str(&format!("{ind}            }}\n"));
+    }
+    body.push_str(&format!(
+        "{ind}            span {{ \"{{item.{label_field}}}\" }}\n"
+    ));
+    body.push_str(&format!("{ind}            button {{ class: \"delete\",\n"));
+    body.push_str(&format!("{ind}                onclick: {{\n"));
+    body.push_str(&format!(
+        "{ind}                    let id = item.{id_field}.clone();\n"
+    ));
+    body.push_str(&format!("{ind}                    move |_| {{\n"));
+    body.push_str(&format!("{ind}                        let id = id.clone();\n"));
+    body.push_str(&format!(
+        "{ind}                        store.remove_by_id(id);\n"
+    ));
+    body.push_str(&format!("{ind}                    }}\n"));
+    body.push_str(&format!("{ind}                }},\n"));
+    body.push_str(&format!("{ind}                \"Delete\"\n"));
+    body.push_str(&format!("{ind}            }}\n"));
+    body.push_str(&format!("{ind}        }}\n"));
+    body.push_str(&format!("{ind}    }}\n"));
+    body.push_str(&format!("{ind}}}"));
+
+    render(
+        "client_crud_screen",
+        CLIENT_CRUD_SCREEN_TPL,
+        context! {
+            pascal => pascal,
+            snake => snake,
+            wrap_pascal => wrap_pascal,
+            store_snake => store_snake,
+            item_type => item_type,
+            needs_model_import => needs_model_import,
+            has_id => has_id,
+            id_type_suffix => id_type_suffix,
+            body => body,
+        },
+    )
 }
 
 /// Locate the Routable enum on disk and return the import path callers can use
@@ -3677,6 +4187,47 @@ fn generate_store(crate_root: &Path, store: &DslStore) -> Result<ScaffoldResult,
     Ok(r)
 }
 
+fn generate_client_store(
+    crate_root: &Path,
+    cs: &DslClientStore,
+    model_names: &BTreeSet<String>,
+) -> Result<ScaffoldResult, String> {
+    let pascal = cs.name.to_pascal_case();
+    let snake = cs.name.to_snake_case();
+    let item_type = cs.item_type.trim().to_string();
+    let id_field = cs.id_field.as_ref().map(|s| s.to_snake_case());
+    let id_type = cs
+        .id_type
+        .clone()
+        .unwrap_or_else(|| "i64".into());
+    let initial = cs
+        .initial
+        .clone()
+        .unwrap_or_else(|| "Vec::new()".into());
+    // Emit `use crate::model::ItemType;` when the type matches an in-doc model.
+    let needs_model_import = model_names.contains(&item_type.to_snake_case());
+
+    let body = render(
+        "client_store",
+        CLIENT_STORE_TPL,
+        context! {
+            pascal => pascal,
+            snake => snake.clone(),
+            item_type => item_type,
+            needs_model_import => needs_model_import,
+            id_field => id_field,
+            id_type => id_type,
+            initial => initial,
+        },
+    )?;
+    // No server cfg gate — ClientStore runs in both wasm and server builds.
+    let mut r = write_module_file_with_cfg(crate_root, "src/state", &snake, body, None)?;
+    r.next_steps.push(format!(
+        "call `crate::state::{snake}::provide_{snake}()` in the root component (or any ancestor of the screens that read it) before `use_{snake}()` is called"
+    ));
+    Ok(r)
+}
+
 #[derive(Debug, Clone)]
 struct SynthServerFn {
     name: String,
@@ -3868,6 +4419,9 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 on_submit: None,
                 redirect_to: None,
                 fields: vec![],
+                store: None,
+                label_field: None,
+                checkbox_field: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -3885,6 +4439,9 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 on_submit: Some(create_name.clone()),
                 redirect_to: Some(route_base.clone()),
                 fields: non_id_fields.clone(),
+                store: None,
+                label_field: None,
+                checkbox_field: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -3900,6 +4457,9 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 on_submit: Some(update_name.clone()),
                 redirect_to: Some(route_base.clone()),
                 fields: non_id_fields,
+                store: None,
+                label_field: None,
+                checkbox_field: None,
                 crud: Some(crud),
             }),
             route_params: vec![("id".to_string(), id_type.clone())],
@@ -4263,6 +4823,7 @@ mod tests {
         let blocks: &[(&str, &str)] = &[
             ("CORE_MODEL", CORE_MODEL),
             ("CORE_STORE", CORE_STORE),
+            ("CORE_CLIENT_STORE", CORE_CLIENT_STORE),
             ("CORE_RESOURCE", CORE_RESOURCE),
             ("CORE_COMPONENT", CORE_COMPONENT),
             ("CORE_SCREEN", CORE_SCREEN),
@@ -5511,6 +6072,246 @@ stores:
         .unwrap();
         let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
         assert!(err.contains("unknown model"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn client_store_emits_signal_backed_store_without_server_gate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("client_store_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let _ = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+      - {name: done, type: bool}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("client_store should scaffold");
+
+        let store_path = root.join("src/state/todo_store.rs");
+        assert!(store_path.exists(), "expected todo_store.rs at {store_path:?}");
+        let body = std::fs::read_to_string(&store_path).unwrap();
+        assert!(
+            !body.contains("#![cfg(feature = \"server\")]"),
+            "ClientStore must NOT carry the server cfg gate, got:\n{body}"
+        );
+        assert!(body.contains("use crate::model::Todo;"), "missing model import: {body}");
+        assert!(body.contains("pub fn provide_todo_store()"), "missing provide_ fn: {body}");
+        assert!(body.contains("pub fn use_todo_store()"), "missing use_ fn: {body}");
+        assert!(body.contains("pub fn push("), "missing push helper: {body}");
+        assert!(body.contains("pub fn remove_by_id("), "missing remove_by_id helper: {body}");
+        assert!(body.contains("pub fn update_by_id("), "missing update_by_id helper: {body}");
+
+        // mod.rs should NOT have a server cfg gate for the client store entry.
+        let mod_rs = std::fs::read_to_string(root.join("src/state/mod.rs")).unwrap();
+        let todo_lines: Vec<&str> = mod_rs
+            .lines()
+            .filter(|l| l.contains("todo_store"))
+            .collect();
+        assert!(
+            !todo_lines.iter().any(|l| l.contains("cfg(feature")),
+            "ClientStore entries must not be gated in mod.rs, got: {mod_rs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_crud_screen_wires_add_input_and_delete_button() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("client_crud_screen_test"),
+        )
+        .unwrap();
+        // Pre-create a Routable enum so the screen route insert succeeds.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Routable, Clone, PartialEq)]
+enum Route {
+    #[route("/old")]
+    Old {},
+}
+
+fn main() {}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let r = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+      - {name: done, type: bool}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+      checkbox_field: done
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("client_crud screen should scaffold");
+
+        let screen = root.join("src/components/todo_screen.rs");
+        let body = std::fs::read_to_string(&screen).unwrap();
+        assert!(
+            body.contains("use crate::state::todo_store::use_todo_store;"),
+            "missing client_store import:\n{body}"
+        );
+        assert!(body.contains("use crate::model::Todo;"), "missing model import:\n{body}");
+        assert!(body.contains("store.push(Todo {"), "missing push call:\n{body}");
+        assert!(body.contains("title: value,"), "missing label_field assignment:\n{body}");
+        assert!(body.contains("store.remove_by_id(id);"), "missing delete handler:\n{body}");
+        assert!(
+            body.contains("store.update_by_id(id, |t| t.done = !t.done);"),
+            "missing checkbox toggle:\n{body}"
+        );
+        // Sanity: it must compile structurally — input/onsubmit/button all
+        // emitted under the rsx! block.
+        assert!(body.contains("rsx!"), "missing rsx block:\n{body}");
+        assert!(body.contains("button { r#type: \"submit\""), "missing add button:\n{body}");
+
+        // route variant inserted in main.rs
+        let routes = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert!(routes.contains("TodoScreen"), "TodoScreen variant not added: {routes}");
+
+        // ensure no server feature gate snuck into the screen
+        assert!(
+            !body.contains("cfg(feature = \"server\")"),
+            "client_crud screen must not carry server cfg:\n{body}"
+        );
+        // The store file under src/state must also be unguarded.
+        let cs = std::fs::read_to_string(root.join("src/state/todo_store.rs")).unwrap();
+        assert!(
+            !cs.contains("#![cfg(feature = \"server\")]"),
+            "todo store should be client-side:\n{cs}"
+        );
+
+        // next_steps should mention provide_*
+        assert!(
+            r.next_steps.iter().any(|s| s.contains("provide_todo_store")),
+            "expected next_steps to mention provide_todo_store, got {:?}",
+            r.next_steps
+        );
+    }
+
+    #[tokio::test]
+    async fn next_steps_surface_todo_markers_with_file_and_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("todo_marker_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        // A bare Form (no `on_submit`) emits `// TODO submit handler` in the
+        // generated body, which the scanner should pick up.
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let r = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+forms:
+  - name: ContactForm
+    fields:
+      - {name: email, type: email}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("Form with no on_submit should scaffold");
+
+        let hotspot = r
+            .next_steps
+            .iter()
+            .find(|s| s.contains("contact_form.rs:") && s.contains("TODO"));
+        assert!(
+            hotspot.is_some(),
+            "expected a `path:line — TODO ...` next_steps entry, got {:?}",
+            r.next_steps
+        );
+        // The header entry should also be present.
+        assert!(
+            r.next_steps
+                .iter()
+                .any(|s| s.contains("hand-edit hotspot")),
+            "expected a hotspot header, got {:?}",
+            r.next_steps
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_client_crud_screen_with_unknown_store() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: NopeStore
+      item_type: Todo
+      label_field: title
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(err.contains("unknown client_store"), "got: {err}");
     }
 
     fn cargo_toml_with_fullstack(name: &str) -> String {
