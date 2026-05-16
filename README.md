@@ -146,8 +146,24 @@ For the runtime probe install, transports, configuration flags, and the
 test suite layout, see
 [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md#runtime-probe).
 
+## Contributing
+
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) — note
+that, to keep the dual-license model viable, contributors grant the
+maintainer rights to relicense their contributions.
+
 ## License
 
 Copyright (C) 2026 Tony Bierman
 
 Licensed under the [GNU General Public License v3.0 or later](LICENSE).
+
+### Commercial licensing
+
+GPL-3.0 requires that derivative works also be distributed under GPL-3.0,
+with source available. If that doesn't fit your use case — for example,
+embedding `dioxus-mcp` in proprietary or closed-source software, or
+distributing it as part of a product you don't want to GPL — a separate
+commercial license is available.
+
+Contact **tonybierman@gmail.com** to discuss terms.
