@@ -921,8 +921,14 @@ pub enum Route {
         // wouldn't catch it — the path-collision check should.
         let err = plan_route_insertion(BASE, "Landing", "/", &[]).unwrap_err();
         assert!(err.contains("route conflict"), "got: {err}");
-        assert!(err.contains("Home"), "should name the colliding variant, got: {err}");
-        assert!(err.contains("\"/\""), "should quote the colliding path, got: {err}");
+        assert!(
+            err.contains("Home"),
+            "should name the colliding variant, got: {err}"
+        );
+        assert!(
+            err.contains("\"/\""),
+            "should quote the colliding path, got: {err}"
+        );
     }
 }
 
@@ -1119,13 +1125,7 @@ mod mod_upsert_tests {
              #[cfg(feature = \"server\")]\npub use alpha::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(
-            &p,
-            "beta",
-            Some("#[cfg(feature = \"server\")]"),
-            true,
-        )
-        .unwrap();
+        let r = upsert_mod_entry(&p, "beta", Some("#[cfg(feature = \"server\")]"), true).unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(

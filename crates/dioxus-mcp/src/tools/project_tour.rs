@@ -206,7 +206,9 @@ fn derive_next_actions(
                     reason: msg.to_string(),
                     hint: "Cargo.toml: set `features = [\"web\"]` (or desktop/mobile/fullstack) on the dioxus dep".into(),
                 });
-            } else if msg.contains("multiple render targets enabled simultaneously without `fullstack`") {
+            } else if msg
+                .contains("multiple render targets enabled simultaneously without `fullstack`")
+            {
                 out.push(NextAction {
                     title: "Resolve render-target conflict".into(),
                     reason: msg.to_string(),

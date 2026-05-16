@@ -2054,24 +2054,24 @@ pub async fn get_dsl_spec(
     // a section is emitted under `core:` or under an `extensions: <group>:`
     // block; the body is the constant text already authored above.
     const SECTIONS: &[(&str, &str, &str)] = &[
-        ("model",            "core",     CORE_MODEL),
-        ("store",            "core",     CORE_STORE),
-        ("client_store",     "core",     CORE_CLIENT_STORE),
-        ("resource",         "core",     CORE_RESOURCE),
-        ("component",        "core",     CORE_COMPONENT),
-        ("screen",           "core",     CORE_SCREEN),
-        ("server_fn",        "core",     CORE_SERVER_FN),
-        ("modify",           "core",     CORE_MODIFY),
-        ("remove",           "core",     CORE_REMOVE),
-        ("form",             "crud",     CRUD_FORM),
-        ("list",             "crud",     CRUD_LIST),
-        ("table",            "crud",     CRUD_TABLE),
-        ("signal",           "realtime", REALTIME_SIGNAL),
-        ("socket",           "realtime", REALTIME_SOCKET),
-        ("feed",             "realtime", REALTIME_FEED),
-        ("session_state",    "auth",     AUTH_SESSION),
-        ("login_screen",     "auth",     AUTH_LOGIN),
-        ("protected_route",  "auth",     AUTH_PROTECTED),
+        ("model", "core", CORE_MODEL),
+        ("store", "core", CORE_STORE),
+        ("client_store", "core", CORE_CLIENT_STORE),
+        ("resource", "core", CORE_RESOURCE),
+        ("component", "core", CORE_COMPONENT),
+        ("screen", "core", CORE_SCREEN),
+        ("server_fn", "core", CORE_SERVER_FN),
+        ("modify", "core", CORE_MODIFY),
+        ("remove", "core", CORE_REMOVE),
+        ("form", "crud", CRUD_FORM),
+        ("list", "crud", CRUD_LIST),
+        ("table", "crud", CRUD_TABLE),
+        ("signal", "realtime", REALTIME_SIGNAL),
+        ("socket", "realtime", REALTIME_SOCKET),
+        ("feed", "realtime", REALTIME_FEED),
+        ("session_state", "auth", AUTH_SESSION),
+        ("login_screen", "auth", AUTH_LOGIN),
+        ("protected_route", "auth", AUTH_PROTECTED),
     ];
 
     // Validate `extensions:` first so the error message is the same regardless
@@ -2176,7 +2176,9 @@ pub async fn get_dsl_spec(
     }
     out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
 
-    let any_core = SECTIONS.iter().any(|(n, g, _)| *g == "core" && include(n, g));
+    let any_core = SECTIONS
+        .iter()
+        .any(|(n, g, _)| *g == "core" && include(n, g));
     if any_core {
         out.push_str("\ncore:\n");
         for (name, group, body) in SECTIONS.iter().filter(|(_, g, _)| *g == "core") {
@@ -2251,9 +2253,7 @@ fn spec_index_line(block: &str) -> (String, String) {
             key = stripped.to_string();
             continue;
         }
-        if !in_desc
-            && let Some(rest) = trimmed.strip_prefix("description:")
-        {
+        if !in_desc && let Some(rest) = trimmed.strip_prefix("description:") {
             in_desc = true;
             desc_buf.push_str(rest.trim());
             continue;
@@ -2362,7 +2362,13 @@ pub async fn execute_code(
     // create my Hero" in one call.
     let to_be_removed = removed_leaf_paths(&doc, &crate_root);
 
-    preflight_with_removes(&doc, &synth_server_fns, &crate_root, p.if_missing, &to_be_removed)?;
+    preflight_with_removes(
+        &doc,
+        &synth_server_fns,
+        &crate_root,
+        p.if_missing,
+        &to_be_removed,
+    )?;
 
     if p.dry_run {
         // Removes are not applied in dry_run mode; the plan reports what
@@ -2741,8 +2747,9 @@ pub async fn execute_code(
     // skeleton lets them drop in `use crate::components::Foo;` immediately.
     {
         let comp_dir = crate_root.join("src/components");
-        let data_dir_touched =
-            touched_top_mods.iter().any(|m| m == "model" || m == "state");
+        let data_dir_touched = touched_top_mods
+            .iter()
+            .any(|m| m == "model" || m == "state");
         if data_dir_touched && !comp_dir.exists() {
             result.next_steps.push(
                 "scaffolded model/state but `src/components/` doesn't exist yet — when you start \
@@ -3071,10 +3078,7 @@ fn ensure_dioxus_router_in_cargo_toml(crate_root: &Path) -> Result<DioxusRouterP
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if features
-        .iter()
-        .any(|f| f == "router" || f == "fullstack")
-    {
+    if features.iter().any(|f| f == "router" || f == "fullstack") {
         return Ok(DioxusRouterPatch::AlreadyOk);
     }
 
@@ -4034,12 +4038,11 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
     if !to_provide.is_empty() {
         // Indent matches the first non-empty line inside the body, or four
         // spaces as a fallback.
-        let indent = detect_body_indent(&text, app_body_range.clone()).unwrap_or_else(|| "    ".into());
+        let indent =
+            detect_body_indent(&text, app_body_range.clone()).unwrap_or_else(|| "    ".into());
         let mut insertion = String::new();
         for s in &to_provide {
-            insertion.push_str(&format!(
-                "{indent}crate::state::{s}::provide_{s}();\n"
-            ));
+            insertion.push_str(&format!("{indent}crate::state::{s}::provide_{s}();\n"));
         }
         // Splice in just after the opening `{` of the App body. If the next
         // byte is a newline, insert *after* it so the let lands on its own
@@ -4062,7 +4065,8 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
         if let Some(body) = find_fn_body_range(&text, "App")
             && let Some(rsx_inner) = find_rsx_inner_range(&text, body.clone())
         {
-            let indent = detect_rsx_indent(&text, rsx_inner.clone()).unwrap_or_else(|| "        ".into());
+            let indent =
+                detect_rsx_indent(&text, rsx_inner.clone()).unwrap_or_else(|| "        ".into());
             // rsx_inner.start is the byte index of the rsx body's opening
             // `{`. Insert AFTER it so the Router lands as a child of the
             // rsx block rather than between `rsx!` and its `{`.
@@ -5497,7 +5501,11 @@ fn generate_client_store(
             ));
         }
     }
-    let id_type_suffix = if auto_id { id_type.clone() } else { String::new() };
+    let id_type_suffix = if auto_id {
+        id_type.clone()
+    } else {
+        String::new()
+    };
     // Emit `use crate::model::ItemType;` when the type matches an in-doc model.
     let needs_model_import = model_names.contains(&item_type.to_snake_case());
 
@@ -5576,18 +5584,15 @@ fn ensure_default_on_client_crud_models(doc: &mut DslDoc) {
         if t.kind != "client_crud" {
             continue;
         }
-        let item_type = t
-            .item_type
-            .clone()
-            .or_else(|| {
-                t.store.as_ref().and_then(|store_ref| {
-                    let key = store_ref.to_snake_case();
-                    doc.client_stores
-                        .iter()
-                        .find(|cs| cs.name.to_snake_case() == key)
-                        .map(|cs| cs.item_type.clone())
-                })
-            });
+        let item_type = t.item_type.clone().or_else(|| {
+            t.store.as_ref().and_then(|store_ref| {
+                let key = store_ref.to_snake_case();
+                doc.client_stores
+                    .iter()
+                    .find(|cs| cs.name.to_snake_case() == key)
+                    .map(|cs| cs.item_type.clone())
+            })
+        });
         if let Some(it) = item_type {
             needs_default.insert(it.to_snake_case());
         }
@@ -5596,10 +5601,7 @@ fn ensure_default_on_client_crud_models(doc: &mut DslDoc) {
         if !needs_default.contains(&m.name.to_snake_case()) {
             continue;
         }
-        let has_default = m
-            .derives
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case("Default"));
+        let has_default = m.derives.iter().any(|d| d.eq_ignore_ascii_case("Default"));
         if !has_default {
             m.derives.push("Default".to_string());
         }
@@ -6095,9 +6097,8 @@ fn remove_module_file(
     let mut touched_any = false;
 
     if leaf.exists() {
-        std::fs::remove_file(&leaf).map_err(|e| {
-            format!("remove: failed to delete {}: {e}", leaf.display())
-        })?;
+        std::fs::remove_file(&leaf)
+            .map_err(|e| format!("remove: failed to delete {}: {e}", leaf.display()))?;
         if !result.files_modified.iter().any(|p| p == &leaf) {
             result.files_modified.push(leaf);
         }
@@ -6486,8 +6487,8 @@ fn remove_struct_fields(
     use syn::spanned::Spanned;
     let mut any_removed = false;
     loop {
-        let parsed = syn::parse_file(&src)
-            .map_err(|e| format!("modify: parse {}: {e}", path.display()))?;
+        let parsed =
+            syn::parse_file(&src).map_err(|e| format!("modify: parse {}: {e}", path.display()))?;
         let target = parsed
             .items
             .iter()
@@ -6696,16 +6697,26 @@ mod tests {
         )
         .await
         .expect("filter call should succeed");
-        assert!(r.spec.contains("Model:"), "expected Model section, got:\n{}", r.spec);
+        assert!(
+            r.spec.contains("Model:"),
+            "expected Model section, got:\n{}",
+            r.spec
+        );
         assert!(
             r.spec.contains("ClientStore:"),
             "expected ClientStore section, got:\n{}",
             r.spec
         );
         // Other core sections must be excluded.
-        assert!(!r.spec.contains("Component:"), "Component should be filtered out");
+        assert!(
+            !r.spec.contains("Component:"),
+            "Component should be filtered out"
+        );
         assert!(!r.spec.contains("Screen:"), "Screen should be filtered out");
-        assert!(!r.spec.contains("ServerFn:"), "ServerFn should be filtered out");
+        assert!(
+            !r.spec.contains("ServerFn:"),
+            "ServerFn should be filtered out"
+        );
         assert!(!r.spec.contains("Modify:"), "Modify should be filtered out");
         // No extensions:` header when the filter only selects core sections.
         assert!(
@@ -6730,8 +6741,15 @@ mod tests {
         )
         .await
         .expect("filter call should succeed");
-        assert!(r.spec.contains("\nextensions:\n"), "expected extensions header");
-        assert!(r.spec.contains(" crud:\n"), "expected crud group, got:\n{}", r.spec);
+        assert!(
+            r.spec.contains("\nextensions:\n"),
+            "expected extensions header"
+        );
+        assert!(
+            r.spec.contains(" crud:\n"),
+            "expected crud group, got:\n{}",
+            r.spec
+        );
         assert!(r.spec.contains("Form:"), "expected Form section");
         // Other crud siblings must stay out when only `form` was requested.
         assert!(!r.spec.contains("List:\n"));
@@ -6753,15 +6771,27 @@ mod tests {
         .unwrap();
         let mut result = ScaffoldResult::default();
         remove_module_file(root, "src/components", "Hero", &mut result).unwrap();
-        assert!(!root.join("src/components/hero.rs").exists(), "leaf must be gone");
+        assert!(
+            !root.join("src/components/hero.rs").exists(),
+            "leaf must be gone"
+        );
         let mod_rs = std::fs::read_to_string(root.join("src/components/mod.rs")).unwrap();
-        assert!(!mod_rs.contains("hero"), "mod.rs still references hero:\n{mod_rs}");
-        assert!(mod_rs.contains("other"), "unrelated entry must survive:\n{mod_rs}");
+        assert!(
+            !mod_rs.contains("hero"),
+            "mod.rs still references hero:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("other"),
+            "unrelated entry must survive:\n{mod_rs}"
+        );
 
         // Second run: no-op.
         let mut result2 = ScaffoldResult::default();
         remove_module_file(root, "src/components", "Hero", &mut result2).unwrap();
-        assert!(result2.files_modified.is_empty(), "absent target must be no-op");
+        assert!(
+            result2.files_modified.is_empty(),
+            "absent target must be no-op"
+        );
     }
 
     #[test]
@@ -6787,13 +6817,19 @@ pub enum Route {
         remove_route_variant(root, "Home", &mut result).unwrap();
         let body = std::fs::read_to_string(root.join("src/router.rs")).unwrap();
         assert!(!body.contains("Home"), "Home variant survived:\n{body}");
-        assert!(!body.contains("#[route(\"/\")]"), "route attr survived:\n{body}");
+        assert!(
+            !body.contains("#[route(\"/\")]"),
+            "route attr survived:\n{body}"
+        );
         assert!(body.contains("About"), "unrelated variant must remain");
 
         // Second run: variant already gone → no-op.
         let mut result2 = ScaffoldResult::default();
         remove_route_variant(root, "Home", &mut result2).unwrap();
-        assert!(result2.files_modified.is_empty(), "absent variant must be no-op");
+        assert!(
+            result2.files_modified.is_empty(),
+            "absent variant must be no-op"
+        );
     }
 
     #[test]
@@ -6821,7 +6857,10 @@ pub enum Route {
         )
         .unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(!body.contains("legacy_code"), "field must be gone, got:\n{body}");
+        assert!(
+            !body.contains("legacy_code"),
+            "field must be gone, got:\n{body}"
+        );
         assert!(body.contains("pub id: i64,"), "kept fields untouched");
         assert!(body.contains("pub name: String,"));
         assert!(result.files_modified.iter().any(|p| p == &path));
@@ -6837,7 +6876,10 @@ pub enum Route {
             "model",
         )
         .unwrap();
-        assert!(result2.files_modified.is_empty(), "second run should be a no-op");
+        assert!(
+            result2.files_modified.is_empty(),
+            "second run should be a no-op"
+        );
     }
 
     #[test]
@@ -6977,10 +7019,17 @@ screens:
         assert!(r.spec.contains("Component:"), "expected Component in index");
         assert!(r.spec.contains("Form:"), "expected Form (crud) in index");
         // No spec-block fields should appear in index mode.
-        assert!(!r.spec.contains("template_kinds:"), "fields should be omitted");
+        assert!(
+            !r.spec.contains("template_kinds:"),
+            "fields should be omitted"
+        );
         assert!(!r.spec.contains("example:"), "examples should be omitted");
         // Should be well under 4KB — the full spec is ~10KB+.
-        assert!(r.spec.len() < 4096, "index too large: {} bytes", r.spec.len());
+        assert!(
+            r.spec.len() < 4096,
+            "index too large: {} bytes",
+            r.spec.len()
+        );
     }
 
     #[tokio::test]
@@ -7473,23 +7522,26 @@ screens:
 
         assert!(result.dry_run);
         let leaf = root.join("src/components/home_screen.rs");
-        let body = result
-            .previews
-            .get(&leaf)
-            .unwrap_or_else(|| panic!("expected preview for {}; got keys: {:?}", leaf.display(), result.previews.keys().collect::<Vec<_>>()));
+        let body = result.previews.get(&leaf).unwrap_or_else(|| {
+            panic!(
+                "expected preview for {}; got keys: {:?}",
+                leaf.display(),
+                result.previews.keys().collect::<Vec<_>>()
+            )
+        });
         // The default Screen template renders an `rsx!` block with the
         // screen-class root div — make sure the preview surface is the
         // actual generated body, not a path placeholder.
-        assert!(body.contains("rsx!"), "preview should include rsx! macro, got:\n{body}");
+        assert!(
+            body.contains("rsx!"),
+            "preview should include rsx! macro, got:\n{body}"
+        );
         assert!(
             body.contains("HomeScreen"),
             "preview should mention the component name, got:\n{body}"
         );
         // Sanity: dry_run must still not write anything to disk.
-        assert!(
-            !leaf.exists(),
-            "dry_run must not write the screen file"
-        );
+        assert!(!leaf.exists(), "dry_run must not write the screen file");
     }
 
     #[test]
@@ -7813,7 +7865,9 @@ screens:
         .expect("rerun should succeed");
         let main_rs_after = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
         assert_eq!(
-            main_rs_after.matches("Router::<crate::router::Route>").count(),
+            main_rs_after
+                .matches("Router::<crate::router::Route>")
+                .count(),
             1,
             "Router mount must not duplicate on re-run:\n{main_rs_after}"
         );
@@ -7898,7 +7952,10 @@ screens:
             .iter()
             .find(|s| s.contains("no `fn App()` found"))
             .unwrap_or_else(|| {
-                panic!("expected the wire_app no-App-fn hint, got {:?}", result.next_steps)
+                panic!(
+                    "expected the wire_app no-App-fn hint, got {:?}",
+                    result.next_steps
+                )
             });
         assert!(
             router_hint.starts_with("src/main.rs:"),
@@ -7981,9 +8038,10 @@ screens:
         .expect("execute_code should succeed when Routable lives in main.rs");
 
         assert!(
-            result.next_steps.iter().any(|s| {
-                s.contains("non-conventional") && s.contains("src/main.rs")
-            }),
+            result
+                .next_steps
+                .iter()
+                .any(|s| { s.contains("non-conventional") && s.contains("src/main.rs") }),
             "expected a non-conventional Routable warning naming src/main.rs, got next_steps={:?}",
             result.next_steps
         );
@@ -8078,7 +8136,10 @@ screens:
         .await
         .expect("execute_code should succeed");
         assert!(
-            !result.next_steps.iter().any(|s| s.contains("non-conventional")),
+            !result
+                .next_steps
+                .iter()
+                .any(|s| s.contains("non-conventional")),
             "no warning expected when Routable lives at src/router.rs, got next_steps={:?}",
             result.next_steps
         );
@@ -8204,11 +8265,13 @@ dioxus = { version = "0.7", features = ["web"] }
 "#;
         std::fs::write(root.join("Cargo.toml"), initial).unwrap();
         let r = ensure_dioxus_router_in_cargo_toml(root).unwrap();
-        assert!(matches!(r, DioxusRouterPatch::Patched(_)), "expected Patched");
+        assert!(
+            matches!(r, DioxusRouterPatch::Patched(_)),
+            "expected Patched"
+        );
         let new_text = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
         assert!(
-            new_text
-                .contains(r#"dioxus = { version = "0.7", features = ["web", "router"] }"#),
+            new_text.contains(r#"dioxus = { version = "0.7", features = ["web", "router"] }"#),
             "expected router appended to features, got:\n{new_text}"
         );
         // Re-running is a no-op.

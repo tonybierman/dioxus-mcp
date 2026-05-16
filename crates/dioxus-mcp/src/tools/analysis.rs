@@ -459,8 +459,7 @@ fn walk_lint(tokens: &[TokenTree], parent_is_component: bool, issues: &mut Vec<R
                     }
                     let starts_pipe =
                         matches!(tokens.get(k), Some(TokenTree::Punct(q)) if q.as_char() == '|');
-                    let ends_pipe =
-                        matches!(tokens.get(k + 1), Some(TokenTree::Punct(q)) if q.as_char() == '|');
+                    let ends_pipe = matches!(tokens.get(k + 1), Some(TokenTree::Punct(q)) if q.as_char() == '|');
                     if starts_pipe && ends_pipe {
                         let s = id.span().start();
                         issues.push(RsxIssue {
