@@ -569,6 +569,10 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #     touch 2–4 primitives — pulling the whole spec wastes tokens.
 #   - Pass `extensions: [crud, realtime, auth]` to also include extension
 #     blocks. Omit for the core surface only.
+#   - Pass `include_prologue: false` to drop this preamble on follow-up calls
+#     once you've already seen it (saves ~5KB per call).
+#   - Pass `include_examples: false` to strip the per-primitive `example:`
+#     blocks when you only need the field schema.
 #
 # Top-level shape:
 #   version: "1"
@@ -597,6 +601,17 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   types: scaffold the data layer here, then write your components against
 #   `crate::model::*` / `crate::state::*` directly. No `screens:` means no
 #   Routable mutation, no `Router::<...>` injection, no `provide_*` wiring.
+#
+# Keep-the-wiring, rewrite-the-body workflow:
+#   When a prompt asks for a "designed" or custom-styled Screen, do NOT skip
+#   the Screen primitive in favor of hand-writing the file from scratch. The
+#   route variant insert, component file + mod.rs entry, App-body
+#   `provide_*` + Router wiring, and (for resource templates) the server-fn
+#   binding are the bulk of the cost — and they're idempotent. The rsx!
+#   markup is the cheap part to rewrite. Scaffold the Screen, then open the
+#   generated file (each Screen emits a `next_steps` entry naming the
+#   rsx! line) and rewrite the body in place. Use `dry_run: true` to see the
+#   default body via the response's `previews:` map before committing.
 #
 # All field names are case-sensitive. Unknown fields are rejected.
 #
@@ -692,7 +707,7 @@ const CORE_COMPONENT: &str = r#"  Component:
 "#;
 
 const CORE_SCREEN: &str = r#"  Screen:
-    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=empty with `store:` set wires `use_<store>()` so you get the context plumbing without committing to the stock UI; kind=resource_list / kind=resource_form bind to server fns (use these for backend-backed CRUD); kind=client_crud binds to a `client_stores:` entry and emits add/toggle/delete handlers entirely client-side (no server fn needed — ideal for in-memory apps like todo lists). All template kinds accept `class:` to override the root `div`'s class string when the host project uses a design system (e.g. Tailwind) that conflicts with the default `\"screen {name}\"` pair."
+    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=empty with `store:` set wires `use_<store>()` so you get the context plumbing without committing to the stock UI; kind=resource_list / kind=resource_form bind to server fns (use these for backend-backed CRUD); kind=client_crud binds to a `client_stores:` entry and emits add/toggle/delete handlers entirely client-side (no server fn needed — ideal for in-memory apps like todo lists). All template kinds accept `class:` to override the root `div`'s class string when the host project uses a design system (e.g. Tailwind) that conflicts with the default `\"screen {name}\"` pair. WORKFLOW: scaffolding the Screen is still net-positive even when you plan to redesign the rsx! body — the route variant insert, the component file + mod.rs entry, the App-body provide_*/Router wiring, and (for resource templates) the server-fn binding are the bulk of the work. After running execute_code, open the file (next_steps gives `src/components/{snake}.rs:LINE` for the rsx! block) and rewrite the markup in place; the wiring stays correct. Use dry_run: true to preview the body via `previews:` before deciding."
     fields:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
@@ -2008,6 +2023,22 @@ pub struct GetDslSpecParams {
     /// extension scope).
     #[serde(default)]
     pub index_only: bool,
+    /// When false, omit the ~5KB authoring-guide preamble (workflow notes,
+    /// envelope conventions, etc.). Useful when `sections:` is set and the
+    /// caller has already seen the prologue earlier in the conversation.
+    /// Defaults to true for backward compatibility.
+    #[serde(default = "default_true")]
+    pub include_prologue: bool,
+    /// When false, strip the per-primitive `example:` block from each section
+    /// body. The field schema (`fields:`, `kinds:`, etc.) is still emitted.
+    /// Useful when the caller only needs to know what fields a primitive
+    /// accepts. Defaults to true.
+    #[serde(default = "default_true")]
+    pub include_examples: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -2131,8 +2162,18 @@ pub async fn get_dsl_spec(
         return Ok(GetDslSpecResult { spec: out });
     }
 
+    let render = |body: &str| -> String {
+        if p.include_examples {
+            body.to_string()
+        } else {
+            strip_examples(body)
+        }
+    };
+
     let mut out = String::new();
-    out.push_str(CORE_PREAMBLE);
+    if p.include_prologue {
+        out.push_str(CORE_PREAMBLE);
+    }
     out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
 
     let any_core = SECTIONS.iter().any(|(n, g, _)| *g == "core" && include(n, g));
@@ -2140,7 +2181,7 @@ pub async fn get_dsl_spec(
         out.push_str("\ncore:\n");
         for (name, group, body) in SECTIONS.iter().filter(|(_, g, _)| *g == "core") {
             if include(name, group) {
-                out.push_str(body);
+                out.push_str(&render(body));
             }
         }
     }
@@ -2159,13 +2200,38 @@ pub async fn get_dsl_spec(
             out.push_str(&format!(" {g}:\n"));
             for (name, group, body) in SECTIONS.iter().filter(|(_, sg, _)| sg == &g) {
                 if include(name, group) {
-                    out.push_str(&indent(body, " "));
+                    out.push_str(&indent(&render(body), " "));
                 }
             }
         }
     }
 
     Ok(GetDslSpecResult { spec: out })
+}
+
+/// Strip the `example:` block from a spec section body. Each block is the
+/// constant text in the `CORE_*` / `CRUD_*` / etc. statics, where the example
+/// is a 4-space-indented `example:` line followed by 6+-space-indented content
+/// (the example YAML) until the next 4-space sibling key or end-of-block.
+fn strip_examples(block: &str) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in block.lines() {
+        if skipping {
+            let leading = line.chars().take_while(|c| *c == ' ').count();
+            if line.is_empty() || leading > 4 {
+                continue;
+            }
+            skipping = false;
+        }
+        if line.starts_with("    example:") {
+            skipping = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Pull the primitive name (first non-empty line, stripped of indentation and
@@ -2303,6 +2369,21 @@ pub async fn execute_code(
         // would be removed via the standard would_modify channel.
         let mut plan = plan_dsl(&doc, &synth_server_fns, &crate_root);
         plan_removes(&mut plan, &doc, &crate_root);
+        plan.routable_file = detected_routable_file(&doc, &crate_root);
+        // Screen previews: render the body each Screen entry would emit so
+        // agents can inspect template output before committing. Skipped for
+        // entries whose target path collides (the existing file wins).
+        let collision_set: BTreeSet<&std::path::PathBuf> = plan.collisions.iter().collect();
+        for sc in &doc.screens {
+            let snake = sc.name.to_snake_case();
+            let leaf = leaf_for(&crate_root, "src/components", &snake);
+            if collision_set.contains(&leaf) {
+                continue;
+            }
+            if let Ok(body) = build_screen_body(&crate_root, sc, &doc.client_stores) {
+                plan.previews.insert(leaf, body);
+            }
+        }
         return Ok(plan);
     }
 
@@ -2351,6 +2432,7 @@ pub async fn execute_code(
     if let Some(w) = routable_warning {
         result.next_steps.push(w);
     }
+    result.routable_file = detected_routable_file(&doc, &crate_root);
 
     // Order matters: models first (so server fn return types and stores can
     // resolve them), then server fns (fail-fast on fullstack gating), then
@@ -3818,6 +3900,18 @@ struct BootstrapRouter {
     next_step: Option<String>,
 }
 
+/// Locate the file holding the `#[derive(Routable)]` enum so the response
+/// can report where new route variants will land. Returns None when the doc
+/// declares no routes (so no enum will be touched) or the project has no
+/// Routable enum on disk yet (the router-bootstrap step will create one at
+/// the canonical path; that path is already covered by `files_created`).
+fn detected_routable_file(doc: &DslDoc, crate_root: &Path) -> Option<std::path::PathBuf> {
+    if doc.screens.is_empty() && doc.login_screens.is_empty() {
+        return None;
+    }
+    scaffold::find_routable(crate_root)
+}
+
 /// Surface a hint when the doc would mutate a Routable enum that lives
 /// somewhere other than `src/router.rs` / `src/route.rs` (the conventions
 /// our scaffolds and search assume). We don't refuse to act — host files
@@ -3944,7 +4038,7 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
         let mut insertion = String::new();
         for s in &to_provide {
             insertion.push_str(&format!(
-                "{indent}let _ = crate::state::{s}::provide_{s}();\n"
+                "{indent}crate::state::{s}::provide_{s}();\n"
             ));
         }
         // Splice in just after the opening `{` of the App body. If the next
@@ -4519,6 +4613,40 @@ fn generate_protected_route(
     Ok(r)
 }
 
+/// Render a screen's source body without writing. Shared between
+/// `generate_screen` (which writes) and `plan_dsl` (which populates dry-run
+/// previews so agents can inspect the output before committing).
+fn build_screen_body(
+    crate_root: &Path,
+    sc: &DslScreen,
+    client_stores: &[DslClientStore],
+) -> Result<String, String> {
+    let pascal = sc.name.to_pascal_case();
+    let snake = sc.name.to_snake_case();
+    let wrap_pascal = sc.wrap_with.as_ref().map(|w| w.to_pascal_case());
+    match &sc.template {
+        None => render(
+            "screen",
+            SCREEN_TPL,
+            context! {
+                pascal => pascal.clone(),
+                snake => snake.clone(),
+                wrap_pascal => wrap_pascal.clone(),
+                root_class => default_screen_class(&snake),
+                store_snake => None::<String>,
+            },
+        ),
+        Some(t) => render_screen_template(
+            crate_root,
+            &pascal,
+            &snake,
+            wrap_pascal.as_deref(),
+            client_stores,
+            t,
+        ),
+    }
+}
+
 async fn generate_screen(
     state: &Arc<State>,
     crate_root: &Path,
@@ -4530,28 +4658,18 @@ async fn generate_screen(
     let snake = sc.name.to_snake_case();
     let wrap_pascal = sc.wrap_with.as_ref().map(|w| w.to_pascal_case());
 
-    let body = match &sc.template {
-        None => render(
-            "screen",
-            SCREEN_TPL,
-            context! {
-                pascal => pascal.clone(),
-                snake => snake.clone(),
-                wrap_pascal => wrap_pascal.clone(),
-                root_class => default_screen_class(&snake),
-                store_snake => None::<String>,
-            },
-        )?,
-        Some(t) => render_screen_template(
-            crate_root,
-            &pascal,
-            &snake,
-            wrap_pascal.as_deref(),
-            client_stores,
-            t,
-        )?,
-    };
+    let body = build_screen_body(crate_root, sc, client_stores)?;
+    // Locate the first `rsx!` macro in the generated body so the response can
+    // point the agent straight at the markup it'll most likely want to edit.
+    // The line number is computed pre-write and matches the on-disk file
+    // because we never re-flow the body between here and the write.
+    let rsx_line = first_rsx_line(&body);
     let mut r = write_component_file(crate_root, &snake, body)?;
+    if let Some(line) = rsx_line {
+        r.next_steps.push(format!(
+            "customize the markup in `src/components/{snake}.rs:{line}` (rsx! block)"
+        ));
+    }
     if let Some(w) = &wrap_pascal {
         r.next_steps.push(format!(
             "ensure `{w}` is exported from `crate::components` (e.g. emitted by a `protected_routes` entry or a hand-written component)"
@@ -4577,6 +4695,17 @@ async fn generate_screen(
 /// `template.class` overrides this verbatim.
 fn default_screen_class(snake: &str) -> String {
     format!("screen {snake}")
+}
+
+/// Find the line number (1-based) of the first `rsx!` macro invocation in a
+/// generated source body. Used to point the agent at the markup block in
+/// next_steps hints. Returns None when the body has no rsx! (shouldn't happen
+/// for a Screen template but kept as a guard).
+fn first_rsx_line(body: &str) -> Option<usize> {
+    body.lines()
+        .enumerate()
+        .find(|(_, l)| l.contains("rsx!"))
+        .map(|(i, _)| i + 1)
 }
 
 fn render_screen_template(
@@ -5388,10 +5517,11 @@ fn generate_client_store(
         },
     )?;
     // No server cfg gate — ClientStore runs in both wasm and server builds.
-    let mut r = write_module_file_with_cfg(crate_root, "src/state", &snake, body, None)?;
-    r.next_steps.push(format!(
-        "call `crate::state::{snake}::provide_{snake}()` in the root component (or any ancestor of the screens that read it) before `use_{snake}()` is called"
-    ));
+    // `provide_*` wiring is handled by wire_app_if_needed — it either splices
+    // the call into `fn App()` automatically or, on hand-rolled layouts,
+    // surfaces a tailored hint with the file path. Pushing a generic hint
+    // here would duplicate that messaging on every successful run.
+    let r = write_module_file_with_cfg(crate_root, "src/state", &snake, body, None)?;
     Ok(r)
 }
 
@@ -6543,6 +6673,8 @@ mod tests {
                 extensions: vec!["bogus".into()],
                 sections: vec![],
                 index_only: false,
+                include_prologue: true,
+                include_examples: true,
             },
         )
         .await;
@@ -6558,6 +6690,8 @@ mod tests {
                 extensions: vec![],
                 sections: vec!["model".into(), "client_store".into()],
                 index_only: false,
+                include_prologue: true,
+                include_examples: true,
             },
         )
         .await
@@ -6590,6 +6724,8 @@ mod tests {
                 extensions: vec![],
                 sections: vec!["form".into()],
                 index_only: false,
+                include_prologue: true,
+                include_examples: true,
             },
         )
         .await
@@ -6829,6 +6965,8 @@ screens:
                 extensions: vec!["crud".into()],
                 sections: vec![],
                 index_only: true,
+                include_prologue: true,
+                include_examples: true,
             },
         )
         .await
@@ -6846,6 +6984,67 @@ screens:
     }
 
     #[tokio::test]
+    async fn include_prologue_false_drops_the_preamble() {
+        let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+        let r = get_dsl_spec(
+            &dummy,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec!["model".into()],
+                index_only: false,
+                include_prologue: false,
+                include_examples: true,
+            },
+        )
+        .await
+        .expect("call should succeed");
+        // The preamble is the long "# Dioxus-MCP DSL spec" header. With it
+        // off, the output should start with the `version:` line — and the
+        // total size should drop substantially.
+        assert!(
+            !r.spec.contains("# Dioxus-MCP DSL spec"),
+            "preamble should be absent, got:\n{}",
+            r.spec
+        );
+        assert!(r.spec.contains("Model:"), "Model section must still ship");
+    }
+
+    #[tokio::test]
+    async fn include_examples_false_strips_example_blocks() {
+        let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+        let r = get_dsl_spec(
+            &dummy,
+            GetDslSpecParams {
+                extensions: vec!["crud".into()],
+                sections: vec![],
+                index_only: false,
+                // Drop the prologue so its commentary about `example:` doesn't
+                // confuse the assertion below.
+                include_prologue: false,
+                include_examples: false,
+            },
+        )
+        .await
+        .expect("call should succeed");
+        // Section headers and field schemas remain; example: YAML blocks gone.
+        assert!(r.spec.contains("Model:"), "Model section must still ship");
+        assert!(r.spec.contains("fields:"), "field schemas must still ship");
+        // Strip targets the literal `    example:` (4-space) line for core
+        // sections and `     example:` (5-space) for indented extension
+        // blocks. Neither shape should survive.
+        assert!(
+            !r.spec.contains("    example:"),
+            "core example blocks should be stripped, got:\n{}",
+            r.spec
+        );
+        assert!(
+            !r.spec.contains("     example:"),
+            "extension example blocks should be stripped, got:\n{}",
+            r.spec
+        );
+    }
+
+    #[tokio::test]
     async fn sections_filter_rejects_unknown_name() {
         let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
         let err = get_dsl_spec(
@@ -6854,6 +7053,8 @@ screens:
                 extensions: vec![],
                 sections: vec!["models".into()],
                 index_only: false,
+                include_prologue: true,
+                include_examples: true,
             },
         )
         .await
@@ -7233,6 +7434,64 @@ components:
         );
     }
 
+    #[tokio::test]
+    async fn dry_run_emits_screen_body_preview() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "preview_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7" }
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+screens:
+  - name: HomeScreen
+    route: /
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: true,
+                cargo_check: false,
+            },
+        )
+        .await
+        .expect("dry_run should succeed");
+
+        assert!(result.dry_run);
+        let leaf = root.join("src/components/home_screen.rs");
+        let body = result
+            .previews
+            .get(&leaf)
+            .unwrap_or_else(|| panic!("expected preview for {}; got keys: {:?}", leaf.display(), result.previews.keys().collect::<Vec<_>>()));
+        // The default Screen template renders an `rsx!` block with the
+        // screen-class root div — make sure the preview surface is the
+        // actual generated body, not a path placeholder.
+        assert!(body.contains("rsx!"), "preview should include rsx! macro, got:\n{body}");
+        assert!(
+            body.contains("HomeScreen"),
+            "preview should mention the component name, got:\n{body}"
+        );
+        // Sanity: dry_run must still not write anything to disk.
+        assert!(
+            !leaf.exists(),
+            "dry_run must not write the screen file"
+        );
+    }
+
     #[test]
     fn detects_multidoc_yaml() {
         assert!(has_extra_documents("a: 1\n---\nb: 2"));
@@ -7491,12 +7750,21 @@ screens:
             main_rs.contains(r#"div { "welcome" }"#),
             "original rsx children should be preserved, got:\n{main_rs}"
         );
-        // Structural checks: the let must land on its own line (not glued
-        // to the App body's `{`), and Router must be a child of the rsx
-        // block (not inserted between `rsx!` and its opening `{`).
+        // Structural checks: the provide_* call must land on its own line
+        // (not glued to the App body's `{`), and Router must be a child of
+        // the rsx block (not inserted between `rsx!` and its opening `{`).
         assert!(
-            !main_rs.contains("fn App() -> Element {    let "),
-            "provide_* let must start on a new line under fn App, got:\n{main_rs}"
+            !main_rs.contains("fn App() -> Element {    crate::state::"),
+            "provide_* call must start on a new line under fn App, got:\n{main_rs}"
+        );
+        // The injected call should be a bare statement (no `let _ =` prefix).
+        assert!(
+            main_rs.contains("crate::state::todo_store::provide_todo_store();"),
+            "provide_* must be emitted as a bare statement, got:\n{main_rs}"
+        );
+        assert!(
+            !main_rs.contains("let _ = crate::state::todo_store::provide_todo_store"),
+            "provide_* should not be wrapped in `let _ =`, got:\n{main_rs}"
         );
         assert!(
             !main_rs.contains("rsx! \n"),

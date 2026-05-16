@@ -148,6 +148,20 @@ pub struct ScaffoldResult {
     /// doc landed cleanly. Populated by `execute_code` at the end of the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// File containing the `#[derive(Routable)]` enum where new Screen /
+    /// LoginScreen variants will be inserted. Populated by `execute_code` when
+    /// the doc declares routes, both for dry_run plans and applied runs.
+    /// Useful when the enum lives somewhere other than `src/router.rs` (e.g.
+    /// inlined in `src/main.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routable_file: Option<PathBuf>,
+    /// Generated file contents keyed by would-be path. Populated by
+    /// `execute_code` in `dry_run: true` mode so the agent can preview what
+    /// a template emits without committing. Currently scoped to Screen bodies
+    /// (the main case where agents bypass the primitive because they can't
+    /// predict the output); other primitives stay path-only.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub previews: std::collections::BTreeMap<PathBuf, String>,
 }
 
 // ---------- create_component ----------

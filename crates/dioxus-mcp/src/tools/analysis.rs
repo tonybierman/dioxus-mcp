@@ -405,10 +405,15 @@ fn lint_rsx_tokens(m: &syn::Macro, _src: &str, issues: &mut Vec<RsxIssue>) {
     // dioxus-rsx crate (which is unstable across versions); this catches the
     // most common 0.7 mistakes without bringing in a full parser.
     let tokens: Vec<TokenTree> = m.tokens.clone().into_iter().collect();
-    walk_lint(&tokens, issues);
+    walk_lint(&tokens, false, issues);
 }
 
-fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
+/// `parent_is_component` is true when the surrounding brace group is the body
+/// of a component invocation (e.g. `MyComp { ... }`). It gates lints that only
+/// make sense for HTML element attributes — most notably the `onXxx:` empty-
+/// closure check, since a component prop named `onclick:` may legitimately be
+/// an `EventHandler<()>` / `Callback<()>` that takes no arguments.
+fn walk_lint(tokens: &[TokenTree], parent_is_component: bool, issues: &mut Vec<RsxIssue>) {
     // 1) `for ... { ... }` without a `key:` attribute somewhere in the body.
     //    Find the brace-delim body group specifically — earlier versions
     //    grabbed the first group of any delimiter, which mis-targeted
@@ -439,43 +444,62 @@ fn walk_lint(tokens: &[TokenTree], issues: &mut Vec<RsxIssue>) {
     }
 
     // 2) `onXxx: |..|` or `onXxx: move |..|` with empty closure params.
-    let mut j = 0;
-    while j + 2 < tokens.len() {
-        let (a, b) = (&tokens[j], &tokens[j + 1]);
-        if let (TokenTree::Ident(id), TokenTree::Punct(p)) = (a, b) {
-            let name = id.to_string();
-            if name.starts_with("on") && name.len() > 2 && p.as_char() == ':' {
-                let mut k = j + 2;
-                if matches!(tokens.get(k), Some(TokenTree::Ident(i)) if i == "move") {
-                    k += 1;
-                }
-                let starts_pipe =
-                    matches!(tokens.get(k), Some(TokenTree::Punct(q)) if q.as_char() == '|');
-                let ends_pipe =
-                    matches!(tokens.get(k + 1), Some(TokenTree::Punct(q)) if q.as_char() == '|');
-                if starts_pipe && ends_pipe {
-                    let s = id.span().start();
-                    issues.push(RsxIssue {
-                        line: s.line,
-                        column: s.column,
-                        message: format!(
-                            "`{name}` handler closure takes no parameters; in Dioxus it should accept an Event, e.g. `{name}: move |evt: Event<MouseData>| {{ ... }}`"
-                        ),
-                        file: None,
-                    });
+    //    Only meaningful inside an HTML element body — on component invocations
+    //    the prop type may legitimately be a zero-arg callback.
+    if !parent_is_component {
+        let mut j = 0;
+        while j + 2 < tokens.len() {
+            let (a, b) = (&tokens[j], &tokens[j + 1]);
+            if let (TokenTree::Ident(id), TokenTree::Punct(p)) = (a, b) {
+                let name = id.to_string();
+                if name.starts_with("on") && name.len() > 2 && p.as_char() == ':' {
+                    let mut k = j + 2;
+                    if matches!(tokens.get(k), Some(TokenTree::Ident(i)) if i == "move") {
+                        k += 1;
+                    }
+                    let starts_pipe =
+                        matches!(tokens.get(k), Some(TokenTree::Punct(q)) if q.as_char() == '|');
+                    let ends_pipe =
+                        matches!(tokens.get(k + 1), Some(TokenTree::Punct(q)) if q.as_char() == '|');
+                    if starts_pipe && ends_pipe {
+                        let s = id.span().start();
+                        issues.push(RsxIssue {
+                            line: s.line,
+                            column: s.column,
+                            message: format!(
+                                "`{name}` handler closure takes no parameters; in Dioxus it should accept an Event, e.g. `{name}: move |evt: Event<MouseData>| {{ ... }}`"
+                            ),
+                            file: None,
+                        });
+                    }
                 }
             }
+            j += 1;
         }
-        j += 1;
     }
 
-    // Recurse into groups so element bodies are scanned.
+    // Recurse into groups so element/component bodies are scanned. Track the
+    // immediately preceding ident so the recursed body knows whether it sits
+    // inside a component (uppercase) or an HTML element (lowercase).
+    let mut last_ident: Option<&proc_macro2::Ident> = None;
     for tt in tokens {
-        if let TokenTree::Group(g) = tt {
-            let inner: Vec<TokenTree> = g.stream().clone().into_iter().collect();
-            walk_lint(&inner, issues);
+        match tt {
+            TokenTree::Ident(id) => last_ident = Some(id),
+            TokenTree::Group(g) => {
+                let is_component = last_ident
+                    .map(|id| starts_uppercase(&id.to_string()))
+                    .unwrap_or(false);
+                let inner: Vec<TokenTree> = g.stream().clone().into_iter().collect();
+                walk_lint(&inner, is_component, issues);
+                last_ident = None;
+            }
+            _ => last_ident = None,
         }
     }
+}
+
+fn starts_uppercase(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
 
 /// Locate the `{ ... }` body group of a `for` loop. Skips groups with other
@@ -878,6 +902,78 @@ fn t() {
     let _ = rsx! {
         for p in vec![1, 2] {
             Row { key: "{p}", id: p }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn flags_empty_closure_on_element_event_handler() {
+        // HTML element `onclick: || { ... }` is wrong — handlers must accept
+        // an Event<MouseData>.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let _ = rsx! {
+        button { onclick: |_| {}, "noop" }
+        button { onclick: || {}, "bad" }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().any(|m| m.contains("takes no parameters")),
+            "expected onclick warning, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_for_zero_arg_closure_on_component_prop() {
+        // Component props named `onXxx:` can legitimately be `EventHandler<()>`
+        // or `Callback<()>` that take no args. Used to false-positive.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+#[derive(Clone, PartialEq, Props)]
+struct DialogProps { onclose: EventHandler<()> }
+#[component]
+fn Dialog(props: DialogProps) -> Element { rsx! {} }
+fn t() {
+    let _ = rsx! {
+        Dialog { onclose: move || {} }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("takes no parameters")),
+            "did not expect onclose warning on a component prop, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_key_on_component_with_tuple_destructure() {
+        // Closer to the shape users actually write: `for (id, label) in items`
+        // binding via destructure, then a component invocation with multiple
+        // props including `key:`. Guards against regressions where the tuple
+        // pattern's parens get mistaken for the loop body.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+#[derive(Clone, PartialEq, Props)]
+struct RowProps { id: i32, label: String }
+fn Row(props: RowProps) -> Element { rsx! {} }
+fn t() {
+    let items: Vec<(i32, String)> = vec![];
+    let _ = rsx! {
+        div {
+            for (id, label) in items {
+                Row { key: "{id}", id: id, label: label }
+            }
         }
     };
 }
