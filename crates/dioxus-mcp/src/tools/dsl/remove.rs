@@ -373,3 +373,133 @@ pub(super) fn remove_route_variant(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::modify::remove_struct_fields;
+    use super::*;
+
+    #[test]
+    fn remove_module_file_deletes_leaf_and_mod_entry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(root.join("src/components/hero.rs"), "// demo\n").unwrap();
+        std::fs::write(
+            root.join("src/components/mod.rs"),
+            "pub mod hero;\npub use hero::*;\npub mod other;\npub use other::*;\n",
+        )
+        .unwrap();
+        let mut result = ScaffoldResult::default();
+        remove_module_file(root, "src/components", "Hero", &mut result).unwrap();
+        assert!(
+            !root.join("src/components/hero.rs").exists(),
+            "leaf must be gone"
+        );
+        let mod_rs = std::fs::read_to_string(root.join("src/components/mod.rs")).unwrap();
+        assert!(
+            !mod_rs.contains("hero"),
+            "mod.rs still references hero:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("other"),
+            "unrelated entry must survive:\n{mod_rs}"
+        );
+
+        // Second run: no-op.
+        let mut result2 = ScaffoldResult::default();
+        remove_module_file(root, "src/components", "Hero", &mut result2).unwrap();
+        assert!(
+            result2.files_modified.is_empty(),
+            "absent target must be no-op"
+        );
+    }
+
+    #[test]
+    fn remove_route_variant_drops_variant_and_its_route_attr() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Routable, Clone, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/about")]
+    About {},
+}
+"#,
+        )
+        .unwrap();
+        let mut result = ScaffoldResult::default();
+        remove_route_variant(root, "Home", &mut result).unwrap();
+        let body = std::fs::read_to_string(root.join("src/router.rs")).unwrap();
+        assert!(!body.contains("Home"), "Home variant survived:\n{body}");
+        assert!(
+            !body.contains("#[route(\"/\")]"),
+            "route attr survived:\n{body}"
+        );
+        assert!(body.contains("About"), "unrelated variant must remain");
+
+        // Second run: variant already gone → no-op.
+        let mut result2 = ScaffoldResult::default();
+        remove_route_variant(root, "Home", &mut result2).unwrap();
+        assert!(
+            result2.files_modified.is_empty(),
+            "absent variant must be no-op"
+        );
+    }
+
+    #[test]
+    fn remove_model_field_drops_named_field_and_is_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("widget.rs");
+        std::fs::write(
+            &path,
+            r#"pub struct Widget {
+    pub id: i64,
+    pub name: String,
+    pub legacy_code: String,
+}
+"#,
+        )
+        .unwrap();
+        let mut result = ScaffoldResult::default();
+        remove_struct_fields(
+            &path,
+            "Widget",
+            &["legacy_code".to_string()],
+            false,
+            &mut result,
+            "model",
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("legacy_code"),
+            "field must be gone, got:\n{body}"
+        );
+        assert!(body.contains("pub id: i64,"), "kept fields untouched");
+        assert!(body.contains("pub name: String,"));
+        assert!(result.files_modified.iter().any(|p| p == &path));
+
+        // Second run: no-op, no extra files_modified entry.
+        let mut result2 = ScaffoldResult::default();
+        remove_struct_fields(
+            &path,
+            "Widget",
+            &["legacy_code".to_string()],
+            false,
+            &mut result2,
+            "model",
+        )
+        .unwrap();
+        assert!(
+            result2.files_modified.is_empty(),
+            "second run should be a no-op"
+        );
+    }
+}

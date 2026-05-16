@@ -121,3 +121,70 @@ pub(crate) fn is_primitive_integer_ty(ty: &str) -> bool {
             | "usize"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_store_auto_id_emits_push_new_and_next_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: None,
+            auto_id: Some(true),
+        };
+        let r = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap();
+        let file = r
+            .files_created
+            .iter()
+            .find(|p| p.ends_with("todo_store.rs"))
+            .expect("store file must be in files_created");
+        let body = std::fs::read_to_string(file).unwrap();
+        assert!(
+            body.contains("pub fn push_new(self, mut item: Todo)"),
+            "push_new must be emitted, got:\n{body}"
+        );
+        assert!(
+            body.contains("next_id: Signal<i64>"),
+            "next_id field must be present, got:\n{body}"
+        );
+        assert!(
+            body.contains("Signal::new(1i64)"),
+            "next_id init must use typed literal, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn client_store_auto_id_requires_id_field() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: None,
+            id_type: None,
+            auto_id: Some(true),
+        };
+        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap_err();
+        assert!(err.contains("id_field"), "got: {err}");
+    }
+
+    #[test]
+    fn client_store_auto_id_rejects_non_integer_id_type() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: Some("String".into()),
+            auto_id: Some(true),
+        };
+        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap_err();
+        assert!(err.contains("primitive integer"), "got: {err}");
+    }
+}

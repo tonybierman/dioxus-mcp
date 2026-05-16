@@ -215,3 +215,129 @@ pub(super) fn append_dep_to_cargo_toml(
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_serde_no_op_when_already_correct() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "ok"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+"#,
+        )
+        .unwrap();
+        match ensure_serde_in_cargo_toml(root).unwrap() {
+            SerdePatch::AlreadyOk => {}
+            _ => panic!("expected AlreadyOk for serde with derive feature"),
+        }
+    }
+
+    #[test]
+    fn ensure_serde_reports_missing_derive_feature() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "missing_derive"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "1"
+"#,
+        )
+        .unwrap();
+        match ensure_serde_in_cargo_toml(root).unwrap() {
+            SerdePatch::PresentWithoutDeriveFeature => {}
+            other => panic!(
+                "expected PresentWithoutDeriveFeature, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn ensure_dioxus_router_skips_when_fullstack_already_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "rt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        )
+        .unwrap();
+        match ensure_dioxus_router_in_cargo_toml(root).unwrap() {
+            DioxusRouterPatch::AlreadyOk => {}
+            _ => panic!("expected AlreadyOk for dioxus with fullstack feature"),
+        }
+    }
+
+    #[test]
+    fn ensure_dioxus_router_appends_router_to_features() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let initial = r#"[package]
+name = "rt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+"#;
+        std::fs::write(root.join("Cargo.toml"), initial).unwrap();
+        let r = ensure_dioxus_router_in_cargo_toml(root).unwrap();
+        assert!(
+            matches!(r, DioxusRouterPatch::Patched(_)),
+            "expected Patched"
+        );
+        let new_text = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(
+            new_text.contains(r#"dioxus = { version = "0.7", features = ["web", "router"] }"#),
+            "expected router appended to features, got:\n{new_text}"
+        );
+        // Re-running is a no-op.
+        match ensure_dioxus_router_in_cargo_toml(root).unwrap() {
+            DioxusRouterPatch::AlreadyOk => {}
+            _ => panic!("expected AlreadyOk on second run"),
+        }
+    }
+
+    #[test]
+    fn ensure_dioxus_router_hints_when_bare_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "rt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = "0.7"
+"#,
+        )
+        .unwrap();
+        match ensure_dioxus_router_in_cargo_toml(root).unwrap() {
+            DioxusRouterPatch::DioxusNotATable => {}
+            _ => panic!("expected DioxusNotATable for bare-version dep"),
+        }
+    }
+}

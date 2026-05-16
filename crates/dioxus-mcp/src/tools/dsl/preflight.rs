@@ -409,3 +409,222 @@ pub(super) fn preflight(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::remove::synthesize_replace_route_removes;
+    use super::*;
+
+    #[test]
+    fn preflight_rejects_two_screens_with_same_route() {
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: HomeScreen
+    route: /
+  - name: LandingScreen
+    route: /
+"#,
+        )
+        .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(
+            err.contains("route path") && err.contains("declared twice"),
+            "expected route-path collision error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_screen_and_login_with_same_route() {
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+login_screens:
+  - name: Login
+    route: /entry
+    redirect_on_success: /
+screens:
+  - name: EntryScreen
+    route: /entry
+"#,
+        )
+        .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(
+            err.contains("/entry"),
+            "expected the conflicting path in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_route_already_in_on_disk_routable_enum() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: Customers
+    route: /users
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(
+            err.contains("/users") && err.contains("User"),
+            "error should name the colliding path and the existing variant, got: {err}"
+        );
+        assert!(
+            err.contains("remove_route"),
+            "error should suggest the remove_route option, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_route_collision_check_skips_doc_remove_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+remove:
+  - kind: remove_route
+    variant: User
+screens:
+  - name: Customers
+    route: /users
+"#,
+        )
+        .unwrap();
+        preflight(&doc, &[], dir.path(), false)
+            .expect("remove of conflicting variant should be respected");
+    }
+
+    #[test]
+    fn preflight_route_collision_check_allows_idempotent_rerun() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/components")).unwrap();
+        std::fs::write(dir.path().join("src/components/user.rs"), "// existing\n").unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: User
+    route: /users
+"#,
+        )
+        .unwrap();
+        preflight(&doc, &[], dir.path(), true).expect("idempotent re-run should pass pre-flight");
+    }
+
+    #[test]
+    fn replace_route_synthesizes_remove_for_colliding_variant() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: Customers
+    route: /users
+    replace_route: true
+"#,
+        )
+        .unwrap();
+        synthesize_replace_route_removes(&mut doc, dir.path());
+        let has_remove_user = doc.remove.iter().any(|r| {
+            matches!(r,
+                DslRemove::RemoveRoute { variant } if variant == "User")
+        });
+        assert!(
+            has_remove_user,
+            "expected a synthesized RemoveRoute for User, got: {:?}",
+            doc.remove
+        );
+        preflight(&doc, &[], dir.path(), false)
+            .expect("collision should be resolved by replace_route");
+    }
+
+    #[test]
+    fn replace_route_is_noop_when_no_collision() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/home")]
+    Home {},
+}
+"#,
+        )
+        .unwrap();
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: Customers
+    route: /users
+    replace_route: true
+"#,
+        )
+        .unwrap();
+        synthesize_replace_route_removes(&mut doc, dir.path());
+        assert!(
+            doc.remove.is_empty(),
+            "no existing collision → no synthesized removes, got: {:?}",
+            doc.remove
+        );
+    }
+}

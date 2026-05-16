@@ -550,3 +550,92 @@ pub(super) async fn generate_synth_server_fn(
         ..Default::default()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_crud_screen_auto_adds_default_to_referenced_model() {
+        // The client_crud Screen body uses `..Default::default()` in the
+        // "add" form constructor. If the user-authored model didn't include
+        // `Default` in `derives:`, we should add it during the pre-pass so
+        // the generated code compiles.
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+      - {name: done, type: bool}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#,
+        )
+        .unwrap();
+        // Sanity: user didn't ask for Default.
+        assert!(doc.models[0].derives.is_empty());
+
+        ensure_default_on_client_crud_models(&mut doc);
+        assert!(
+            doc.models[0].derives.iter().any(|d| d == "Default"),
+            "expected `Default` auto-added to Todo model, got derives = {:?}",
+            doc.models[0].derives
+        );
+
+        // Idempotent: running the pre-pass again is a no-op.
+        ensure_default_on_client_crud_models(&mut doc);
+        let default_count = doc.models[0]
+            .derives
+            .iter()
+            .filter(|d| *d == "Default")
+            .count();
+        assert_eq!(
+            default_count, 1,
+            "auto-add must be idempotent, got derives = {:?}",
+            doc.models[0].derives
+        );
+    }
+
+    #[test]
+    fn client_crud_screen_respects_existing_default_derive() {
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#,
+        )
+        .unwrap();
+        ensure_default_on_client_crud_models(&mut doc);
+        assert_eq!(doc.models[0].derives, vec!["Default".to_string()]);
+    }
+}
