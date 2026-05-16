@@ -142,59 +142,9 @@ After a rebuild, restart Claude Code to pick up the new binary.
 - Targets Dioxus 0.7. Older versions will run but the audit/lints
   reflect 0.7 conventions.
 
-## Runtime probe
-
-The `dioxus-mcp-probe` workspace member is a tiny runtime companion. Add
-it to your Dioxus app and call `install()` once at startup; it spins up a
-background thread that writes a JSON-lines event log to
-`target/dioxus-mcp/events.jsonl`. The MCP `runtime_events` tool tails
-that file.
-
-```toml
-# in your Dioxus app's Cargo.toml
-[dev-dependencies]
-dioxus-mcp-probe = { git = "https://github.com/tonybierman/dioxus-mcp", tag = "probe-v0.1.2" }
-```
-
-```rust
-fn main() {
-    let _probe = dioxus_mcp_probe::install();
-    // your dioxus app entry point
-}
-```
-
-The probe is a no-op outside `debug_assertions` (override with the
-`force` cargo feature). Capture is best-effort: a bounded queue drops
-events under load rather than blocking renders, and the log file rotates
-at 10 MiB.
-
-## Tests
-
-```
-cargo test --workspace        # MCP integration suite + probe unit tests
-cargo test -- --ignored       # also runs live-HTTP search_docs / find_example
-```
-
-Tests spawn the binary over stdio and assert on each tool's response
-against `crates/dioxus-mcp/tests/fixtures/sample-project/` — a hand-crafted Dioxus
-source tree where every file's purpose is to trigger meaningful
-output from one or more tools. Headers in each fixture file name
-which tool(s) it exercises.
-
-## Transports
-
-- `stdio` (default) — for direct MCP clients like Claude Code.
-- `--transport http --bind 127.0.0.1:8731` — streamable HTTP, for IDEs
-  or remote clients.
-
-## Configuration flags
-
-```
---transport stdio|http     transport (default: stdio)
---bind HOST:PORT           HTTP bind address (default: 127.0.0.1:8731)
---project-root PATH        pin a project root (default: CWD)
---log LEVEL                tracing filter (default: info)
-```
+For the runtime probe install, transports, configuration flags, and the
+test suite layout, see
+[TOOLS_REFERENCE.md](TOOLS_REFERENCE.md#runtime-probe).
 
 ## License
 
