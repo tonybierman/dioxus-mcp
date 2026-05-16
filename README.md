@@ -160,10 +160,20 @@ Licensed under the [GNU General Public License v3.0 or later](LICENSE).
 
 ### Commercial licensing
 
-GPL-3.0 requires that derivative works also be distributed under GPL-3.0,
-with source available. If that doesn't fit your use case — for example,
-embedding `dioxus-mcp` in proprietary or closed-source software, or
-distributing it as part of a product you don't want to GPL — a separate
-commercial license is available.
+A separate commercial license is available when GPL-3.0 doesn't fit.
+Common reasons:
+
+- **You're shipping `dioxus-mcp` inside a proprietary product.** Bundling,
+  embedding, or distributing it as part of closed-source software triggers
+  GPL's copyleft requirements; a commercial license removes them.
+- **Your organization's policy excludes GPL software**, even for internal
+  use. Common in finance, defense, healthcare, and large enterprise IT.
+- **You need commercial terms** — support, warranty, indemnification, or a
+  license your legal team can sign off on without a GPL compliance review.
+
+> Note: GPL-3.0 already permits **internal corporate use** (including
+> internal SaaS) with no source-disclosure obligation — distribution is
+> what triggers copyleft. The commercial license exists for cases where
+> GPL itself is the friction, not the legal text.
 
 Contact **tonybierman@gmail.com** to discuss terms.
