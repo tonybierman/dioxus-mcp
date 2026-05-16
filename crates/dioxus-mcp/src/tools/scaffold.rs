@@ -142,6 +142,12 @@ pub struct ScaffoldResult {
     /// True when the result is a dry-run plan rather than an applied change.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
+    /// High-level outcome of the call. `"no_changes"` when nothing was written
+    /// (everything collided under if_missing); `"partial"` when at least one
+    /// primitive was skipped but others applied; `"applied"` when the whole
+    /// doc landed cleanly. Populated by `execute_code` at the end of the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 // ---------- create_component ----------
@@ -473,11 +479,7 @@ pub(crate) fn upsert_crate_mod(crate_root: &Path, module: &str) -> Result<Option
         }
         while i < lines.len() {
             let t = lines[i].trim();
-            if t.is_empty()
-                || t.starts_with("#![")
-                || t.starts_with("//!")
-                || t.starts_with("//")
-            {
+            if t.is_empty() || t.starts_with("#![") || t.starts_with("//!") || t.starts_with("//") {
                 i += 1;
             } else {
                 break;

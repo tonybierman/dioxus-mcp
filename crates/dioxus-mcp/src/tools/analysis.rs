@@ -719,11 +719,12 @@ server = ["dioxus/server"]
 [dependencies]
 dioxus = { version = "0.7", features = ["fullstack"] }
 "#;
-        let effective = collect_effective_dioxus_features(
-            &["fullstack".to_string()],
-            Some(manifest),
+        let effective =
+            collect_effective_dioxus_features(&["fullstack".to_string()], Some(manifest));
+        assert!(
+            effective.contains(&"fullstack".to_string()),
+            "{effective:?}"
         );
-        assert!(effective.contains(&"fullstack".to_string()), "{effective:?}");
         assert!(effective.contains(&"web".to_string()), "{effective:?}");
         // `server` should NOT appear: cargo only activates default features
         // and `server` isn't in default. The walk is correct in skipping it.
@@ -769,7 +770,10 @@ dioxus = { version = "0.7", features = ["fullstack", "web"] }
             &["fullstack".to_string(), "web".to_string()],
             Some(manifest),
         );
-        assert!(effective.contains(&"fullstack".to_string()), "{effective:?}");
+        assert!(
+            effective.contains(&"fullstack".to_string()),
+            "{effective:?}"
+        );
         assert!(effective.contains(&"web".to_string()), "{effective:?}");
     }
 }

@@ -1,3 +1,7 @@
 [workspace]
+members = [
+    "crates/dioxus-mcp",
+    "crates/probe",
+    "examples/smoke-app",
+]
 resolver = "2"
-members = ["crates/dioxus-mcp", "crates/probe", "examples/smoke-app"]

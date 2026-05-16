@@ -685,42 +685,6 @@ const CORE_RESOURCE: &str = r#"  Resource:
             - {name: name, type: String}
 "#;
 
-/// Canonical end-to-end recipes. These are *complete* DSL docs the caller can
-/// hand to `execute_code` verbatim — one call, one app. Added because the
-/// per-primitive examples assumed server-fn-backed CRUD and never demonstrated
-/// the client-only "hello world beyond a counter" shape (TODO4 §3).
-const CORE_RECIPES: &str = r#"  recipes:
-    todo_app:
-      description: "A client-only todo app — one Model, one ClientStore, one Screen. No server fn round-trip. Pass this YAML verbatim to execute_code; the result is a runnable app once you wire `provide_todo_store()` into your root component."
-      one_call_to: execute_code
-      yaml: |
-        version: "1"
-        models:
-          - name: Todo
-            derives: [Default]
-            fields:
-              - {name: id, type: i64}
-              - {name: title, type: String}
-              - {name: done, type: bool}
-        client_stores:
-          - name: TodoStore
-            item_type: Todo
-            id_field: id
-            id_type: i64
-        screens:
-          - name: TodoScreen
-            route: /
-            template:
-              kind: client_crud
-              store: TodoStore
-              item_type: Todo
-              label_field: title
-              checkbox_field: done
-      next_steps:
-        - "Call `crate::state::todo_store::provide_todo_store()` once in your app's root component (above the `Router` / above `TodoScreen`)."
-        - "No `Cargo.toml` changes required beyond what `dx new` already gives you."
-"#;
-
 const CORE_MODIFY: &str = r#"  Modify:
     description: "In-place edits to items that already exist on disk. Each entry is idempotent — fields/props/args already present are skipped and identical re-runs produce no diff. Targets must exist on disk; pass `if_missing: true` on execute_code to skip missing targets (they are recorded under `collisions`) instead of erroring. Currently three edit kinds are supported."
     kinds:
@@ -1486,7 +1450,8 @@ impl {{ pascal }} {
         let mut items = self.items;
         let before = items.read().len();
         items.write().retain(|x| x.{{ id_field }} != id);
-        items.read().len() < before
+        let after = items.read().len();
+        after < before
     }
 
     pub fn update_by_id(self, id: {{ id_type }}, f: impl FnOnce(&mut {{ item_type }})) {
@@ -1842,7 +1807,6 @@ pub async fn get_dsl_spec(
     out.push_str(CORE_SCREEN);
     out.push_str(CORE_SERVER_FN);
     out.push_str(CORE_MODIFY);
-    out.push_str(CORE_RECIPES);
 
     let want = |k: &str| p.extensions.iter().any(|e| e.eq_ignore_ascii_case(k));
     let any_ext = p.extensions.iter().any(|e| {
@@ -1951,6 +1915,12 @@ pub async fn execute_code(
         return Ok(plan_dsl(&doc, &synth_server_fns, &crate_root));
     }
 
+    // Global preconditions that the per-primitive emitters used to discover
+    // *after* writing files (and that left the project in a half-written state
+    // on failure). Run these first so the call is atomic — either everything
+    // applies or nothing does.
+    let bootstrap = bootstrap_router_if_needed(&doc, &crate_root)?;
+
     let skip: BTreeSet<std::path::PathBuf> = if p.if_missing {
         skip_set(&doc, &synth_server_fns, &crate_root)
     } else {
@@ -1969,11 +1939,18 @@ pub async fn execute_code(
         .collect();
 
     let mut result = ScaffoldResult::default();
+    // Fold in any router-bootstrap output up front so files_created/modified
+    // (and the wiring `next_step`) appear in the response even when the rest
+    // of the call is a no-op re-run.
+    result.files_created.extend(bootstrap.created);
+    result.files_modified.extend(bootstrap.modified);
+    if let Some(s) = bootstrap.next_step {
+        result.next_steps.push(s);
+    }
 
     // Order matters: models first (so server fn return types and stores can
     // resolve them), then server fns (fail-fast on fullstack gating), then
     // leaf primitives, then screens (which call create_route serially).
-    let mut models_emitted = false;
     for m in &doc.models {
         if skip_or_record(
             &skip,
@@ -1984,7 +1961,6 @@ pub async fn execute_code(
         }
         let r = generate_model(&crate_root, m)?;
         merge(&mut result, r);
-        models_emitted = true;
     }
 
     for sf in &doc.server_fns {
@@ -2029,11 +2005,8 @@ pub async fn execute_code(
         merge(&mut result, r);
     }
 
-    let model_names_for_imports: BTreeSet<String> = doc
-        .models
-        .iter()
-        .map(|m| m.name.to_snake_case())
-        .collect();
+    let model_names_for_imports: BTreeSet<String> =
+        doc.models.iter().map(|m| m.name.to_snake_case()).collect();
     for cs in &doc.client_stores {
         if skip_or_record(
             &skip,
@@ -2176,11 +2149,25 @@ pub async fn execute_code(
     }
 
     for ls in &doc.login_screens {
-        if skip_or_record(
-            &skip,
-            &mut result,
-            leaf_for(&crate_root, "src/components", &ls.name),
-        ) {
+        let leaf = leaf_for(&crate_root, "src/components", &ls.name);
+        if skip.contains(&leaf) {
+            // Body already on disk; still run the idempotent route insert so
+            // a re-run after a partial failure finishes the wiring. Without
+            // this, the response on rerun says `next_steps: []` even though
+            // the Routable variant was never added.
+            result.collisions.push(leaf);
+            let route = scaffold::create_route(
+                state,
+                CreateRouteParams {
+                    path: ls.route.clone(),
+                    component: ls.name.to_pascal_case(),
+                    router_file: None,
+                    project_root: p.project_root.clone(),
+                    params: Vec::new(),
+                },
+            )
+            .await?;
+            merge(&mut result, route);
             continue;
         }
         let r = generate_login_screen(state, &crate_root, ls, p.project_root.as_deref()).await?;
@@ -2200,11 +2187,22 @@ pub async fn execute_code(
     }
 
     for sc in &doc.screens {
-        if skip_or_record(
-            &skip,
-            &mut result,
-            leaf_for(&crate_root, "src/components", &sc.name),
-        ) {
+        let leaf = leaf_for(&crate_root, "src/components", &sc.name);
+        if skip.contains(&leaf) {
+            // See login_screens loop above: idempotent route insert on skip.
+            result.collisions.push(leaf);
+            let route = scaffold::create_route(
+                state,
+                CreateRouteParams {
+                    path: sc.route.clone(),
+                    component: sc.name.to_pascal_case(),
+                    router_file: None,
+                    project_root: p.project_root.clone(),
+                    params: sc.route_params.clone(),
+                },
+            )
+            .await?;
+            merge(&mut result, route);
             continue;
         }
         let r = generate_screen(
@@ -2251,7 +2249,12 @@ pub async fn execute_code(
         ));
     }
 
-    if models_emitted {
+    // Patch Cargo.toml whenever the doc declares models — not just when a
+    // model file was emitted this run. A re-run with `if_missing: true` skips
+    // every model write but still needs the serde dep to be in place; without
+    // this, a first-call partial failure followed by a successful re-run could
+    // leave Cargo.toml unpatched.
+    if !doc.models.is_empty() {
         match ensure_serde_in_cargo_toml(&crate_root) {
             Ok(SerdePatch::AlreadyOk) => {}
             Ok(SerdePatch::Patched(path)) => {
@@ -2287,6 +2290,18 @@ pub async fn execute_code(
     // occurrence, formatted `path:line — message`. Lets the caller jump
     // straight to the body lines that still need a human (TODO4 §4.2).
     append_todo_next_steps(&mut result, &crate_root);
+
+    // High-level outcome so callers don't have to interpret three vector
+    // lengths. `no_changes` means everything collided (a totally idempotent
+    // re-run); `partial` means at least one primitive was skipped while the
+    // rest applied; `applied` is the clean-run case.
+    let touched = !result.files_created.is_empty() || !result.files_modified.is_empty();
+    let collided = !result.collisions.is_empty();
+    result.status = Some(match (touched, collided) {
+        (false, true) => "no_changes".into(),
+        (true, true) => "partial".into(),
+        _ => "applied".into(),
+    });
 
     Ok(result)
 }
@@ -2385,9 +2400,7 @@ fn append_dep_to_cargo_toml(text: &str, dep_name: &str, line: &str) -> Result<St
     let lines: Vec<&str> = text.lines().collect();
     // Find the `[dependencies]` header; only the literal `[dependencies]` table
     // (not `[dependencies.foo]` sub-tables, which write a single dep each).
-    let header_idx = lines
-        .iter()
-        .position(|l| l.trim() == "[dependencies]");
+    let header_idx = lines.iter().position(|l| l.trim() == "[dependencies]");
     if let Some(idx) = header_idx {
         // Insert right after the header (top of the table block).
         let mut new_lines: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
@@ -2963,6 +2976,99 @@ fn preflight(
     Ok(())
 }
 
+/// If the doc declares any routable primitive (Screen, LoginScreen) and no
+/// Routable enum exists anywhere under src/, write a minimal `src/router.rs`
+/// seeded with every declared route, and inject `pub mod router;` into the
+/// crate root. Makes `dx new` → `execute_code` runnable in one call instead
+/// of erroring on the first screen with "no Routable enum on disk".
+///
+/// Returns the list of paths created/modified by the bootstrap (caller merges
+/// these into the top-level result so the response stays honest).
+fn bootstrap_router_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<BootstrapRouter, String> {
+    if scaffold::find_routable(crate_root).is_some() {
+        return Ok(BootstrapRouter::default());
+    }
+    // Order matches declaration order in the doc: login_screens first (so the
+    // login route lands before any post-auth screens), then screens.
+    struct SeedRoute {
+        variant: String,
+        path: String,
+        params: Vec<(String, String)>,
+    }
+    let mut entries: Vec<SeedRoute> = Vec::new();
+    for ls in &doc.login_screens {
+        entries.push(SeedRoute {
+            variant: ls.name.to_pascal_case(),
+            path: ls.route.clone(),
+            params: Vec::new(),
+        });
+    }
+    for sc in &doc.screens {
+        entries.push(SeedRoute {
+            variant: sc.name.to_pascal_case(),
+            path: sc.route.clone(),
+            params: sc.route_params.clone(),
+        });
+    }
+    if entries.is_empty() {
+        return Ok(BootstrapRouter::default());
+    }
+    let mut body = String::from("use dioxus::prelude::*;\n\n");
+    body.push_str("#[derive(Routable, Clone, PartialEq)]\n");
+    body.push_str("pub enum Route {\n");
+    for SeedRoute {
+        variant,
+        path,
+        params,
+    } in &entries
+    {
+        let field_inner = if params.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " {} ",
+                params
+                    .iter()
+                    .map(|(n, t)| format!("{n}: {t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        body.push_str(&format!("    #[route(\"{path}\")]\n"));
+        body.push_str(&format!("    {variant} {{{field_inner}}},\n"));
+    }
+    body.push_str("}\n");
+
+    let router_path = crate_root.join("src/router.rs");
+    if let Some(parent) = router_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&router_path, body).map_err(|e| e.to_string())?;
+
+    let mut out = BootstrapRouter {
+        created: vec![router_path],
+        modified: Vec::new(),
+        next_step: Some(
+            "auto-created `src/router.rs` with a Routable enum seeded from the declared screens — \
+             mount it in your App component as `Router::<crate::router::Route> {}` (and make sure \
+             your Cargo.toml's `dioxus` dep includes the `router` feature, which `dx new` enables \
+             via `fullstack`)."
+                .into(),
+        ),
+    };
+    if let Some(p) = scaffold::upsert_crate_mod(crate_root, "router")? {
+        out.modified.push(p);
+    }
+    Ok(out)
+}
+
+#[derive(Default)]
+struct BootstrapRouter {
+    created: Vec<std::path::PathBuf>,
+    modified: Vec<std::path::PathBuf>,
+    next_step: Option<String>,
+}
+
 // ---------- per-primitive generators ----------
 
 fn render(name: &str, tpl: &str, ctx: minijinja::Value) -> Result<String, String> {
@@ -3498,8 +3604,7 @@ fn render_screen_template(
                 .fields
                 .iter()
                 .map(|fd| {
-                    let is_bool = fd.ty == "checkbox"
-                        || fd.rust_type.as_deref() == Some("bool");
+                    let is_bool = fd.ty == "checkbox" || fd.rust_type.as_deref() == Some("bool");
                     let initial = if is_bool {
                         "false".to_string()
                     } else {
@@ -3544,9 +3649,7 @@ fn render_screen_template(
                 },
             )
         }
-        "client_crud" => {
-            render_client_crud_screen(pascal, snake, wrap_pascal, client_stores, t)
-        }
+        "client_crud" => render_client_crud_screen(pascal, snake, wrap_pascal, client_stores, t),
         other => Err(format!(
             "unknown screen template kind {other:?} (expected: empty, resource_list, resource_form, client_crud)"
         )),
@@ -3561,9 +3664,7 @@ fn render_client_crud_screen(
     t: &DslScreenTemplate,
 ) -> Result<String, String> {
     let store_ref = t.store.as_deref().ok_or_else(|| {
-        format!(
-            "screen {pascal:?} kind=client_crud requires `store:` (a client_stores entry name)"
-        )
+        format!("screen {pascal:?} kind=client_crud requires `store:` (a client_stores entry name)")
     })?;
     let store_snake = store_ref.to_snake_case();
     let store_cfg = client_stores
@@ -3578,20 +3679,13 @@ fn render_client_crud_screen(
         .item_type
         .clone()
         .or_else(|| Some(store_cfg.item_type.clone()))
-        .ok_or_else(|| {
-            format!("screen {pascal:?} kind=client_crud requires `item_type`")
-        })?;
+        .ok_or_else(|| format!("screen {pascal:?} kind=client_crud requires `item_type`"))?;
     let label_field = t
         .label_field
         .as_deref()
-        .ok_or_else(|| {
-            format!("screen {pascal:?} kind=client_crud requires `label_field`")
-        })?
+        .ok_or_else(|| format!("screen {pascal:?} kind=client_crud requires `label_field`"))?
         .to_snake_case();
-    let checkbox_field = t
-        .checkbox_field
-        .as_deref()
-        .map(|s| s.to_snake_case());
+    let checkbox_field = t.checkbox_field.as_deref().map(|s| s.to_snake_case());
     let id_field = store_cfg
         .id_field
         .as_deref()
@@ -3601,15 +3695,12 @@ fn render_client_crud_screen(
             )
         })?
         .to_snake_case();
-    let id_type = store_cfg
-        .id_type
-        .clone()
-        .unwrap_or_else(|| "i64".into());
+    let id_type = store_cfg.id_type.clone().unwrap_or_else(|| "i64".into());
     // For integer ids we emit `1i64` etc. so the type of `next_id` is fixed
     // even before the first push. Non-integer id types fall back to bare `1`.
     let id_type_suffix = match id_type.as_str() {
-        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
-        | "u128" | "usize" => id_type.to_string(),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" => id_type.to_string(),
         _ => String::new(),
     };
     let has_id = !id_type_suffix.is_empty();
@@ -3619,13 +3710,15 @@ fn render_client_crud_screen(
     // Render the inner rsx body programmatically — the surrounding wrapper
     // (h1 / wrap_with / div) is filled in by CLIENT_CRUD_SCREEN_TPL.
     let mut body = String::new();
-    let ind = if wrap_pascal.is_some() { "                " } else { "            " };
+    let ind = if wrap_pascal.is_some() {
+        "                "
+    } else {
+        "            "
+    };
     body.push_str(&format!("{ind}h1 {{ \"{pascal}\" }}\n"));
     // "Add" form
     body.push_str(&format!("{ind}form {{ class: \"add\",\n"));
-    body.push_str(&format!(
-        "{ind}    onsubmit: move |evt: FormEvent| {{\n"
-    ));
+    body.push_str(&format!("{ind}    onsubmit: move |evt: FormEvent| {{\n"));
     body.push_str(&format!("{ind}        evt.prevent_default();\n"));
     body.push_str(&format!("{ind}        let value = draft();\n"));
     body.push_str(&format!("{ind}        if value.is_empty() {{ return; }}\n"));
@@ -3645,19 +3738,17 @@ fn render_client_crud_screen(
     body.push_str(&format!("{ind}    input {{\n"));
     body.push_str(&format!("{ind}        r#type: \"text\",\n"));
     body.push_str(&format!("{ind}        value: \"{{draft()}}\",\n"));
-    body.push_str(&format!(
-        "{ind}        placeholder: \"New {humanized}\",\n"
-    ));
+    body.push_str(&format!("{ind}        placeholder: \"New {humanized}\",\n"));
     body.push_str(&format!(
         "{ind}        oninput: move |e| draft.set(e.value()),\n"
     ));
     body.push_str(&format!("{ind}    }}\n"));
-    body.push_str(&format!("{ind}    button {{ r#type: \"submit\", \"Add\" }}\n"));
+    body.push_str(&format!(
+        "{ind}    button {{ r#type: \"submit\", \"Add\" }}\n"
+    ));
     body.push_str(&format!("{ind}}}\n"));
     // List
-    body.push_str(&format!(
-        "{ind}ul {{ class: \"{snake}-items\",\n"
-    ));
+    body.push_str(&format!("{ind}ul {{ class: \"{snake}-items\",\n"));
     body.push_str(&format!(
         "{ind}    for item in store.items.read().iter() {{\n"
     ));
@@ -3675,7 +3766,9 @@ fn render_client_crud_screen(
             "{ind}                    let id = item.{id_field}.clone();\n"
         ));
         body.push_str(&format!("{ind}                    move |_| {{\n"));
-        body.push_str(&format!("{ind}                        let id = id.clone();\n"));
+        body.push_str(&format!(
+            "{ind}                        let id = id.clone();\n"
+        ));
         body.push_str(&format!(
             "{ind}                        store.update_by_id(id, |t| t.{cb} = !t.{cb});\n"
         ));
@@ -3692,7 +3785,9 @@ fn render_client_crud_screen(
         "{ind}                    let id = item.{id_field}.clone();\n"
     ));
     body.push_str(&format!("{ind}                    move |_| {{\n"));
-    body.push_str(&format!("{ind}                        let id = id.clone();\n"));
+    body.push_str(&format!(
+        "{ind}                        let id = id.clone();\n"
+    ));
     body.push_str(&format!(
         "{ind}                        store.remove_by_id(id);\n"
     ));
@@ -3881,8 +3976,7 @@ fn render_resource_edit_form(
         .fields
         .iter()
         .map(|fd| {
-            let is_bool =
-                fd.ty == "checkbox" || fd.rust_type.as_deref() == Some("bool");
+            let is_bool = fd.ty == "checkbox" || fd.rust_type.as_deref() == Some("bool");
             let input_type = match fd.ty.as_str() {
                 "email" => "email",
                 "password" => "password",
@@ -3970,13 +4064,8 @@ fn resource_edit_form_submit_body(t: &DslScreenTemplate, crud: &CrudCtx) -> Stri
         let n = f.name.to_snake_case();
         out.push_str(&format!("{indent}let {n}_v = {n}();\n"));
     }
-    out.push_str(&format!(
-        "{indent}let id_v = original_id.clone();\n"
-    ));
-    out.push_str(&format!(
-        "{indent}let item = {} {{\n",
-        crud.model_pascal
-    ));
+    out.push_str(&format!("{indent}let id_v = original_id.clone();\n"));
+    out.push_str(&format!("{indent}let item = {} {{\n", crud.model_pascal));
     out.push_str(&format!("{indent}    {}: id_v,\n", crud.id_field));
     for f in &t.fields {
         let n = f.name.to_snake_case();
@@ -3985,10 +4074,7 @@ fn resource_edit_form_submit_body(t: &DslScreenTemplate, crud: &CrudCtx) -> Stri
     }
     out.push_str(&format!("{indent}    ..Default::default()\n"));
     out.push_str(&format!("{indent}}};\n"));
-    let nav_line = format!(
-        "{indent}        nav.push(\"{}\");\n",
-        crud.list_route
-    );
+    let nav_line = format!("{indent}        nav.push(\"{}\");\n", crud.list_route);
     out.push_str(&format!(
         "{indent}spawn(async move {{\n{indent}    if {}(item).await.is_ok() {{\n{nav_line}{indent}    }}\n{indent}}});",
         crud.update_endpoint
@@ -4122,9 +4208,7 @@ fn field_submit_expr(f: &DslFieldDef, signal_var: &str) -> String {
 
     if is_string {
         return if optional {
-            format!(
-                "if {signal_var}.is_empty() {{ None }} else {{ Some({signal_var}) }}"
-            )
+            format!("if {signal_var}.is_empty() {{ None }} else {{ Some({signal_var}) }}")
         } else {
             signal_var.to_string()
         };
@@ -4196,14 +4280,8 @@ fn generate_client_store(
     let snake = cs.name.to_snake_case();
     let item_type = cs.item_type.trim().to_string();
     let id_field = cs.id_field.as_ref().map(|s| s.to_snake_case());
-    let id_type = cs
-        .id_type
-        .clone()
-        .unwrap_or_else(|| "i64".into());
-    let initial = cs
-        .initial
-        .clone()
-        .unwrap_or_else(|| "Vec::new()".into());
+    let id_type = cs.id_type.clone().unwrap_or_else(|| "i64".into());
+    let initial = cs.initial.clone().unwrap_or_else(|| "Vec::new()".into());
     // Emit `use crate::model::ItemType;` when the type matches an in-doc model.
     let needs_model_import = model_names.contains(&item_type.to_snake_case());
 
@@ -5533,8 +5611,12 @@ resources:
         // main.rs should be auto-patched with `pub mod` declarations for
         // every emitted top-level subdir (model, state, server, components).
         let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
-        for needed in ["pub mod model;", "pub mod state;", "pub mod server;", "pub mod components;"]
-        {
+        for needed in [
+            "pub mod model;",
+            "pub mod state;",
+            "pub mod server;",
+            "pub mod components;",
+        ] {
             assert!(
                 main_rs.contains(needed),
                 "expected main.rs to contain `{needed}`, got:\n{main_rs}"
@@ -5579,10 +5661,7 @@ resources:
         // The edit screen should also have been emitted with an id prop,
         // call get_/update_, and route under /products/:id/edit.
         let edit_path = root.join("src/components/product_edit_screen.rs");
-        assert!(
-            edit_path.exists(),
-            "edit screen file should be emitted"
-        );
+        assert!(edit_path.exists(), "edit screen file should be emitted");
         let edit_body = std::fs::read_to_string(&edit_path).unwrap();
         assert!(
             edit_body.contains("pub fn ProductEditScreen(id: i64)"),
@@ -5684,10 +5763,8 @@ resources:
         .await
         .expect("execute_code should succeed");
 
-        let new_body = std::fs::read_to_string(
-            root.join("src/components/product_new_screen.rs"),
-        )
-        .unwrap();
+        let new_body =
+            std::fs::read_to_string(root.join("src/components/product_new_screen.rs")).unwrap();
 
         // Signal initializers must be String::new() for text-backed inputs and
         // `false` for the bool. Crucially: NO `0i64` or `0.0f64` literals —
@@ -5735,7 +5812,9 @@ resources:
             "f64 field must be parsed from String, got:\n{new_body}"
         );
         assert!(
-            new_body.contains("if reorder_at_v.is_empty() { None } else { reorder_at_v.parse::<i64>().ok() }"),
+            new_body.contains(
+                "if reorder_at_v.is_empty() { None } else { reorder_at_v.parse::<i64>().ok() }"
+            ),
             "Option<i64> must parse-or-none on empty, got:\n{new_body}"
         );
         assert!(
@@ -5762,10 +5841,8 @@ resources:
 
         // The list screen should be a real table with column headers, an
         // edit link, and a delete button — not the placeholder `li{item:?}`.
-        let list_body = std::fs::read_to_string(
-            root.join("src/components/product_list_screen.rs"),
-        )
-        .unwrap();
+        let list_body =
+            std::fs::read_to_string(root.join("src/components/product_list_screen.rs")).unwrap();
         assert!(
             list_body.contains("table {")
                 && list_body.contains("thead {")
@@ -5811,16 +5888,17 @@ resources:
         // Option wrapper (which would produce literal "Some(...)" / "None" in
         // the cell).
         assert!(
-            list_body.contains("row.description.as_ref().map(|v| v.to_string()).unwrap_or_default()"),
+            list_body
+                .contains("row.description.as_ref().map(|v| v.to_string()).unwrap_or_default()"),
             "Option<String> column should be unwrapped, not Debug-formatted, got:\n{list_body}"
         );
         assert!(
-            list_body.contains("row.reorder_at.as_ref().map(|v| v.to_string()).unwrap_or_default()"),
+            list_body
+                .contains("row.reorder_at.as_ref().map(|v| v.to_string()).unwrap_or_default()"),
             "Option<i64> column should be unwrapped, not Debug-formatted, got:\n{list_body}"
         );
         assert!(
-            !list_body.contains("{row.description:?}")
-                && !list_body.contains("{row.reorder_at:?}"),
+            !list_body.contains("{row.description:?}") && !list_body.contains("{row.reorder_at:?}"),
             "no Option column should be Debug-formatted, got:\n{list_body}"
         );
 
@@ -5845,17 +5923,16 @@ resources:
 
         // The edit screen should pre-populate signals from the loaded item,
         // preserve the original id, and call update_product.
-        let edit_body = std::fs::read_to_string(
-            root.join("src/components/product_edit_screen.rs"),
-        )
-        .unwrap();
+        let edit_body =
+            std::fs::read_to_string(root.join("src/components/product_edit_screen.rs")).unwrap();
         assert!(
             edit_body.contains("let mut name = use_signal(|| item.name.clone())"),
             "edit form should init name from item, got:\n{edit_body}"
         );
         assert!(
-            edit_body
-                .contains("let mut description = use_signal(|| item.description.clone().unwrap_or_default())"),
+            edit_body.contains(
+                "let mut description = use_signal(|| item.description.clone().unwrap_or_default())"
+            ),
             "edit form should unwrap Option<String> from item, got:\n{edit_body}"
         );
         assert!(
@@ -5863,7 +5940,8 @@ resources:
             "edit form should convert numeric to String, got:\n{edit_body}"
         );
         assert!(
-            edit_body.contains("id: id_v,") && edit_body.contains("let id_v = original_id.clone();"),
+            edit_body.contains("id: id_v,")
+                && edit_body.contains("let id_v = original_id.clone();"),
             "edit submit body should preserve the original id, got:\n{edit_body}"
         );
         assert!(
@@ -6043,8 +6121,7 @@ resources:
 
         let router = std::fs::read_to_string(root.join("src/router.rs")).unwrap();
         assert!(
-            router.contains("/stock-movements")
-                && !router.contains("/stock_movements"),
+            router.contains("/stock-movements") && !router.contains("/stock_movements"),
             "default route slug should be kebab-case, got router:\n{router}"
         );
     }
@@ -6113,18 +6190,52 @@ client_stores:
         .expect("client_store should scaffold");
 
         let store_path = root.join("src/state/todo_store.rs");
-        assert!(store_path.exists(), "expected todo_store.rs at {store_path:?}");
+        assert!(
+            store_path.exists(),
+            "expected todo_store.rs at {store_path:?}"
+        );
         let body = std::fs::read_to_string(&store_path).unwrap();
         assert!(
             !body.contains("#![cfg(feature = \"server\")]"),
             "ClientStore must NOT carry the server cfg gate, got:\n{body}"
         );
-        assert!(body.contains("use crate::model::Todo;"), "missing model import: {body}");
-        assert!(body.contains("pub fn provide_todo_store()"), "missing provide_ fn: {body}");
-        assert!(body.contains("pub fn use_todo_store()"), "missing use_ fn: {body}");
+        assert!(
+            body.contains("use crate::model::Todo;"),
+            "missing model import: {body}"
+        );
+        assert!(
+            body.contains("pub fn provide_todo_store()"),
+            "missing provide_ fn: {body}"
+        );
+        assert!(
+            body.contains("pub fn use_todo_store()"),
+            "missing use_ fn: {body}"
+        );
         assert!(body.contains("pub fn push("), "missing push helper: {body}");
-        assert!(body.contains("pub fn remove_by_id("), "missing remove_by_id helper: {body}");
-        assert!(body.contains("pub fn update_by_id("), "missing update_by_id helper: {body}");
+        assert!(
+            body.contains("pub fn remove_by_id("),
+            "missing remove_by_id helper: {body}"
+        );
+        assert!(
+            body.contains("pub fn update_by_id("),
+            "missing update_by_id helper: {body}"
+        );
+        // Regression: `remove_by_id` must bind the post-write length to a local
+        // before returning. The naive `items.read().len() < before` form leaves a
+        // GenerationalRef alive past the Signal it borrows from and fails E0597
+        // on `cargo check`. Keep this assertion until we have a fixture project
+        // that runs a real `cargo check` in CI.
+        assert!(
+            body.contains("let after = items.read().len();"),
+            "remove_by_id must bind post-write length to a local (E0597 regression), got:\n{body}"
+        );
+        assert!(
+            !body.contains("items.read().len() < before"),
+            "remove_by_id is using the inline-borrow form that fails borrow-check (E0597), got:\n{body}"
+        );
+        // Syntactic sanity-check on the whole emitted file.
+        syn::parse_file(&body)
+            .unwrap_or_else(|e| panic!("generated client_store does not parse: {e}\n---\n{body}"));
 
         // mod.rs should NOT have a server cfg gate for the client store entry.
         let mod_rs = std::fs::read_to_string(root.join("src/state/mod.rs")).unwrap();
@@ -6206,10 +6317,22 @@ screens:
             body.contains("use crate::state::todo_store::use_todo_store;"),
             "missing client_store import:\n{body}"
         );
-        assert!(body.contains("use crate::model::Todo;"), "missing model import:\n{body}");
-        assert!(body.contains("store.push(Todo {"), "missing push call:\n{body}");
-        assert!(body.contains("title: value,"), "missing label_field assignment:\n{body}");
-        assert!(body.contains("store.remove_by_id(id);"), "missing delete handler:\n{body}");
+        assert!(
+            body.contains("use crate::model::Todo;"),
+            "missing model import:\n{body}"
+        );
+        assert!(
+            body.contains("store.push(Todo {"),
+            "missing push call:\n{body}"
+        );
+        assert!(
+            body.contains("title: value,"),
+            "missing label_field assignment:\n{body}"
+        );
+        assert!(
+            body.contains("store.remove_by_id(id);"),
+            "missing delete handler:\n{body}"
+        );
         assert!(
             body.contains("store.update_by_id(id, |t| t.done = !t.done);"),
             "missing checkbox toggle:\n{body}"
@@ -6217,11 +6340,17 @@ screens:
         // Sanity: it must compile structurally — input/onsubmit/button all
         // emitted under the rsx! block.
         assert!(body.contains("rsx!"), "missing rsx block:\n{body}");
-        assert!(body.contains("button { r#type: \"submit\""), "missing add button:\n{body}");
+        assert!(
+            body.contains("button { r#type: \"submit\""),
+            "missing add button:\n{body}"
+        );
 
         // route variant inserted in main.rs
         let routes = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
-        assert!(routes.contains("TodoScreen"), "TodoScreen variant not added: {routes}");
+        assert!(
+            routes.contains("TodoScreen"),
+            "TodoScreen variant not added: {routes}"
+        );
 
         // ensure no server feature gate snuck into the screen
         assert!(
@@ -6237,9 +6366,196 @@ screens:
 
         // next_steps should mention provide_*
         assert!(
-            r.next_steps.iter().any(|s| s.contains("provide_todo_store")),
+            r.next_steps
+                .iter()
+                .any(|s| s.contains("provide_todo_store")),
             "expected next_steps to mention provide_todo_store, got {:?}",
             r.next_steps
+        );
+    }
+
+    /// TODO5 §4: a fresh `dx new` project has no `#[derive(Routable)]` enum.
+    /// `execute_code` must bootstrap one in preflight so the call doesn't fail
+    /// halfway through with "could not find a Routable enum" after already
+    /// writing the model/store/component files.
+    #[tokio::test]
+    async fn bootstrap_router_creates_router_file_on_fresh_dx_new_project() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("bootstrap_router_test"),
+        )
+        .unwrap();
+        // Simulate what `dx new` gives you: a plain main.rs with no Route.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "use dioxus::prelude::*;\n\nfn main() {}\n",
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let r = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+      - {name: done, type: bool}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+      checkbox_field: done
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect(
+            "a Model + ClientStore + Screen doc must run cleanly against a fresh `dx new` project",
+        );
+
+        let router = root.join("src/router.rs");
+        assert!(router.exists(), "auto-bootstrap must create src/router.rs");
+        let body = std::fs::read_to_string(&router).unwrap();
+        assert!(
+            body.contains("#[derive(Routable, Clone, PartialEq)]"),
+            "bootstrapped router must derive Routable, got:\n{body}"
+        );
+        assert!(
+            body.contains("pub enum Route {"),
+            "bootstrapped router must declare `pub enum Route`, got:\n{body}"
+        );
+        assert!(
+            body.contains("#[route(\"/\")]") && body.contains("TodoScreen {},"),
+            "bootstrapped router must seed the declared screen variant, got:\n{body}"
+        );
+        // pub mod router; must be auto-declared so `crate::router::Route`
+        // resolves from main.rs.
+        let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("pub mod router;"),
+            "auto-bootstrap must add `pub mod router;` to main.rs, got:\n{main_rs}"
+        );
+        // No re-emit of the screen body should clobber the router.
+        assert!(
+            body.matches("TodoScreen {},").count() == 1,
+            "screen route insert must dedupe against the seeded variant, got:\n{body}"
+        );
+        // Status should reflect a clean apply.
+        assert_eq!(
+            r.status.as_deref(),
+            Some("applied"),
+            "fresh-project run should report status: applied"
+        );
+        // The next_steps should call out router wiring so the human knows what's left.
+        assert!(
+            r.next_steps
+                .iter()
+                .any(|s| s.contains("Router::<crate::router::Route>")),
+            "expected a Router mounting next_step, got {:?}",
+            r.next_steps
+        );
+    }
+
+    /// TODO5 §5: a re-run after every primitive already lands on disk used to
+    /// return `next_steps: []` and no status field, which looked like success
+    /// when the route variant might never have been inserted. The status field
+    /// and the idempotent route insert together fix that.
+    #[tokio::test]
+    async fn rerun_with_if_missing_reports_no_changes_and_finishes_route_insert() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("rerun_no_changes_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "use dioxus::prelude::*;\n\nfn main() {}\n",
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let yaml = r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#;
+        // Initial run lays the app down.
+        let first = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: yaml.into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("initial run should succeed");
+        assert_eq!(first.status.as_deref(), Some("applied"));
+
+        // Re-run with if_missing: every primitive's leaf file is already on
+        // disk, so the only legitimate response is `status: no_changes`.
+        let second = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: yaml.into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: true,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("re-run should not error in if_missing mode");
+        assert_eq!(
+            second.status.as_deref(),
+            Some("no_changes"),
+            "fully-collided re-run must report no_changes, got status={:?} created={:?} modified={:?}",
+            second.status,
+            second.files_created,
+            second.files_modified,
+        );
+        assert!(
+            !second.collisions.is_empty(),
+            "fully-collided re-run must populate collisions"
         );
     }
 
@@ -6286,9 +6602,7 @@ forms:
         );
         // The header entry should also be present.
         assert!(
-            r.next_steps
-                .iter()
-                .any(|s| s.contains("hand-edit hotspot")),
+            r.next_steps.iter().any(|s| s.contains("hand-edit hotspot")),
             "expected a hotspot header, got {:?}",
             r.next_steps
         );
