@@ -127,9 +127,9 @@ pub async fn lint_project(
                 issues: 0,
             });
         } else {
-            let r = crate::tools::analysis::check_rsx(
+            let r = crate::tools::check_rsx::check_rsx(
                 state,
-                crate::tools::analysis::CheckRsxParams {
+                crate::tools::check_rsx::CheckRsxParams {
                     file: None,
                     files: Some(files),
                     project_root: p.project_root.clone(),

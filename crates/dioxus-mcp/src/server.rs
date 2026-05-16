@@ -31,9 +31,9 @@ impl DioxusMcp {
     )]
     async fn audit_feature_flags(
         &self,
-        Parameters(p): Parameters<tools::analysis::AuditFeatureFlagsParams>,
+        Parameters(p): Parameters<tools::audit_feature_flags::AuditFeatureFlagsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let report = tools::analysis::audit_feature_flags(&self.state, p).await;
+        let report = tools::audit_feature_flags::audit_feature_flags(&self.state, p).await;
         ok_json(&report)
     }
 
@@ -42,9 +42,9 @@ impl DioxusMcp {
     )]
     async fn check_rsx(
         &self,
-        Parameters(p): Parameters<tools::analysis::CheckRsxParams>,
+        Parameters(p): Parameters<tools::check_rsx::CheckRsxParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::analysis::check_rsx(&self.state, p).await {
+        match tools::check_rsx::check_rsx(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -185,9 +185,9 @@ impl DioxusMcp {
     )]
     async fn explain_signal_graph(
         &self,
-        Parameters(p): Parameters<tools::analysis::ExplainSignalGraphParams>,
+        Parameters(p): Parameters<tools::explain_signal_graph::ExplainSignalGraphParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::analysis::explain_signal_graph(&self.state, p).await {
+        match tools::explain_signal_graph::explain_signal_graph(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -265,9 +265,9 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     )]
     async fn search_docs(
         &self,
-        Parameters(p): Parameters<tools::docs::SearchDocsParams>,
+        Parameters(p): Parameters<tools::search_docs::SearchDocsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::docs::search_docs(&self.state, p).await {
+        match tools::search_docs::search_docs(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -278,9 +278,9 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     )]
     async fn find_example(
         &self,
-        Parameters(p): Parameters<tools::docs::FindExampleParams>,
+        Parameters(p): Parameters<tools::find_example::FindExampleParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::docs::find_example(&self.state, p).await {
+        match tools::find_example::find_example(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }

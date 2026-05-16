@@ -73,9 +73,9 @@ pub async fn project_tour(
     let audit_fut = async {
         if want("audit") {
             Some(
-                crate::tools::analysis::audit_feature_flags(
+                crate::tools::audit_feature_flags::audit_feature_flags(
                     state,
-                    crate::tools::analysis::AuditFeatureFlagsParams {
+                    crate::tools::audit_feature_flags::AuditFeatureFlagsParams {
                         project_root: p.project_root.clone(),
                     },
                 )
@@ -181,7 +181,7 @@ pub async fn project_tour(
 /// fix-is-obvious cases get surfaced. Anything that needs human judgment (e.g.
 /// "pick a render target") stays in `audit.findings` for the caller to read.
 fn derive_next_actions(
-    audit: &Option<crate::tools::analysis::AuditReport>,
+    audit: &Option<crate::tools::audit_feature_flags::AuditReport>,
     index: &Option<crate::tools::project_index::ProjectIndexReport>,
 ) -> Vec<NextAction> {
     let mut out: Vec<NextAction> = Vec::new();
@@ -239,7 +239,7 @@ fn derive_next_actions(
 }
 
 fn render_summary(
-    audit: &Option<crate::tools::analysis::AuditReport>,
+    audit: &Option<crate::tools::audit_feature_flags::AuditReport>,
     routes: &Option<crate::tools::route_map::RouteMapReport>,
     index: &Option<crate::tools::project_index::ProjectIndexReport>,
     assets: &Option<crate::tools::asset_audit::AssetAuditReport>,
