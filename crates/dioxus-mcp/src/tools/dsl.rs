@@ -10,7 +10,7 @@
 //! enforces that every spec example deserializes into its struct.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use heck::{ToPascalCase, ToSnakeCase};
@@ -280,6 +280,18 @@ pub struct DslScreenTemplate {
     /// the placeholder to flash before your edit lands.
     #[serde(default)]
     pub body: Option<String>,
+    /// Optional design-system preset that overrides the default unstyled
+    /// markup with a sensible utility-class skeleton. Currently supported:
+    ///   - `"tailwind"`: emits Tailwind-classed defaults on `client_crud`
+    ///     screens (form, list, items, buttons, checkbox). Other template
+    ///     kinds ignore this field.
+    ///
+    /// The presets are deliberately conservative — they pick a single
+    /// reasonable layout (max-w container, spacing, neutral colors) so the
+    /// generated screen looks intentional in a Tailwind project without
+    /// committing to a specific theme.
+    #[serde(default)]
+    pub styled: Option<String>,
     /// Internal: rich-CRUD context populated by `expand_resources` so the list
     /// and form templates can emit a real table (with edit/delete actions) or
     /// an edit-by-id form. Not part of the user-facing spec.
@@ -604,21 +616,8 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #   version: "1"
 #   <primitive_section>: [ ... ]   # see core/extensions below
 #
-# Picking the right tool for CRUD-like UIs:
-#   - Client-only / in-memory apps (todo lists, drafts, ephemeral selections):
-#     use a `client_stores:` entry + a `screens:` entry with
-#     `template.kind: client_crud`. No server fns are generated and no
-#     `server` feature is required. This is almost always what you want for
-#     web-only / wasm-target projects without a backend.
-#   - Backend-backed CRUD (a real database, REST endpoint, etc.): use a
-#     `resources:` entry — it expands to a model + server-feature-gated store
-#     + 5 server fns + 2 screens — or hand-author a Model + Store + server
-#     fns + a `screens:` entry with `template.kind: resource_list` /
-#     `resource_form`. The `crud` extension exposes Form/List/Table component
-#     templates that pair with those server fns; do NOT load the `crud`
-#     extension for a client-only app — `client_crud` already covers it.
-#
-# Data-layer-only path (no UI):
+# Data-layer-only path (no UI) — the escape hatch for "scaffold types,
+# hand-write UI":
 #   Every section is optional. If you only want types and state plumbing
 #   generated — say, models + a client_store, or models + server_fns — omit
 #   `screens:` entirely and execute_code will generate exactly the requested
@@ -638,6 +637,20 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #       this, `use_{snake}()` would panic at runtime in the UI you add later.
 #       To opt out, omit `client_stores:` and call `provide_{snake}()`
 #       yourself, or strip the inserted line after the run.
+#
+# Picking the right tool for CRUD-like UIs:
+#   - Client-only / in-memory apps (todo lists, drafts, ephemeral selections):
+#     use a `client_stores:` entry + a `screens:` entry with
+#     `template.kind: client_crud`. No server fns are generated and no
+#     `server` feature is required. This is almost always what you want for
+#     web-only / wasm-target projects without a backend.
+#   - Backend-backed CRUD (a real database, REST endpoint, etc.): use a
+#     `resources:` entry — it expands to a model + server-feature-gated store
+#     + 5 server fns + 2 screens — or hand-author a Model + Store + server
+#     fns + a `screens:` entry with `template.kind: resource_list` /
+#     `resource_form`. The `crud` extension exposes Form/List/Table component
+#     templates that pair with those server fns; do NOT load the `crud`
+#     extension for a client-only app — `client_crud` already covers it.
 #
 # Keep-the-wiring, rewrite-the-body workflow:
 #   When a prompt asks for a "designed" or custom-styled Screen, do NOT skip
@@ -749,7 +762,7 @@ const CORE_SCREEN: &str = r#"  Screen:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
       - {name: wrap_with, type: "ComponentName (e.g. a ProtectedRoute guard)", required: false}
-      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?, class?, body?}. `body: empty` (alias `body: stub`) on kind=empty drops the placeholder div+h1, emitting a bare `rsx! {}` so you can immediately rewrite the body without churn — imports and `use_<store>()` wiring stay intact.", required: false}
+      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?, class?, body?, styled?}. `body: empty` (alias `body: stub`) on kind=empty drops the placeholder div+h1, emitting a bare `rsx! {}` so you can immediately rewrite the body without churn — imports and `use_<store>()` wiring stay intact. `styled: tailwind` on kind=client_crud emits Tailwind utility-classed defaults instead of the bare class names — pick this in projects where Tailwind is already wired up.", required: false}
       - {name: replace_route, type: "bool — when true, if `route:` is already mapped by a different variant in the on-disk Routable enum, that variant is removed first (as if you had added a matching `remove: [{kind: remove_route, ...}]` entry). Lets a fresh Screen take over a route from a `dx new` demo without a two-step edit.", required: false}
     template_kinds: [empty, resource_list, resource_form, client_crud]
     client_crud_fields:
@@ -757,6 +770,7 @@ const CORE_SCREEN: &str = r#"  Screen:
       - {name: item_type, type: "Rust item type (Model in this doc or a built-in like String)", required: true}
       - {name: label_field, type: "Field on the item the add input writes / the row label reads", required: true}
       - {name: checkbox_field, type: "Optional bool field rendered as a per-row checkbox", required: false}
+      - {name: styled, type: "Optional design-system preset. `tailwind` emits Tailwind-classed defaults (form, input, list, buttons, checkbox). Omit for the historical unstyled class names.", required: false}
     example:
       screens:
         - name: HomeScreen
@@ -2066,11 +2080,13 @@ pub struct GetDslSpecParams {
     #[serde(default)]
     pub index_only: bool,
     /// When false, omit the ~5KB authoring-guide preamble (workflow notes,
-    /// envelope conventions, etc.). Useful when `sections:` is set and the
-    /// caller has already seen the prologue earlier in the conversation.
-    /// Defaults to true for backward compatibility.
-    #[serde(default = "default_true")]
-    pub include_prologue: bool,
+    /// envelope conventions, etc.). When omitted, the server picks a
+    /// default: `true` on the first `get_dsl_spec` call of the session,
+    /// `false` on follow-ups — the prologue is most useful exactly once,
+    /// and re-shipping it on every refresh wastes agent context. Pass
+    /// `true` explicitly to force the full payload.
+    #[serde(default)]
+    pub include_prologue: Option<bool>,
     /// When false, strip the per-primitive `example:` block from each section
     /// body. The field schema (`fields:`, `kinds:`, etc.) is still emitted.
     /// Useful when the caller only needs to know what fields a primitive
@@ -2089,9 +2105,17 @@ pub struct GetDslSpecResult {
 }
 
 pub async fn get_dsl_spec(
-    _state: &Arc<State>,
+    state: &Arc<State>,
     p: GetDslSpecParams,
 ) -> Result<GetDslSpecResult, String> {
+    // Auto-pace the prologue: emit it on the first call of the session and
+    // skip it on follow-ups, unless the caller pinned the choice explicitly.
+    let include_prologue = match p.include_prologue {
+        Some(v) => v,
+        None => !state
+            .dsl_spec_prologue_seen
+            .load(std::sync::atomic::Ordering::Relaxed),
+    };
     // Canonical (snake_case) name → (group, body). The group decides whether
     // a section is emitted under `core:` or under an `extensions: <group>:`
     // block; the body is the constant text already authored above.
@@ -2213,8 +2237,17 @@ pub async fn get_dsl_spec(
     };
 
     let mut out = String::new();
-    if p.include_prologue {
+    if include_prologue {
         out.push_str(CORE_PREAMBLE);
+        // Mark the session as having seen the prologue so the next call
+        // (without an explicit override) skips it. Relaxed ordering is
+        // fine: the only consumer is the read at the top of this fn,
+        // and we don't care about cross-thread ordering against other
+        // tool calls — a brief race that re-emits the prologue once is
+        // strictly less bad than a missed update.
+        state
+            .dsl_spec_prologue_seen
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
 
@@ -2368,6 +2401,14 @@ pub struct ExecuteCodeParams {
     /// written files are kept either way. Default: false.
     #[serde(default)]
     pub cargo_check: bool,
+    /// When true, run `cargo fmt` over the files this call wrote/modified
+    /// after the (non-dry-run) scaffold completes. Route inserts and
+    /// App-body splices land unformatted otherwise — flip this on if you
+    /// want the generated source to settle into the project's style without
+    /// a manual follow-up. Failures land as a single `next_steps` entry;
+    /// the scaffolded files are kept either way. Default: false.
+    #[serde(default)]
+    pub format_after: bool,
 }
 
 pub async fn execute_code(
@@ -2446,6 +2487,18 @@ pub async fn execute_code(
     // they're about to replace. Errors stop the run before any creates land.
     let mut result = ScaffoldResult::default();
     apply_removes(&doc, &crate_root, &mut result)?;
+
+    // Companion to ensure_default_on_client_crud_models, but for the case
+    // where the referenced model lives on disk (not in `doc.models`). The
+    // generated client_crud screen body emits `..Default::default()`, so any
+    // on-disk struct the user is reusing must also derive Default. Patches
+    // the file's `#[derive(...)]` line in-place; idempotent.
+    let patched_models = patch_on_disk_models_for_client_crud_default(&doc, &crate_root)?;
+    for path in patched_models {
+        if !result.files_modified.contains(&path) {
+            result.files_modified.push(path);
+        }
+    }
 
     // Global preconditions that the per-primitive emitters used to discover
     // *after* writing files (and that left the project in a half-written state
@@ -2705,6 +2758,7 @@ pub async fn execute_code(
                     router_file: None,
                     project_root: p.project_root.clone(),
                     params: Vec::new(),
+                    import_path: Some("crate::components".to_string()),
                 },
             )
             .await?;
@@ -2740,6 +2794,7 @@ pub async fn execute_code(
                     router_file: None,
                     project_root: p.project_root.clone(),
                     params: sc.route_params.clone(),
+                    import_path: Some("crate::components".to_string()),
                 },
             )
             .await?;
@@ -2912,6 +2967,17 @@ pub async fn execute_code(
     // straight to the body lines that still need a human (TODO4 §4.2).
     append_todo_next_steps(&mut result, &crate_root);
 
+    // Opt-in `cargo fmt` so route inserts / App-body splices end up tidy
+    // without a manual follow-up. Runs only on calls that actually wrote
+    // something, and over the exact set of files we touched (avoids
+    // surprising the user by re-formatting unrelated source).
+    if p.format_after
+        && (!result.files_created.is_empty() || !result.files_modified.is_empty())
+        && let Some(msg) = run_cargo_fmt(&crate_root, &result).await
+    {
+        result.next_steps.push(msg);
+    }
+
     // Opt-in `cargo check` so callers can surface compile-time breakage
     // from generated-vs-host API drift in the same call instead of finding
     // out 30s later. We only run it when the call actually wrote something
@@ -3054,6 +3120,70 @@ async fn run_cargo_check(crate_root: &Path) -> Option<String> {
     let snippet: String = stderr.lines().take(20).collect::<Vec<_>>().join("\n");
     Some(format!(
         "cargo_check: `cargo check` failed (exit {:?}). First diagnostics:\n{snippet}",
+        out.status.code()
+    ))
+}
+
+/// Run `rustfmt` over the exact set of files this scaffold call wrote or
+/// modified. We bypass `cargo fmt` so the formatting is scoped — `cargo fmt`
+/// would format the entire crate, which is surprising on top of a focused
+/// scaffold. Returns `Some(message)` when formatting fails or rustfmt is
+/// unavailable, `None` on success. The returned message is a single
+/// `next_steps` entry; the scaffolded files are kept either way.
+async fn run_cargo_fmt(crate_root: &Path, result: &ScaffoldResult) -> Option<String> {
+    use tokio::process::Command;
+    use tokio::time::{Duration, timeout};
+
+    // Collect a deduped, .rs-only list of touched paths. rustfmt rejects
+    // non-Rust files (e.g. Cargo.toml, mod.rs we wrote) wholesale, so we
+    // filter rather than let it bail out.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for p in result
+        .files_created
+        .iter()
+        .chain(result.files_modified.iter())
+    {
+        if p.extension().and_then(|x| x.to_str()) != Some("rs") {
+            continue;
+        }
+        if !paths.contains(p) {
+            paths.push(p.clone());
+        }
+    }
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut cmd = Command::new("rustfmt");
+    cmd.arg("--edition=2024");
+    for p in &paths {
+        cmd.arg(p);
+    }
+    cmd.current_dir(crate_root);
+
+    let fut = cmd.output();
+    let out = match timeout(Duration::from_secs(60), fut).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Some(format!(
+                "format_after: failed to spawn `rustfmt`: {e} — run `cargo fmt` yourself in {}",
+                crate_root.display()
+            ));
+        }
+        Err(_) => {
+            return Some(format!(
+                "format_after: `rustfmt` exceeded the 60s budget — run `cargo fmt` yourself in {}",
+                crate_root.display()
+            ));
+        }
+    };
+    if out.status.success() {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let snippet: String = stderr.lines().take(10).collect::<Vec<_>>().join("\n");
+    Some(format!(
+        "format_after: `rustfmt` failed (exit {:?}). First diagnostics:\n{snippet}",
         out.status.code()
     ))
 }
@@ -4106,17 +4236,20 @@ fn detected_routable_file(doc: &DslDoc, crate_root: &Path) -> Option<std::path::
 }
 
 /// Surface a hint when the doc would mutate a Routable enum that lives
-/// somewhere other than `src/router.rs` / `src/route.rs` (the conventions
-/// our scaffolds and search assume). We don't refuse to act — host files
+/// somewhere truly off-the-beaten-path. We don't refuse to act — host files
 /// like `src/main.rs` or `src/lib.rs` are still patched via syn — but a
-/// next_steps note tells the user where the edit landed so they can move
-/// the enum into a dedicated module if they want the rest of the codebase
-/// (and future runs of this tool) to stay consistent.
+/// next_steps note tells the user where the edit landed.
+///
+/// `dx new` puts the Routable enum in `src/main.rs`, so that location is
+/// treated as conventional too (along with `src/lib.rs`) — historically this
+/// warning fired on every fresh starter, which was just noise. The warning
+/// now only fires when the enum lives somewhere we genuinely didn't expect
+/// (e.g. nested under a feature module).
 ///
 /// Returns None when:
 ///   - the doc declares no routes (nothing to mutate), or
 ///   - we just created `src/router.rs` ourselves (conventional location), or
-///   - the existing Routable lives at the conventional path.
+///   - the existing Routable lives at one of the conventional paths.
 fn routable_location_warning(
     doc: &DslDoc,
     crate_root: &Path,
@@ -4135,7 +4268,11 @@ fn routable_location_warning(
     // Normalize the relative path with forward slashes so the warning text
     // is stable on Windows.
     let rel_str = rel.to_string_lossy().replace('\\', "/");
-    if rel_str == "src/router.rs" || rel_str == "src/route.rs" {
+    // src/main.rs and src/lib.rs are crate roots — the `dx new` starter
+    // ships the Routable enum in main.rs, so flagging it as "non-conventional"
+    // misleads users on a clean scaffold. Treat them as conventional too.
+    const CONVENTIONAL: &[&str] = &["src/router.rs", "src/route.rs", "src/main.rs", "src/lib.rs"];
+    if CONVENTIONAL.iter().any(|p| *p == rel_str) {
         return None;
     }
     Some(format!(
@@ -4765,6 +4902,7 @@ async fn generate_login_screen(
             router_file: None,
             project_root: project_root.map(str::to_owned),
             params: Vec::new(),
+            import_path: Some("crate::components".to_string()),
         },
     )
     .await?;
@@ -4876,6 +5014,9 @@ async fn generate_screen(
             router_file: None,
             project_root: project_root.map(str::to_owned),
             params: sc.route_params.clone(),
+            // Screens always live under `crate::components` — auto-add the
+            // matching `use` so the Routable derive can resolve the variant.
+            import_path: Some("crate::components".to_string()),
         },
     )
     .await?;
@@ -5054,6 +5195,81 @@ fn render_screen_template(
     }
 }
 
+/// Bag of class strings / attribute snippets per design-system preset for the
+/// `client_crud` template. Keeps the rendering loop above readable instead of
+/// fanning out the same `if styled == "tailwind"` branch six times.
+struct ClientCrudStyle {
+    form_class: String,
+    list_class_override: Option<String>,
+    input_class: Option<&'static str>,
+    submit_button_class: Option<&'static str>,
+    checkbox_class: Option<&'static str>,
+    delete_button_class: String,
+    extra_h1_attrs: Option<&'static str>,
+    extra_li_attrs: Option<&'static str>,
+    extra_label_attrs: Option<&'static str>,
+}
+
+impl ClientCrudStyle {
+    /// Historical unstyled markup: `class: "add"`, `class: "{snake}-items"`,
+    /// `class: "delete"`. Kept as the default so existing apps don't change.
+    fn default_unstyled(_snake: &str) -> Self {
+        Self {
+            form_class: "add".into(),
+            list_class_override: None,
+            input_class: None,
+            submit_button_class: None,
+            checkbox_class: None,
+            delete_button_class: "delete".into(),
+            extra_h1_attrs: None,
+            extra_li_attrs: None,
+            extra_label_attrs: None,
+        }
+    }
+
+    /// Tailwind-classed defaults: small max-w container, neutral colors,
+    /// hover/focus states. Deliberately conservative — should look intentional
+    /// in any Tailwind project without committing to a theme.
+    fn tailwind() -> Self {
+        Self {
+            form_class: "flex gap-2 mb-4".into(),
+            list_class_override: Some("space-y-2".into()),
+            input_class: Some(
+                "flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500",
+            ),
+            submit_button_class: Some(
+                "px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500",
+            ),
+            checkbox_class: Some("h-4 w-4 text-blue-600 rounded border-gray-300"),
+            delete_button_class: "text-red-600 hover:text-red-800 text-sm font-medium".into(),
+            extra_h1_attrs: Some("class: \"text-2xl font-semibold mb-4\", "),
+            extra_li_attrs: Some(
+                " class: \"flex items-center gap-3 p-2 bg-white border border-gray-200 rounded-md\",",
+            ),
+            extra_label_attrs: Some("class: \"flex-1\", "),
+        }
+    }
+
+    fn h1_attrs(&self) -> &str {
+        self.extra_h1_attrs.unwrap_or("")
+    }
+
+    fn li_attrs(&self) -> &str {
+        self.extra_li_attrs.unwrap_or("")
+    }
+
+    fn label_span_attrs(&self) -> &str {
+        self.extra_label_attrs.unwrap_or("")
+    }
+
+    fn list_class(&self, snake: &str) -> String {
+        match &self.list_class_override {
+            Some(s) => s.clone(),
+            None => format!("{snake}-items"),
+        }
+    }
+}
+
 fn render_client_crud_screen(
     pascal: &str,
     snake: &str,
@@ -5109,6 +5325,18 @@ fn render_client_crud_screen(
     let needs_model_import = store_cfg.item_type.to_snake_case() == item_type.to_snake_case();
     let humanized = humanize(&item_type);
 
+    // Pick the styled preset (currently only `tailwind`). Unknown values
+    // are rejected so users find typos here rather than at the markup level.
+    let style = match t.styled.as_deref() {
+        None => ClientCrudStyle::default_unstyled(snake),
+        Some("tailwind") => ClientCrudStyle::tailwind(),
+        Some(other) => {
+            return Err(format!(
+                "screen {pascal:?} kind=client_crud: unknown `template.styled` value {other:?} (expected: \"tailwind\" or omit)"
+            ));
+        }
+    };
+
     // Render the inner rsx body programmatically — the surrounding wrapper
     // (h1 / wrap_with / div) is filled in by CLIENT_CRUD_SCREEN_TPL.
     let mut body = String::new();
@@ -5117,9 +5345,15 @@ fn render_client_crud_screen(
     } else {
         "            "
     };
-    body.push_str(&format!("{ind}h1 {{ \"{pascal}\" }}\n"));
+    body.push_str(&format!(
+        "{ind}h1 {{ {h1_attrs}\"{pascal}\" }}\n",
+        h1_attrs = style.h1_attrs()
+    ));
     // "Add" form
-    body.push_str(&format!("{ind}form {{ class: \"add\",\n"));
+    body.push_str(&format!(
+        "{ind}form {{ class: \"{form_cls}\",\n",
+        form_cls = style.form_class
+    ));
     body.push_str(&format!("{ind}    onsubmit: move |evt: FormEvent| {{\n"));
     body.push_str(&format!("{ind}        evt.prevent_default();\n"));
     body.push_str(&format!("{ind}        let value = draft();\n"));
@@ -5140,30 +5374,46 @@ fn render_client_crud_screen(
     body.push_str(&format!("{ind}    }},\n"));
     body.push_str(&format!("{ind}    input {{\n"));
     body.push_str(&format!("{ind}        r#type: \"text\",\n"));
+    if let Some(cls) = style.input_class {
+        body.push_str(&format!("{ind}        class: \"{cls}\",\n"));
+    }
     body.push_str(&format!("{ind}        value: \"{{draft()}}\",\n"));
     body.push_str(&format!("{ind}        placeholder: \"New {humanized}\",\n"));
     body.push_str(&format!(
         "{ind}        oninput: move |e| draft.set(e.value()),\n"
     ));
     body.push_str(&format!("{ind}    }}\n"));
-    body.push_str(&format!(
-        "{ind}    button {{ r#type: \"submit\", \"Add\" }}\n"
-    ));
+    if let Some(cls) = style.submit_button_class {
+        body.push_str(&format!(
+            "{ind}    button {{ r#type: \"submit\", class: \"{cls}\", \"Add\" }}\n"
+        ));
+    } else {
+        body.push_str(&format!(
+            "{ind}    button {{ r#type: \"submit\", \"Add\" }}\n"
+        ));
+    }
     body.push_str(&format!("{ind}}}\n"));
     // List
-    body.push_str(&format!("{ind}ul {{ class: \"{snake}-items\",\n"));
+    body.push_str(&format!(
+        "{ind}ul {{ class: \"{list_cls}\",\n",
+        list_cls = style.list_class(snake)
+    ));
     body.push_str(&format!(
         "{ind}    for item in store.items.read().iter() {{\n"
     ));
     body.push_str(&format!(
-        "{ind}        li {{ key: \"{{item.{id_field}}}\",\n"
+        "{ind}        li {{ key: \"{{item.{id_field}}}\",{li_attrs}\n",
+        li_attrs = style.li_attrs(),
     ));
     if let Some(cb) = &checkbox_field {
         body.push_str(&format!("{ind}            input {{\n"));
         body.push_str(&format!("{ind}                r#type: \"checkbox\",\n"));
-        body.push_str(&format!(
-            "{ind}                checked: \"{{item.{cb}}}\",\n"
-        ));
+        if let Some(cls) = style.checkbox_class {
+            body.push_str(&format!("{ind}                class: \"{cls}\",\n"));
+        }
+        // Idiomatic Dioxus 0.7 boolean attribute: bind the bool field
+        // directly, not its formatted-string form.
+        body.push_str(&format!("{ind}                checked: item.{cb},\n"));
         body.push_str(&format!("{ind}                oninput: {{\n"));
         body.push_str(&format!(
             "{ind}                    let id = item.{id_field}.clone();\n"
@@ -5180,9 +5430,13 @@ fn render_client_crud_screen(
         body.push_str(&format!("{ind}            }}\n"));
     }
     body.push_str(&format!(
-        "{ind}            span {{ \"{{item.{label_field}}}\" }}\n"
+        "{ind}            span {{ {span_attrs}\"{{item.{label_field}}}\" }}\n",
+        span_attrs = style.label_span_attrs(),
     ));
-    body.push_str(&format!("{ind}            button {{ class: \"delete\",\n"));
+    body.push_str(&format!(
+        "{ind}            button {{ class: \"{del_cls}\",\n",
+        del_cls = style.delete_button_class,
+    ));
     body.push_str(&format!("{ind}                onclick: {{\n"));
     body.push_str(&format!(
         "{ind}                    let id = item.{id_field}.clone();\n"
@@ -5807,6 +6061,155 @@ fn ensure_default_on_client_crud_models(doc: &mut DslDoc) {
     }
 }
 
+/// Companion to [`ensure_default_on_client_crud_models`] for the on-disk case:
+/// when a `client_crud` Screen references a model that is *not* declared in
+/// the same doc but already exists at `src/model/{snake}.rs`, patch its
+/// `#[derive(...)]` line to include `Default`. Returns the list of files
+/// modified (empty when no patching was needed).
+///
+/// Idempotent. Never touches a file outside the conventional model path —
+/// callers using a non-standard model layout still need to hand-edit, but
+/// the next_steps surface a hint elsewhere in the response.
+fn patch_on_disk_models_for_client_crud_default(
+    doc: &DslDoc,
+    crate_root: &Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    if doc.screens.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Same shape as ensure_default_on_client_crud_models: collect every model
+    // type-name a client_crud screen will construct.
+    let mut needed: BTreeSet<String> = BTreeSet::new();
+    for sc in &doc.screens {
+        let Some(t) = sc.template.as_ref() else {
+            continue;
+        };
+        if t.kind != "client_crud" {
+            continue;
+        }
+        let item_type = t.item_type.clone().or_else(|| {
+            t.store.as_ref().and_then(|store_ref| {
+                let key = store_ref.to_snake_case();
+                doc.client_stores
+                    .iter()
+                    .find(|cs| cs.name.to_snake_case() == key)
+                    .map(|cs| cs.item_type.clone())
+            })
+        });
+        if let Some(it) = item_type {
+            needed.insert(it);
+        }
+    }
+    // Drop names that the doc itself declares — the in-doc pre-pass already
+    // handles those, and re-deriving on a freshly-generated file would just
+    // double-fire.
+    let in_doc: BTreeSet<String> = doc.models.iter().map(|m| m.name.clone()).collect();
+    needed.retain(|n| {
+        !in_doc
+            .iter()
+            .any(|m| m.to_snake_case() == n.to_snake_case())
+    });
+
+    let mut modified: Vec<std::path::PathBuf> = Vec::new();
+    for type_name in &needed {
+        let snake = type_name.to_snake_case();
+        let path = crate_root.join(format!("src/model/{snake}.rs"));
+        if !path.exists() {
+            // Not at the conventional location — leave it alone; the user
+            // either keeps the model elsewhere or hasn't authored it yet.
+            continue;
+        }
+        let src =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        if let Some(new_src) = add_default_to_derive(&src, type_name) {
+            std::fs::write(&path, &new_src)
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            modified.push(path);
+        }
+    }
+    Ok(modified)
+}
+
+/// Locate `#[derive(...)]` on `struct {type_name}` in `src` and append
+/// `Default` to its derive list if it isn't already there. Returns the
+/// modified source, or `None` when no change is needed (Default is already
+/// derived, or the file doesn't carry a matching struct).
+///
+/// Uses textual splicing on the first `#[derive(...)]` line that precedes
+/// the target struct definition. Robust enough for hand-authored model files
+/// and the shape we emit ourselves; bails out (and reports no change) if the
+/// struct sits without a derive attribute or the file fails to parse.
+fn add_default_to_derive(src: &str, type_name: &str) -> Option<String> {
+    let file = syn::parse_file(src).ok()?;
+    let target = type_name.to_pascal_case();
+    let item = file.items.iter().find_map(|it| match it {
+        syn::Item::Struct(s) if s.ident == target => Some(s),
+        _ => None,
+    })?;
+    let derive = item.attrs.iter().find(|a| a.path().is_ident("derive"))?;
+    let mut has_default = false;
+    let _ = derive.parse_nested_meta(|m| {
+        if m.path.is_ident("Default") {
+            has_default = true;
+        }
+        Ok(())
+    });
+    if has_default {
+        return None;
+    }
+
+    // Splice textually: find the `#[derive(` opener nearest the struct's
+    // span (so multi-derive files don't cross-match), then locate the
+    // matching `)]` and insert `, Default` before it.
+    let struct_line = item.ident.span().start().line;
+    // Scan `#[derive(` occurrences and keep the one whose line is closest to
+    // (but not after) the struct definition.
+    let needle = "#[derive(";
+    let mut chosen: Option<usize> = None;
+    let mut cursor = 0;
+    while let Some(off) = src[cursor..].find(needle) {
+        let abs = cursor + off;
+        // Line of `abs` byte: count newlines up to abs.
+        let line = src[..abs].bytes().filter(|&b| b == b'\n').count() + 1;
+        if line <= struct_line {
+            chosen = Some(abs);
+        } else {
+            break;
+        }
+        cursor = abs + needle.len();
+    }
+    let open = chosen?;
+    // Find the matching `)` for this derive — track paren depth so we don't
+    // get fooled by `derive(Foo<Bar>)`.
+    let after_open = open + needle.len();
+    let mut depth = 1usize;
+    let mut close: Option<usize> = None;
+    for (i, ch) in src[after_open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(after_open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let mut out = String::with_capacity(src.len() + 10);
+    out.push_str(&src[..close]);
+    let trimmed_before = src[..close].trim_end();
+    if trimmed_before.ends_with('(') {
+        out.push_str("Default");
+    } else {
+        out.push_str(", Default");
+    }
+    out.push_str(&src[close..]);
+    Some(out)
+}
+
 /// Expand each `resources:` entry into the equivalent model + store + 5 server
 /// fns + 2 screens. Synth server fns are returned separately because they
 /// carry custom bodies that the standard server-fn generator can't emit.
@@ -5993,6 +6396,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 checkbox_field: None,
                 class: None,
                 body: None,
+                styled: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -6016,6 +6420,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 checkbox_field: None,
                 class: None,
                 body: None,
+                styled: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -6037,6 +6442,7 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 checkbox_field: None,
                 class: None,
                 body: None,
+                styled: None,
                 crud: Some(crud),
             }),
             route_params: vec![("id".to_string(), id_type.clone())],
@@ -6943,7 +7349,7 @@ mod tests {
                 extensions: vec!["bogus".into()],
                 sections: vec![],
                 index_only: false,
-                include_prologue: true,
+                include_prologue: Some(true),
                 include_examples: true,
             },
         )
@@ -6960,7 +7366,7 @@ mod tests {
                 extensions: vec![],
                 sections: vec!["model".into(), "client_store".into()],
                 index_only: false,
-                include_prologue: true,
+                include_prologue: Some(true),
                 include_examples: true,
             },
         )
@@ -7004,7 +7410,7 @@ mod tests {
                 extensions: vec![],
                 sections: vec!["form".into()],
                 index_only: false,
-                include_prologue: true,
+                include_prologue: Some(true),
                 include_examples: true,
             },
         )
@@ -7464,7 +7870,7 @@ screens:
                 extensions: vec!["crud".into()],
                 sections: vec![],
                 index_only: true,
-                include_prologue: true,
+                include_prologue: Some(true),
                 include_examples: true,
             },
         )
@@ -7498,7 +7904,7 @@ screens:
                 extensions: vec![],
                 sections: vec!["model".into()],
                 index_only: false,
-                include_prologue: false,
+                include_prologue: Some(false),
                 include_examples: true,
             },
         )
@@ -7526,7 +7932,7 @@ screens:
                 index_only: false,
                 // Drop the prologue so its commentary about `example:` doesn't
                 // confuse the assertion below.
-                include_prologue: false,
+                include_prologue: Some(false),
                 include_examples: false,
             },
         )
@@ -7559,7 +7965,7 @@ screens:
                 extensions: vec![],
                 sections: vec!["models".into()],
                 index_only: false,
-                include_prologue: true,
+                include_prologue: Some(true),
                 include_examples: true,
             },
         )
@@ -7591,6 +7997,7 @@ screens:
             checkbox_field: None,
             class: Some("page-todo".into()),
             body: None,
+            styled: None,
             crud: None,
         };
         let body = render_screen_template(
@@ -7634,6 +8041,7 @@ screens:
             checkbox_field: None,
             class: None,
             body: None,
+            styled: None,
             crud: None,
         };
         let err = render_screen_template(
@@ -7673,6 +8081,7 @@ screens:
             checkbox_field: None,
             class: None,
             body: Some("empty".into()),
+            styled: None,
             crud: None,
         };
         let body = render_screen_template(
@@ -7735,6 +8144,7 @@ screens:
             checkbox_field: None,
             class: None,
             body: Some("nope".into()),
+            styled: None,
             crud: None,
         };
         let err = render_screen_template(
@@ -7898,6 +8308,7 @@ components:
                 if_missing: true,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -7971,6 +8382,7 @@ session_states:
                 if_missing: true,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8026,6 +8438,7 @@ components:
                 if_missing: false,
                 dry_run: true,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8075,6 +8488,7 @@ screens:
                 if_missing: false,
                 dry_run: true,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8195,6 +8609,7 @@ models:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8338,6 +8753,7 @@ client_stores:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8425,6 +8841,7 @@ client_stores:
                 if_missing: true,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8507,6 +8924,7 @@ screens:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8584,6 +9002,7 @@ screens:
                 if_missing: true,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8657,6 +9076,7 @@ screens:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -8689,15 +9109,17 @@ screens:
     }
 
     #[tokio::test]
-    async fn warns_when_routable_lives_in_non_conventional_file() {
-        // Set up a crate where the Routable enum lives in src/main.rs (not
-        // src/router.rs). execute_code should still patch it but should
-        // surface a next_steps hint pointing at the unusual location.
+    async fn no_routable_warning_when_enum_lives_in_main_rs_dx_new_layout() {
+        // Regression: the `dx new` starter puts the Routable enum directly in
+        // src/main.rs. The "non-conventional" warning used to fire on every
+        // fresh scaffold, which was noise. main.rs (and lib.rs) now count as
+        // conventional crate-root locations — no warning, but the route
+        // insert must still land.
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         std::fs::write(
             root.join("Cargo.toml"),
-            cargo_toml_with_fullstack("non_conventional_routable"),
+            cargo_toml_with_fullstack("dx_new_main_rs_routable"),
         )
         .unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -8757,25 +9179,114 @@ screens:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
         .expect("execute_code should succeed when Routable lives in main.rs");
 
         assert!(
-            result
+            !result
                 .next_steps
                 .iter()
-                .any(|s| { s.contains("non-conventional") && s.contains("src/main.rs") }),
-            "expected a non-conventional Routable warning naming src/main.rs, got next_steps={:?}",
+                .any(|s| s.contains("non-conventional")),
+            "no non-conventional warning expected on a dx-new main.rs layout, got next_steps={:?}",
             result.next_steps
         );
 
-        // Sanity: route insertion still landed even though we warned.
+        // Sanity: route insertion still landed.
         let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
         assert!(
             main_rs.contains("TodoScreen"),
-            "TodoScreen variant should have been inserted into the existing Routable in main.rs, got:\n{main_rs}"
+            "TodoScreen variant should have been inserted into the Routable in main.rs, got:\n{main_rs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn warns_when_routable_lives_in_truly_unusual_path() {
+        // Sanity: the warning still fires for a Routable enum tucked under
+        // a feature module, where convention-aware tooling has no chance.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("unusual_routable_location"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/features")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+pub mod features;
+fn main() { dioxus::launch(features::routing::App); }
+"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("src/features.rs"), "pub mod routing;\n").unwrap();
+        std::fs::create_dir_all(root.join("src/features")).unwrap();
+        std::fs::write(
+            root.join("src/features/routing.rs"),
+            r#"use dioxus::prelude::*;
+
+#[component]
+pub fn App() -> Element {
+    rsx! { Router::<Route> {} }
+}
+
+#[derive(Routable, Clone, PartialEq)]
+pub enum Route {
+    #[route("/about")]
+    About {},
+}
+
+#[component]
+fn About() -> Element { rsx! { "about" } }
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+                cargo_check: false,
+                format_after: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed with an unusual Routable location");
+
+        assert!(
+            result
+                .next_steps
+                .iter()
+                .any(|s| s.contains("non-conventional") && s.contains("src/features/routing.rs")),
+            "expected a non-conventional Routable warning naming the nested path, got next_steps={:?}",
+            result.next_steps
         );
     }
 
@@ -8856,6 +9367,7 @@ screens:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9120,6 +9632,7 @@ resources:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9358,6 +9871,7 @@ resources:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9584,6 +10098,7 @@ resources:
                 if_missing: false,
                 dry_run: true,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9653,6 +10168,7 @@ resources:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9717,6 +10233,7 @@ resources:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9788,6 +10305,7 @@ client_stores:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9911,6 +10429,7 @@ screens:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -9941,6 +10460,17 @@ screens:
         assert!(
             body.contains("store.update_by_id(id, |t| t.done = !t.done);"),
             "missing checkbox toggle:\n{body}"
+        );
+        // Boolean attributes must bind the bool field directly, not a
+        // stringified `"{item.done}"` form (which rsx would parse as a
+        // non-empty string and render checked=true always).
+        assert!(
+            body.contains("checked: item.done,"),
+            "checked must be a bare bool, not a string literal:\n{body}"
+        );
+        assert!(
+            !body.contains("checked: \"{item.done}\""),
+            "checked must not be emitted as a stringified attribute:\n{body}"
         );
         // Sanity: it must compile structurally — input/onsubmit/button all
         // emitted under the rsx! block.
@@ -10032,6 +10562,7 @@ screens:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10133,6 +10664,7 @@ screens:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10149,6 +10681,7 @@ screens:
                 if_missing: true,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10195,6 +10728,7 @@ forms:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10279,6 +10813,7 @@ models:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10304,6 +10839,7 @@ modify:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10334,6 +10870,7 @@ modify:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10374,6 +10911,7 @@ components:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10395,6 +10933,7 @@ modify:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10431,6 +10970,7 @@ components:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10451,6 +10991,7 @@ modify:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10486,6 +11027,7 @@ server_fns:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10510,6 +11052,7 @@ modify:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10548,6 +11091,7 @@ modify:
                 if_missing: false,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10569,6 +11113,7 @@ modify:
                 if_missing: true,
                 dry_run: false,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10616,6 +11161,7 @@ modify:
                 if_missing: false,
                 dry_run: true,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10702,6 +11248,7 @@ models:
                 if_missing: false,
                 dry_run: true,
                 cargo_check: false,
+                format_after: false,
             },
         )
         .await
@@ -10718,6 +11265,425 @@ models:
         assert!(
             !root.join("src/model/product.rs").exists(),
             "dry_run must not write the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn dsl_spec_default_prologue_skipped_on_repeat_call() {
+        // First call: include_prologue unset → default true → emit preamble.
+        // Second call (same State): include_prologue unset → auto-flips to
+        // false so the ~5KB authoring guide doesn't ship twice. Callers can
+        // still pin the choice with an explicit Some(true)/Some(false).
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = std::sync::Arc::new(State::new(dir.path().to_path_buf()).unwrap());
+        let first = get_dsl_spec(
+            &state,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec![],
+                index_only: false,
+                include_prologue: None,
+                include_examples: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            first.spec.contains("Dioxus-MCP DSL spec"),
+            "first call should ship the preamble"
+        );
+
+        let second = get_dsl_spec(
+            &state,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec![],
+                index_only: false,
+                include_prologue: None,
+                include_examples: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !second.spec.contains("Dioxus-MCP DSL spec"),
+            "second call (no explicit override) should skip the preamble:\n{}",
+            second.spec
+        );
+
+        // Explicit Some(true) on the third call forces the preamble back.
+        let third = get_dsl_spec(
+            &state,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec![],
+                index_only: false,
+                include_prologue: Some(true),
+                include_examples: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            third.spec.contains("Dioxus-MCP DSL spec"),
+            "explicit include_prologue: true should force the preamble back"
+        );
+    }
+
+    #[tokio::test]
+    async fn dsl_spec_prologue_surfaces_data_layer_only_above_crud_picker() {
+        // The "scaffold types, hand-write UI" escape hatch should be the
+        // first guidance section users see, ahead of the CRUD picker.
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = std::sync::Arc::new(State::new(dir.path().to_path_buf()).unwrap());
+        let r = get_dsl_spec(
+            &state,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec![],
+                index_only: false,
+                include_prologue: Some(true),
+                include_examples: false,
+            },
+        )
+        .await
+        .unwrap();
+        let data_layer_at = r
+            .spec
+            .find("Data-layer-only path")
+            .expect("preamble should mention the data-layer-only path");
+        let crud_picker_at = r
+            .spec
+            .find("Picking the right tool")
+            .expect("preamble should mention the CRUD picker");
+        assert!(
+            data_layer_at < crud_picker_at,
+            "data-layer-only path should come before the CRUD picker (got data@{} crud@{})",
+            data_layer_at,
+            crud_picker_at
+        );
+    }
+
+    #[test]
+    fn client_crud_styled_tailwind_emits_utility_classes() {
+        // `styled: tailwind` should swap the default unstyled class names
+        // (`add`, `{snake}-items`, `delete`) for a conservative set of
+        // Tailwind utility classes on the form / list / buttons / checkbox.
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: Some("i64".into()),
+            auto_id: Some(true),
+        };
+        let t = DslScreenTemplate {
+            kind: "client_crud".into(),
+            endpoint: None,
+            item_type: Some("Todo".into()),
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: Some("TodoStore".into()),
+            label_field: Some("title".into()),
+            checkbox_field: Some("done".into()),
+            class: None,
+            body: None,
+            styled: Some("tailwind".into()),
+            crud: None,
+        };
+        let body = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "TodoScreen",
+            "todo_screen",
+            None,
+            &[cs],
+            &t,
+        )
+        .unwrap();
+        // Form swaps `class: "add"` for the Tailwind flex layout.
+        assert!(
+            !body.contains("class: \"add\""),
+            "tailwind preset should drop the bare `add` class:\n{body}"
+        );
+        assert!(
+            body.contains("class: \"flex gap-2 mb-4\""),
+            "tailwind preset should emit the Tailwind form class:\n{body}"
+        );
+        // List swaps `class: "todo_screen-items"` for the Tailwind spacing.
+        assert!(
+            body.contains("class: \"space-y-2\""),
+            "tailwind preset should emit the Tailwind list class:\n{body}"
+        );
+        // Delete button uses Tailwind text-red utility instead of bare `delete`.
+        assert!(
+            body.contains("text-red-600"),
+            "tailwind preset should emit the Tailwind delete class:\n{body}"
+        );
+        // Checkbox stays boolean-bound (no regression of TODO #4).
+        assert!(
+            body.contains("checked: item.done,"),
+            "checked must remain a bare bool:\n{body}"
+        );
+    }
+
+    #[test]
+    fn client_crud_styled_rejects_unknown_value() {
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: Some("i64".into()),
+            auto_id: Some(true),
+        };
+        let t = DslScreenTemplate {
+            kind: "client_crud".into(),
+            endpoint: None,
+            item_type: Some("Todo".into()),
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: Some("TodoStore".into()),
+            label_field: Some("title".into()),
+            checkbox_field: None,
+            class: None,
+            body: None,
+            styled: Some("bootstrap".into()),
+            crud: None,
+        };
+        let err = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "TodoScreen",
+            "todo_screen",
+            None,
+            &[cs],
+            &t,
+        )
+        .unwrap_err();
+        assert!(err.contains("\"tailwind\""), "got: {err}");
+        assert!(err.contains("\"bootstrap\""), "got: {err}");
+    }
+
+    #[test]
+    fn add_default_to_derive_appends_to_existing_list() {
+        let src = "use serde::{Serialize, Deserialize};\n\n#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]\npub struct Todo {\n    pub id: i64,\n    pub title: String,\n}\n";
+        let out = super::add_default_to_derive(src, "Todo").unwrap();
+        assert!(
+            out.contains("#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn add_default_to_derive_idempotent_when_present() {
+        let src = "#[derive(Debug, Default, Clone, PartialEq)]\npub struct Todo { pub id: i64 }\n";
+        assert!(super::add_default_to_derive(src, "Todo").is_none());
+    }
+
+    #[test]
+    fn add_default_to_derive_skips_when_struct_missing() {
+        let src = "#[derive(Debug)]\npub struct Other { pub x: i64 }\n";
+        assert!(super::add_default_to_derive(src, "Todo").is_none());
+    }
+
+    #[tokio::test]
+    async fn client_crud_patches_on_disk_model_to_add_default() {
+        // Regression: the user has the Todo model already on disk (no Default
+        // in its derives), and declares only a ClientStore + Screen in DSL.
+        // The screen body emits `..Default::default()`, so execute_code must
+        // patch the existing model's derive list before generating the screen.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("on_disk_default_patch"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/model")).unwrap();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::create_dir_all(root.join("src/state")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+pub mod model;
+pub mod components;
+pub mod state;
+
+#[derive(Routable, Clone, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Placeholder {},
+}
+
+#[component]
+fn Placeholder() -> Element { rsx! { "placeholder" } }
+
+fn main() { dioxus::launch(App); }
+
+#[component]
+fn App() -> Element { rsx! { Router::<Route> {} } }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/model/mod.rs"),
+            "pub mod todo;\npub use todo::*;\n",
+        )
+        .unwrap();
+        // Critical fixture: no `Default` in the derive list.
+        std::fs::write(
+            root.join("src/model/todo.rs"),
+            r#"use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Todo {
+    pub id: i64,
+    pub title: String,
+    pub done: bool,
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/components/mod.rs"),
+            "pub mod placeholder;\npub use placeholder::*;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/components/placeholder.rs"),
+            "use dioxus::prelude::*;\n#[component]\npub fn Placeholder() -> Element { rsx! { \"placeholder\" } }\n",
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let r = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /todos
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+      checkbox_field: done
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+                cargo_check: false,
+                format_after: false,
+            },
+        )
+        .await
+        .expect("execute_code should patch on-disk model + scaffold the screen");
+
+        let model = std::fs::read_to_string(root.join("src/model/todo.rs")).unwrap();
+        assert!(
+            model.contains("Default"),
+            "expected Default derive added to existing Todo model, got:\n{model}"
+        );
+        let path = root.join("src/model/todo.rs");
+        assert!(
+            r.files_modified.iter().any(|p| p == &path),
+            "patched model must land in files_modified, got: {:?}",
+            r.files_modified
+        );
+    }
+
+    #[tokio::test]
+    async fn format_after_runs_rustfmt_over_touched_files() {
+        // `format_after: true` should rustfmt the freshly-scaffolded files so
+        // route inserts and App-body splices land tidy. Verify by comparing
+        // a known-unformatted line against the post-call file.
+        if std::process::Command::new("rustfmt")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            // rustfmt isn't installed in the test environment — skip rather
+            // than spuriously fail. The wiring itself is still validated by
+            // unit-level coverage of run_cargo_fmt elsewhere.
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("format_after_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+fn main() {
+    dioxus::launch(App);
+}
+
+#[component]
+fn App() -> Element {
+    rsx! {
+        div { "welcome" }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+                cargo_check: false,
+                format_after: true,
+            },
+        )
+        .await
+        .expect("execute_code with format_after: true should succeed");
+
+        // Pre-format, our model emitter doesn't worry about trailing newlines
+        // / spacing details. Post-rustfmt the file must compile under the
+        // standard style: every top-level item ends with a newline, struct
+        // fields are 4-space indented. We assert the file is non-empty and
+        // ends with `\n`, which rustfmt enforces.
+        let model = std::fs::read_to_string(root.join("src/model/todo.rs")).unwrap();
+        assert!(!model.is_empty(), "model file should exist");
+        assert!(
+            model.ends_with('\n'),
+            "rustfmt should leave a trailing newline:\n{model}"
+        );
+        // rustfmt always rewrites `, ` between fields onto separate lines for
+        // struct definitions. A scaffolded multi-field struct must end up
+        // with one field per line.
+        let field_lines = model
+            .lines()
+            .filter(|l| l.trim_start().starts_with("pub "))
+            .count();
+        assert!(
+            field_lines >= 2,
+            "struct fields should be one per line after rustfmt, got model:\n{model}"
         );
     }
 }

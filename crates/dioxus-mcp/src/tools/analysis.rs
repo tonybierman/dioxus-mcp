@@ -405,7 +405,7 @@ fn lint_rsx_tokens(m: &syn::Macro, _src: &str, issues: &mut Vec<RsxIssue>) {
     // dioxus-rsx crate (which is unstable across versions); this catches the
     // most common 0.7 mistakes without bringing in a full parser.
     let tokens: Vec<TokenTree> = m.tokens.clone().into_iter().collect();
-    walk_lint(&tokens, false, issues);
+    walk_lint(&tokens, false, true, issues);
 }
 
 /// `parent_is_component` is true when the surrounding brace group is the body
@@ -413,34 +413,45 @@ fn lint_rsx_tokens(m: &syn::Macro, _src: &str, issues: &mut Vec<RsxIssue>) {
 /// make sense for HTML element attributes — most notably the `onXxx:` empty-
 /// closure check, since a component prop named `onclick:` may legitimately be
 /// an `EventHandler<()>` / `Callback<()>` that takes no arguments.
-fn walk_lint(tokens: &[TokenTree], parent_is_component: bool, issues: &mut Vec<RsxIssue>) {
+///
+/// `in_rsx_node_position` is true when the token stream sits at an rsx node
+/// position — the top level of a rsx! macro, or the body of an element /
+/// component / `for` / `if` / match-arm. It is false inside attribute values
+/// and inside closure bodies (e.g. `onclick: move |evt| { ... }`), where a
+/// Rust `for` loop has no rsx semantics and must not be lint-checked.
+fn walk_lint(
+    tokens: &[TokenTree],
+    parent_is_component: bool,
+    in_rsx_node_position: bool,
+    issues: &mut Vec<RsxIssue>,
+) {
     // 1) `for ... { ... }` without a `key:` attribute somewhere in the body.
-    //    Find the brace-delim body group specifically — earlier versions
-    //    grabbed the first group of any delimiter, which mis-targeted
-    //    `for x in xs.iter() { ... }` at the `()` of `.iter()` instead of
-    //    the body block (causing false positives).
-    let mut i = 0;
-    while i < tokens.len() {
-        if let TokenTree::Ident(id) = &tokens[i]
-            && id == "for"
-            && let Some(body_idx) = find_for_body(tokens, i)
-        {
-            let body_group = match &tokens[body_idx] {
-                TokenTree::Group(g) => g,
-                _ => unreachable!("find_for_body returned a non-group index"),
-            };
-            let body_tokens: Vec<TokenTree> = body_group.stream().clone().into_iter().collect();
-            if !slice_has_key_attr(&body_tokens) {
-                let s = id.span().start();
-                issues.push(RsxIssue {
-                            line: s.line,
-                            column: s.column,
-                            message: "loop in rsx! is missing a `key: ...` attribute on its child element — Dioxus needs keys for stable diffing".into(),
-                            file: None,
-                        });
+    //    Only fires at rsx-node position; a `for` inside an event-handler
+    //    closure body is a plain Rust loop, not an rsx loop.
+    if in_rsx_node_position {
+        let mut i = 0;
+        while i < tokens.len() {
+            if let TokenTree::Ident(id) = &tokens[i]
+                && id == "for"
+                && let Some(body_idx) = find_for_body(tokens, i)
+            {
+                let body_group = match &tokens[body_idx] {
+                    TokenTree::Group(g) => g,
+                    _ => unreachable!("find_for_body returned a non-group index"),
+                };
+                let body_tokens: Vec<TokenTree> = body_group.stream().clone().into_iter().collect();
+                if !slice_has_key_attr(&body_tokens) {
+                    let s = id.span().start();
+                    issues.push(RsxIssue {
+                                line: s.line,
+                                column: s.column,
+                                message: "loop in rsx! is missing a `key: ...` attribute on its child element — Dioxus needs keys for stable diffing".into(),
+                                file: None,
+                            });
+                }
             }
+            i += 1;
         }
-        i += 1;
     }
 
     // 2) `onXxx: |..|` or `onXxx: move |..|` with empty closure params.
@@ -479,20 +490,52 @@ fn walk_lint(tokens: &[TokenTree], parent_is_component: bool, issues: &mut Vec<R
 
     // Recurse into groups so element/component bodies are scanned. Track the
     // immediately preceding ident so the recursed body knows whether it sits
-    // inside a component (uppercase) or an HTML element (lowercase).
+    // inside a component (uppercase) or an HTML element (lowercase). Also
+    // detect closure-arg pipes (`|...|`) so the brace group that follows is
+    // recognised as a closure body (Rust expression context), not an rsx body.
     let mut last_ident: Option<&proc_macro2::Ident> = None;
+    let mut seen_open_pipe = false;
+    let mut after_closure_args = false;
     for tt in tokens {
         match tt {
-            TokenTree::Ident(id) => last_ident = Some(id),
+            TokenTree::Ident(id) => {
+                last_ident = Some(id);
+                after_closure_args = false;
+            }
+            TokenTree::Punct(p) if p.as_char() == '|' => {
+                if seen_open_pipe {
+                    after_closure_args = true;
+                    seen_open_pipe = false;
+                } else {
+                    seen_open_pipe = true;
+                }
+                last_ident = None;
+            }
             TokenTree::Group(g) => {
+                let is_brace = g.delimiter() == proc_macro2::Delimiter::Brace;
+                let is_closure_body = after_closure_args && is_brace;
+                // An rsx node body is a brace group preceded by an element /
+                // component ident. Closure bodies (preceded by `|...|`) and
+                // non-brace groups (parens, brackets) are Rust expression
+                // contexts and must not run the for-loop key check.
+                let group_in_rsx_position = is_brace && last_ident.is_some() && !is_closure_body;
                 let is_component = last_ident
                     .map(|id| starts_uppercase(&id.to_string()))
                     .unwrap_or(false);
                 let inner: Vec<TokenTree> = g.stream().clone().into_iter().collect();
-                walk_lint(&inner, is_component, issues);
+                walk_lint(&inner, is_component, group_in_rsx_position, issues);
                 last_ident = None;
+                seen_open_pipe = false;
+                after_closure_args = false;
             }
-            _ => last_ident = None,
+            _ => {
+                last_ident = None;
+                // A `,` ends an attribute value / arg-list element; any other
+                // punct (e.g. `:`, `.`, `=`) also closes the current closure-
+                // detection scope. Reset state so a later `|` starts fresh.
+                seen_open_pipe = false;
+                after_closure_args = false;
+            }
         }
     }
 }
@@ -1061,6 +1104,59 @@ fn t() {
         assert!(
             issues.iter().all(|m| !m.contains("missing a `key:")),
             "did not expect a key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_for_rust_for_loop_inside_event_handler_closure() {
+        // Regression: a `for` inside an `onclick: move |evt| { ... }` body
+        // is a plain Rust loop, not an rsx loop. The lint used to recurse
+        // into the closure body and flag it as missing a `key:` attribute.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let _ = rsx! {
+        button {
+            onclick: move |_evt| {
+                let items = vec![1, 2, 3];
+                for x in items {
+                    let _ = x;
+                }
+            },
+            "click"
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning on a Rust for-loop inside a closure, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn still_flags_missing_key_in_actual_rsx_loop() {
+        // Sanity: the rsx-position check still fires on a real missing key,
+        // even when there's also a closure handler in the same element.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let items: Vec<i32> = vec![];
+    let _ = rsx! {
+        ul {
+            onclick: move |_evt| { let _ = 1; },
+            for x in items {
+                li { "{x}" }
+            }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().any(|m| m.contains("missing a `key:")),
+            "expected key warning on the rsx for-loop, got {issues:?}"
         );
     }
 }

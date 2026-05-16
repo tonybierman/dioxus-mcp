@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -13,6 +14,13 @@ pub struct State {
     pub project: Mutex<ProjectInfo>,
     pub doc_cache: Cache<String, Arc<CachedDoc>>,
     pub http: reqwest::Client,
+    /// Set to `true` once `get_dsl_spec` has emitted the authoring-guide
+    /// prologue at least once. Subsequent calls within the same MCP server
+    /// process default `include_prologue` to `false` — the prologue is most
+    /// useful exactly once, and re-shipping ~5KB on every refresh wastes
+    /// agent context. Callers can still pass `include_prologue: true`
+    /// explicitly to force the full payload.
+    pub dsl_spec_prologue_seen: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +42,7 @@ impl State {
                 .max_capacity(256)
                 .build(),
             http,
+            dsl_spec_prologue_seen: AtomicBool::new(false),
         })
     }
 

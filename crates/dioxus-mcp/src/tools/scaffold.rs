@@ -278,6 +278,13 @@ pub struct CreateRouteParams {
     /// extract the value from the URL. Omit for variants with no path params.
     #[serde(default)]
     pub params: Vec<(String, String)>,
+    /// Optional module path that the component is exported from (e.g.
+    /// `"crate::components"`). When set, `create_route` also ensures the
+    /// router file has `use {import_path}::{Component};` (or a `::*` glob
+    /// matching that prefix) so Dioxus's Routable derive can resolve the
+    /// variant's component. No-op when the import is already in scope.
+    #[serde(default)]
+    pub import_path: Option<String>,
 }
 
 pub async fn create_route(
@@ -300,20 +307,72 @@ pub async fn create_route(
         "consider running `cargo fmt` on the router file".into(),
     ];
     match plan_route_insertion(&src, &variant_name, &p.path, &p.params)? {
-        RouteInsertion::AlreadyMatches => Ok(ScaffoldResult {
-            next_steps,
-            ..Default::default()
-        }),
+        RouteInsertion::AlreadyMatches => {
+            // Variant already wired — but the import may still be missing
+            // (e.g. a route variant was hand-added without an accompanying
+            // use statement). Ensure-import is idempotent.
+            let mut files_modified: Vec<PathBuf> = Vec::new();
+            if let Some(prefix) = p.import_path.as_deref()
+                && let Some(new_src) = ensure_use_statement(&src, prefix, &variant_name)
+            {
+                std::fs::write(&router_file, &new_src).map_err(|e| e.to_string())?;
+                files_modified.push(router_file.clone());
+                next_steps.insert(
+                    0,
+                    format!("added `use {prefix}::{variant_name};` to the router file"),
+                );
+            }
+            // Drop the manual scope-check hint when the import is now in
+            // place — leaving it would mislead.
+            if p.import_path.is_some() {
+                next_steps
+                    .retain(|s| !s.starts_with("ensure `") || !s.contains("is in scope at the"));
+            }
+            Ok(ScaffoldResult {
+                files_modified,
+                next_steps,
+                ..Default::default()
+            })
+        }
         RouteInsertion::Insert { new_src, line } => {
-            std::fs::write(&router_file, &new_src).map_err(|e| e.to_string())?;
+            // Splice the use-statement in before writing so the file lands
+            // self-consistent in one shot.
+            let final_src = match p.import_path.as_deref() {
+                Some(prefix) => {
+                    ensure_use_statement(&new_src, prefix, &variant_name).unwrap_or(new_src.clone())
+                }
+                None => new_src,
+            };
+            std::fs::write(&router_file, &final_src).map_err(|e| e.to_string())?;
             let rel = router_file
                 .strip_prefix(&crate_root)
                 .unwrap_or(&router_file)
-                .display();
+                .display()
+                .to_string();
             next_steps.insert(
                 0,
                 format!("inserted `{variant_name}` route variant at `{rel}:{line}`"),
             );
+            if let Some(prefix) = p.import_path.as_deref() {
+                // Detect whether the final source contains the use clause we
+                // wanted to add. If it does, mention it; if it doesn't (the
+                // file already had a glob or specific import), keep quiet.
+                let needle = format!("use {prefix}::{variant_name};");
+                let glob = format!("use {prefix}::*;");
+                if final_src.contains(&needle) && !src.contains(&needle) {
+                    next_steps.insert(
+                        1,
+                        format!("added `{needle}` to `{rel}` so Routable resolves the variant"),
+                    );
+                }
+                // Drop the now-redundant "ensure in scope" hint whenever the
+                // file ends up with a workable import.
+                if final_src.contains(&needle) || final_src.contains(&glob) {
+                    next_steps.retain(|s| {
+                        !(s.starts_with("ensure `") && s.contains("is in scope at the"))
+                    });
+                }
+            }
             Ok(ScaffoldResult {
                 files_modified: vec![router_file.clone()],
                 next_steps,
@@ -321,6 +380,73 @@ pub async fn create_route(
             })
         }
     }
+}
+
+/// Add `use {prefix}::{name};` to `src` if neither the specific import nor a
+/// matching `use {prefix}::*;` glob is already present. Returns the modified
+/// source, or `None` when the file already imports the symbol (idempotent).
+///
+/// The new statement lands directly after the existing run of `use` lines at
+/// the top of the file, preserving header doc comments / inner attributes /
+/// blank lines. If no `use` statements exist, the new line is inserted after
+/// the leading attribute block (and any leading blank lines).
+pub(crate) fn ensure_use_statement(src: &str, prefix: &str, name: &str) -> Option<String> {
+    let target = format!("use {prefix}::{name};");
+    let glob = format!("use {prefix}::*;");
+    if src.contains(&target) || src.contains(&glob) {
+        return None;
+    }
+    // Also handle the grouped form: `use crate::components::{A, B};` —
+    // check the whole-file source naively for `use {prefix}::{` then for
+    // `{name}` inside that brace group, splitting on `};` so we stop at the
+    // end of the use statement.
+    let grouped_open = format!("use {prefix}::{{");
+    if let Some(pos) = src.find(&grouped_open) {
+        let rest = &src[pos + grouped_open.len()..];
+        if let Some(end) = rest.find("};") {
+            let inner = &rest[..end];
+            if inner.split(',').map(|s| s.trim()).any(|s| s == name) {
+                return None;
+            }
+        }
+    }
+
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    // Find the index of the last leading `use ...;` line (consecutive run at
+    // the top of the file, allowing for blank lines / leading attributes).
+    let mut last_use: Option<usize> = None;
+    let mut header_end: usize = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("//") || t.starts_with("#![") || t.starts_with("#[") || t.is_empty() {
+            header_end = i + 1;
+            continue;
+        }
+        if t.starts_with("use ") {
+            last_use = Some(i);
+            header_end = i + 1;
+            continue;
+        }
+        break;
+    }
+    let insert_at = last_use.map(|i| i + 1).unwrap_or(header_end);
+    let mut out = String::with_capacity(src.len() + target.len() + 1);
+    for (i, line) in lines.iter().enumerate() {
+        if i == insert_at {
+            out.push_str(&target);
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if insert_at >= lines.len() {
+        // Inserting past the end (file has no trailing newline / very short).
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&target);
+        out.push('\n');
+    }
+    Some(out)
 }
 
 #[cfg_attr(test, derive(Debug))]
@@ -974,6 +1100,69 @@ pub enum Route {
             err.contains("\"/\""),
             "should quote the colliding path, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod ensure_use_tests {
+    use super::ensure_use_statement;
+
+    #[test]
+    fn adds_use_when_absent() {
+        let src =
+            "use dioxus::prelude::*;\n\n#[derive(Routable, Clone, PartialEq)]\npub enum Route {}\n";
+        let out = ensure_use_statement(src, "crate::components", "Home").unwrap();
+        assert!(out.contains("use crate::components::Home;"));
+        // Inserted after the existing `use` line, not at the top.
+        let prelude_at = out.find("use dioxus::prelude::*;").unwrap();
+        let home_at = out.find("use crate::components::Home;").unwrap();
+        assert!(
+            home_at > prelude_at,
+            "expected Home use after prelude use, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn idempotent_when_already_imported() {
+        let src = "use crate::components::Home;\n\npub enum Route {}\n";
+        assert!(ensure_use_statement(src, "crate::components", "Home").is_none());
+    }
+
+    #[test]
+    fn idempotent_when_glob_already_present() {
+        let src = "use crate::components::*;\n\npub enum Route {}\n";
+        assert!(ensure_use_statement(src, "crate::components", "Home").is_none());
+    }
+
+    #[test]
+    fn idempotent_when_grouped_import_includes_name() {
+        let src = "use crate::components::{Home, About};\n\npub enum Route {}\n";
+        assert!(ensure_use_statement(src, "crate::components", "Home").is_none());
+        assert!(ensure_use_statement(src, "crate::components", "About").is_none());
+        // A name outside the group must still trigger insertion.
+        let out = ensure_use_statement(src, "crate::components", "Contact").unwrap();
+        assert!(out.contains("use crate::components::Contact;"));
+    }
+
+    #[test]
+    fn inserts_after_last_use_in_main_rs_shape() {
+        // Mimics the `dx new` starter shape: doc comment + multiple uses +
+        // a top-level main fn. The new line must land in the use block.
+        let src = "//! starter\n\nuse dioxus::prelude::*;\nuse server_fn::client::reqwest::ReqwestClient;\n\n#[derive(Routable, Clone, PartialEq)]\npub enum Route {}\n";
+        let out = ensure_use_statement(src, "crate::components", "Hero").unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        // Find the new line and check it sits inside the use block.
+        let hero_idx = lines
+            .iter()
+            .position(|l| l.contains("use crate::components::Hero;"))
+            .unwrap();
+        let enum_idx = lines
+            .iter()
+            .position(|l| l.contains("#[derive(Routable"))
+            .unwrap();
+        assert!(hero_idx < enum_idx, "Hero must precede the enum:\n{out}");
+        // No accidental indentation.
+        assert_eq!(lines[hero_idx], "use crate::components::Hero;");
     }
 }
 
