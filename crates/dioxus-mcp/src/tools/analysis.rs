@@ -983,6 +983,59 @@ fn t() {
     }
 
     #[test]
+    fn no_warning_when_key_uses_field_access_interpolation() {
+        // TODO.md item #3: `key: "{item.id}"` was reportedly flagged.
+        // String literal carries the interpolation; the lint should see
+        // `key:` and stop, regardless of the literal's contents.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+#[derive(Clone, PartialEq, Props)]
+struct Item { id: i32 }
+fn t() {
+    let items: Vec<Item> = vec![];
+    let _ = rsx! {
+        ul {
+            for item in items.iter() {
+                li { key: "{item.id}", "{item.id}" }
+            }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_key_wrapped_in_match_or_if() {
+        // Real-world shape: the loop body wraps elements in `match` / `if` arms;
+        // the key still has to be detected by walking into the arm bodies.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let items: Vec<(i32, bool)> = vec![];
+    let _ = rsx! {
+        ul {
+            for (id, show) in items {
+                if show {
+                    li { key: "{id}", "{id}" }
+                }
+            }
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("missing a `key:")),
+            "did not expect a key warning, got {issues:?}"
+        );
+    }
+
+    #[test]
     fn no_warning_when_key_on_component_with_tuple_destructure() {
         // Closer to the shape users actually write: `for (id, label) in items`
         // binding via destructure, then a component invocation with multiple

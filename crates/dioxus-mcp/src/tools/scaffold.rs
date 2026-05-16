@@ -295,7 +295,7 @@ pub async fn create_route(
     let src = std::fs::read_to_string(&router_file)
         .map_err(|e| format!("read {}: {e}", router_file.display()))?;
     let variant_name = p.component.to_pascal_case();
-    let next_steps = vec![
+    let mut next_steps = vec![
         format!("ensure `{variant_name}` exists and is in scope at the routable enum"),
         "consider running `cargo fmt` on the router file".into(),
     ];
@@ -304,8 +304,16 @@ pub async fn create_route(
             next_steps,
             ..Default::default()
         }),
-        RouteInsertion::Insert(new_src) => {
+        RouteInsertion::Insert { new_src, line } => {
             std::fs::write(&router_file, &new_src).map_err(|e| e.to_string())?;
+            let rel = router_file
+                .strip_prefix(&crate_root)
+                .unwrap_or(&router_file)
+                .display();
+            next_steps.insert(
+                0,
+                format!("inserted `{variant_name}` route variant at `{rel}:{line}`"),
+            );
             Ok(ScaffoldResult {
                 files_modified: vec![router_file.clone()],
                 next_steps,
@@ -320,7 +328,10 @@ enum RouteInsertion {
     /// The variant already exists and points at the same path. No-op.
     AlreadyMatches,
     /// Variant doesn't exist; this is the new source with the variant inserted.
-    Insert(String),
+    /// `line` is the 1-based line number of the inserted `#[route(...)]`
+    /// attribute in `new_src` — surfaced in `next_steps` so callers can jump
+    /// straight to the new variant in the routable enum.
+    Insert { new_src: String, line: usize },
 }
 
 /// Inspect `src` for a `#[derive(Routable)]` enum and decide what to do for
@@ -412,12 +423,37 @@ fn plan_route_insertion(
     if !src[..end].ends_with('\n') {
         new_src.push('\n');
     }
+    // 1-based line where the inserted `#[route(...)]` attribute now lives in
+    // `new_src`. Counting newlines in the prefix and adding 1 gives the line
+    // number of the first character we're about to append.
+    let line = new_src.bytes().filter(|&b| b == b'\n').count() + 1;
     new_src.push_str(&variant);
     new_src.push_str(&src[end..]);
-    Ok(RouteInsertion::Insert(new_src))
+    Ok(RouteInsertion::Insert { new_src, line })
 }
 
-fn variant_route_path(v: &syn::Variant) -> Option<String> {
+/// Extract `(variant_name, path)` pairs from every variant in the
+/// `#[derive(Routable)]` enum in `router_src`. Returns an empty list when the
+/// file has no Routable enum (or fails to parse) — callers should treat the
+/// missing-enum case the same as "no existing routes."
+pub(crate) fn existing_route_paths(router_src: &str) -> Vec<(String, String)> {
+    let Ok(file) = syn::parse_file(router_src) else {
+        return Vec::new();
+    };
+    let Some(routable) = file.items.iter().find_map(|it| match it {
+        syn::Item::Enum(e) if e.attrs.iter().any(|a| has_derive(a, "Routable")) => Some(e),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    routable
+        .variants
+        .iter()
+        .filter_map(|v| variant_route_path(v).map(|p| (v.ident.to_string(), p)))
+        .collect()
+}
+
+pub(crate) fn variant_route_path(v: &syn::Variant) -> Option<String> {
     for a in &v.attrs {
         if !a.path().is_ident("route") {
             continue;
@@ -863,11 +899,20 @@ pub enum Route {
     fn inserts_new_variant() {
         let r = plan_route_insertion(BASE, "About", "/about", &[]).unwrap();
         match r {
-            RouteInsertion::Insert(new) => {
-                assert!(new.contains("#[route(\"/about\")]"));
-                assert!(new.contains("About {}"));
-                assert!(new.contains("Home {}"));
-                assert!(new.contains("User { id: i32 }"));
+            RouteInsertion::Insert { new_src, line } => {
+                assert!(new_src.contains("#[route(\"/about\")]"));
+                assert!(new_src.contains("About {}"));
+                assert!(new_src.contains("Home {}"));
+                assert!(new_src.contains("User { id: i32 }"));
+                // The reported line should point at the `#[route("/about")]`
+                // attribute of the inserted variant.
+                let lines: Vec<&str> = new_src.lines().collect();
+                assert_eq!(
+                    lines.get(line - 1).copied(),
+                    Some("    #[route(\"/about\")]"),
+                    "line {line} should be the inserted #[route(...)], got: {:?}",
+                    lines.get(line - 1)
+                );
             }
             _ => panic!("expected Insert"),
         }
@@ -883,11 +928,11 @@ pub enum Route {
         )
         .unwrap();
         match r {
-            RouteInsertion::Insert(new) => {
-                assert!(new.contains("#[route(\"/users/:id/edit\")]"));
+            RouteInsertion::Insert { new_src, .. } => {
+                assert!(new_src.contains("#[route(\"/users/:id/edit\")]"));
                 assert!(
-                    new.contains("EditUser { id: i64 }"),
-                    "expected variant with id field, got:\n{new}"
+                    new_src.contains("EditUser { id: i64 }"),
+                    "expected variant with id field, got:\n{new_src}"
                 );
             }
             _ => panic!("expected Insert"),

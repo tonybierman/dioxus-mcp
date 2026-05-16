@@ -271,6 +271,15 @@ pub struct DslScreenTemplate {
     /// every screen template kind.
     #[serde(default)]
     pub class: Option<String>,
+    /// Body shape switch. Currently only `kind: empty` honors this:
+    ///   - unset (default): emits the historical placeholder `div { h1 { ... } }`
+    ///   - `"empty"` / `"stub"`: emits a bare `rsx! {}` with the imports and
+    ///     `use_<store>()` wiring intact, dropping the throwaway demo markup
+    ///
+    /// Use when you're about to rewrite the screen body anyway and don't want
+    /// the placeholder to flash before your edit lands.
+    #[serde(default)]
+    pub body: Option<String>,
     /// Internal: rich-CRUD context populated by `expand_resources` so the list
     /// and form templates can emit a real table (with edit/delete actions) or
     /// an edit-by-id form. Not part of the user-facing spec.
@@ -372,6 +381,13 @@ pub struct DslScreen {
     /// `endpoint`) and navigates to `redirect_to`.
     #[serde(default)]
     pub template: Option<DslScreenTemplate>,
+    /// When true, if `route:` is already mapped by a different variant in the
+    /// on-disk Routable enum, the existing variant is removed first (as if you
+    /// had added a matching `remove: [{kind: remove_route, variant: ...}]`
+    /// entry) instead of failing pre-flight with a collision error. Use this
+    /// to "take over" a route from a demo screen without a two-step edit.
+    #[serde(default)]
+    pub replace_route: bool,
     /// Internal: path-param fields for the Routable variant (e.g.
     /// `[("id", "i64")]` for `/items/:id`). Set by `expand_resources` for
     /// edit screens; not part of the user-facing spec.
@@ -483,6 +499,11 @@ pub struct DslLoginScreen {
     pub name: String,
     pub route: String,
     pub redirect_on_success: String,
+    /// When true, behaves like `DslScreen.replace_route`: an on-disk variant
+    /// that already maps to `route:` is removed first instead of triggering a
+    /// pre-flight collision error.
+    #[serde(default)]
+    pub replace_route: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -728,7 +749,8 @@ const CORE_SCREEN: &str = r#"  Screen:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
       - {name: wrap_with, type: "ComponentName (e.g. a ProtectedRoute guard)", required: false}
-      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?, class?}", required: false}
+      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?, class?, body?}. `body: empty` (alias `body: stub`) on kind=empty drops the placeholder div+h1, emitting a bare `rsx! {}` so you can immediately rewrite the body without churn — imports and `use_<store>()` wiring stay intact.", required: false}
+      - {name: replace_route, type: "bool — when true, if `route:` is already mapped by a different variant in the on-disk Routable enum, that variant is removed first (as if you had added a matching `remove: [{kind: remove_route, ...}]` entry). Lets a fresh Screen take over a route from a `dx new` demo without a two-step edit.", required: false}
     template_kinds: [empty, resource_list, resource_form, client_crud]
     client_crud_fields:
       - {name: store, type: "ClientStore name in this doc", required: true}
@@ -1070,6 +1092,9 @@ pub fn {{ pascal }}() -> Element {
     let _store = use_{{ store_snake }}();
     // `_store` exposes the ClientStore context; rename and use as needed.
 {%- endif %}
+{%- if body_empty %}
+    rsx! {}
+{%- else %}
     rsx! {
 {%- if wrap_pascal %}
         {{ wrap_pascal }} {
@@ -1083,6 +1108,7 @@ pub fn {{ pascal }}() -> Element {
         }
 {%- endif %}
     }
+{%- endif %}
 }
 "#;
 
@@ -2373,6 +2399,13 @@ pub async fn execute_code(
 
     let crate_root = scaffold::crate_root(state, p.project_root.as_deref()).await?;
 
+    // `replace_route: true` on a Screen / LoginScreen is a shorthand for
+    // "drop the colliding on-disk variant first, then insert the new one."
+    // Expand it into actual `remove: [{kind: remove_route, ...}]` entries so
+    // the rest of the pipeline (preflight, dry_run plan, apply_removes) sees
+    // the same shape it would if the user had written the removes themselves.
+    synthesize_replace_route_removes(&mut doc, &crate_root);
+
     // Pre-compute the set of leaf files `remove:` will delete. Preflight
     // collision checks skip these so a single doc can "remove demo Hero;
     // create my Hero" in one call.
@@ -2888,6 +2921,20 @@ pub async fn execute_code(
         && let Some(msg) = run_cargo_check(&crate_root).await
     {
         result.next_steps.push(msg);
+    } else if !p.cargo_check
+        && !p.dry_run
+        && (!result.files_created.is_empty() || !result.files_modified.is_empty())
+        && is_nontrivial_scaffold(&doc)
+    {
+        // Discoverability: surface the `cargo_check: true` opt-in on any
+        // non-trivial scaffold that actually wrote something, so callers
+        // (especially agents) learn it exists without having to read the
+        // schema. Suppressed when cargo_check was already opted in, on
+        // dry-runs, on pure no-op re-runs, or on trivial single-primitive
+        // scaffolds where a manual `cargo check` is trivially equivalent.
+        result.next_steps.push(
+            "tip: re-run with `cargo_check: true` to surface compile-time errors from the scaffolded code in the same response".into(),
+        );
     }
 
     // High-level outcome so callers don't have to interpret three vector
@@ -2903,6 +2950,37 @@ pub async fn execute_code(
     });
 
     Ok(result)
+}
+
+/// True when the doc scaffolds enough that compile-time errors are plausible
+/// and a `cargo check` is worth surfacing. Used to gate the `cargo_check: true`
+/// discoverability hint — we don't want to nag callers for trivial one-primitive
+/// scaffolds.
+fn is_nontrivial_scaffold(doc: &DslDoc) -> bool {
+    let touches_server =
+        !doc.server_fns.is_empty() || doc.resources.iter().any(|r| !r.fields.is_empty());
+    let touches_screens = !doc.screens.is_empty() || !doc.login_screens.is_empty();
+    let touches_data = !doc.stores.is_empty()
+        || !doc.client_stores.is_empty()
+        || !doc.signals.is_empty()
+        || !doc.sockets.is_empty();
+    let primitive_count = doc.models.len()
+        + doc.server_fns.len()
+        + doc.resources.len()
+        + doc.stores.len()
+        + doc.client_stores.len()
+        + doc.signals.len()
+        + doc.sockets.len()
+        + doc.feeds.len()
+        + doc.components.len()
+        + doc.forms.len()
+        + doc.lists.len()
+        + doc.tables.len()
+        + doc.screens.len()
+        + doc.login_screens.len()
+        + doc.protected_routes.len()
+        + doc.session_states.len();
+    touches_server || touches_screens || touches_data || primitive_count >= 2
 }
 
 /// Append `next_steps` hints when the doc emitted primitives that depend on
@@ -3704,6 +3782,81 @@ fn preflight(
                     "route path {:?} is declared twice in this doc: by {prev:?} and by {:?} — rename one or change its `route:`",
                     sc.route, sc.name
                 ));
+            }
+        }
+    }
+
+    // Route-path collisions against the EXISTING Routable enum on disk. The
+    // per-screen insert in `scaffold::create_route` catches this too, but only
+    // after some primitives have already been written — pre-flight surfaces it
+    // up front with the colliding variant name so the caller knows whether to
+    // rename their new variant or `remove_route:` the existing one.
+    //
+    // Variants listed under the doc's `remove:` block are excluded — the
+    // route_collision check has to assume those will be gone by the time the
+    // create step runs (removes execute before creates in execute_code).
+    {
+        let router_file = scaffold::find_routable(crate_root);
+        if let Some(path) = router_file.as_ref()
+            && let Ok(src) = std::fs::read_to_string(path)
+        {
+            let existing: Vec<(String, String)> = scaffold::existing_route_paths(&src);
+            if !existing.is_empty() {
+                let rel = path.strip_prefix(crate_root).unwrap_or(path).display();
+                let removed_variants: BTreeSet<String> = doc
+                    .remove
+                    .iter()
+                    .filter_map(|r| match r {
+                        DslRemove::RemoveRoute { variant } => Some(variant.to_pascal_case()),
+                        _ => None,
+                    })
+                    .collect();
+                let new_routes: Vec<(&str, &str, &str, bool)> = doc
+                    .screens
+                    .iter()
+                    .map(|s| ("screen", s.name.as_str(), s.route.as_str(), s.replace_route))
+                    .chain(doc.login_screens.iter().map(|ls| {
+                        (
+                            "login_screen",
+                            ls.name.as_str(),
+                            ls.route.as_str(),
+                            ls.replace_route,
+                        )
+                    }))
+                    .collect();
+                for (kind, name, route, replace) in &new_routes {
+                    let normalized = normalize_route_path(route);
+                    let new_variant = name.to_pascal_case();
+                    for (existing_variant, existing_path) in &existing {
+                        if normalize_route_path(existing_path) != normalized {
+                            continue;
+                        }
+                        if existing_variant == &new_variant {
+                            // Same variant, same path → idempotent re-run. The
+                            // per-screen create_route call returns AlreadyMatches
+                            // for this case; nothing to flag here.
+                            continue;
+                        }
+                        if removed_variants.contains(existing_variant) {
+                            // The doc explicitly removes this variant first;
+                            // the create step will see a clean slot.
+                            continue;
+                        }
+                        if *replace {
+                            // `replace_route: true` opts into the
+                            // "drop the existing variant first" path; the
+                            // actual remove is synthesized in execute_code
+                            // before the create step.
+                            continue;
+                        }
+                        return Err(format!(
+                            "route path {route:?} is already mapped by variant {existing_variant:?} in `{rel}` — {kind} {name:?} would collide. \
+                             Options: (a) change the {kind}'s `route:` to a fresh path, (b) rename the {kind} to {existing_variant:?} to take over the existing variant, \
+                             (c) add `replace_route: true` on the {kind} to drop the on-disk variant automatically, \
+                             or (d) add `remove: [{{ kind: remove_route, variant: {existing_variant:?} }}]` to drop the on-disk variant before re-running."
+                        ));
+                    }
+                }
             }
         }
     }
@@ -4778,6 +4931,15 @@ fn render_screen_template(
                 .class
                 .clone()
                 .unwrap_or_else(|| default_screen_class(snake));
+            let body_empty = match t.body.as_deref() {
+                Some("empty") | Some("stub") => true,
+                None => false,
+                Some(other) => {
+                    return Err(format!(
+                        "screen {pascal:?} kind=empty: `body` must be \"empty\" or \"stub\" (or omitted), got {other:?}"
+                    ));
+                }
+            };
             render(
                 "screen",
                 SCREEN_TPL,
@@ -4787,6 +4949,7 @@ fn render_screen_template(
                     wrap_pascal => wrap_pascal,
                     root_class => root_class,
                     store_snake => store_snake,
+                    body_empty => body_empty,
                 },
             )
         }
@@ -5829,9 +5992,11 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 label_field: None,
                 checkbox_field: None,
                 class: None,
+                body: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
+            replace_route: false,
         });
         doc.screens.push(DslScreen {
             name: new_screen,
@@ -5850,9 +6015,11 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 label_field: None,
                 checkbox_field: None,
                 class: None,
+                body: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
+            replace_route: false,
         });
         doc.screens.push(DslScreen {
             name: edit_screen,
@@ -5869,9 +6036,11 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 label_field: None,
                 checkbox_field: None,
                 class: None,
+                body: None,
                 crud: Some(crud),
             }),
             route_params: vec![("id".to_string(), id_type.clone())],
+            replace_route: false,
         });
     }
     Ok(synth)
@@ -5970,6 +6139,70 @@ async fn generate_synth_server_fn(
 // ===========================================================================
 // remove: delete entire on-disk items
 // ===========================================================================
+
+/// Expand every `replace_route: true` on Screen / LoginScreen into an explicit
+/// `RemoveRoute` entry on `doc.remove`. Looks at the on-disk Routable enum,
+/// matches each route path against the existing variants (skipping same-variant
+/// no-ops and variants the user already listed for removal), and appends one
+/// entry per genuine collision. If there's no Routable file yet (a fresh `dx
+/// new` project before bootstrap), `replace_route` is a silent no-op — there
+/// is nothing on disk to replace.
+fn synthesize_replace_route_removes(doc: &mut DslDoc, crate_root: &Path) {
+    let any_replace = doc.screens.iter().any(|s| s.replace_route)
+        || doc.login_screens.iter().any(|ls| ls.replace_route);
+    if !any_replace {
+        return;
+    }
+    let Some(router_path) = scaffold::find_routable(crate_root) else {
+        return;
+    };
+    let Ok(src) = std::fs::read_to_string(&router_path) else {
+        return;
+    };
+    let existing = scaffold::existing_route_paths(&src);
+    if existing.is_empty() {
+        return;
+    }
+    let mut already_removed: BTreeSet<String> = doc
+        .remove
+        .iter()
+        .filter_map(|r| match r {
+            DslRemove::RemoveRoute { variant } => Some(variant.to_pascal_case()),
+            _ => None,
+        })
+        .collect();
+    let candidates: Vec<(String, String, bool)> = doc
+        .screens
+        .iter()
+        .map(|s| (s.name.clone(), s.route.clone(), s.replace_route))
+        .chain(
+            doc.login_screens
+                .iter()
+                .map(|ls| (ls.name.clone(), ls.route.clone(), ls.replace_route)),
+        )
+        .collect();
+    for (name, route, replace) in candidates {
+        if !replace {
+            continue;
+        }
+        let normalized = normalize_route_path(&route);
+        let new_variant = name.to_pascal_case();
+        for (existing_variant, existing_path) in &existing {
+            if normalize_route_path(existing_path) != normalized {
+                continue;
+            }
+            if existing_variant == &new_variant {
+                continue;
+            }
+            if !already_removed.insert(existing_variant.clone()) {
+                continue;
+            }
+            doc.remove.push(DslRemove::RemoveRoute {
+                variant: existing_variant.clone(),
+            });
+        }
+    }
+}
 
 /// Return the leaf-file paths a `remove:` block would delete. Routes don't
 /// have leaf files — they're slotted out of the Routable enum source — so
@@ -7023,6 +7256,194 @@ screens:
     }
 
     #[test]
+    fn preflight_rejects_route_already_in_on_disk_routable_enum() {
+        // Existing src/router.rs maps `/users` to `User`; a new doc adds a
+        // screen `Customers` at the same path. The pre-flight should surface
+        // the collision with the on-disk variant name and all three options
+        // (rename / take over / remove) so the caller doesn't have to read the
+        // file before re-running.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: Customers
+    route: /users
+"#,
+        )
+        .unwrap();
+        let err = preflight(&doc, &[], dir.path(), false).unwrap_err();
+        assert!(
+            err.contains("/users") && err.contains("User"),
+            "error should name the colliding path and the existing variant, got: {err}"
+        );
+        assert!(
+            err.contains("remove_route"),
+            "error should suggest the remove_route option, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_route_collision_check_skips_doc_remove_targets() {
+        // When the doc explicitly removes the colliding variant first, the
+        // pre-flight check must NOT fire — the create step will see a clean
+        // slot once the remove block executes.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+remove:
+  - kind: remove_route
+    variant: User
+screens:
+  - name: Customers
+    route: /users
+"#,
+        )
+        .unwrap();
+        preflight(&doc, &[], dir.path(), false)
+            .expect("remove of conflicting variant should be respected");
+    }
+
+    #[test]
+    fn preflight_route_collision_check_allows_idempotent_rerun() {
+        // Same variant + same path is an idempotent re-run; no collision.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        // Need the components/user.rs to exist so the FS pre-check passes too;
+        // exercise with if_missing: true so the existing component file becomes
+        // a benign skip rather than a hard error.
+        std::fs::create_dir_all(dir.path().join("src/components")).unwrap();
+        std::fs::write(dir.path().join("src/components/user.rs"), "// existing\n").unwrap();
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: User
+    route: /users
+"#,
+        )
+        .unwrap();
+        preflight(&doc, &[], dir.path(), true).expect("idempotent re-run should pass pre-flight");
+    }
+
+    #[test]
+    fn replace_route_synthesizes_remove_for_colliding_variant() {
+        // Screen `Customers` at `/users` with `replace_route: true` collides
+        // with the existing `User` variant; the helper should append a
+        // `RemoveRoute { variant: "User" }` to doc.remove so the rest of the
+        // pipeline tears the old variant down before inserting the new one.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/users")]
+    User {},
+}
+"#,
+        )
+        .unwrap();
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: Customers
+    route: /users
+    replace_route: true
+"#,
+        )
+        .unwrap();
+        synthesize_replace_route_removes(&mut doc, dir.path());
+        let has_remove_user = doc.remove.iter().any(|r| {
+            matches!(r,
+            DslRemove::RemoveRoute { variant } if variant == "User")
+        });
+        assert!(
+            has_remove_user,
+            "expected a synthesized RemoveRoute for User, got: {:?}",
+            doc.remove
+        );
+        // And the doc with the synthesized remove should pass pre-flight.
+        preflight(&doc, &[], dir.path(), false)
+            .expect("collision should be resolved by replace_route");
+    }
+
+    #[test]
+    fn replace_route_is_noop_when_no_collision() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/home")]
+    Home {},
+}
+"#,
+        )
+        .unwrap();
+        let mut doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: Customers
+    route: /users
+    replace_route: true
+"#,
+        )
+        .unwrap();
+        synthesize_replace_route_removes(&mut doc, dir.path());
+        assert!(
+            doc.remove.is_empty(),
+            "no existing collision → no synthesized removes, got: {:?}",
+            doc.remove
+        );
+    }
+
+    #[test]
     fn normalize_route_path_collapses_param_names_and_trailing_slash() {
         assert_eq!(normalize_route_path("/users"), "/users");
         assert_eq!(normalize_route_path("/users/"), "/users");
@@ -7169,6 +7590,7 @@ screens:
             label_field: None,
             checkbox_field: None,
             class: Some("page-todo".into()),
+            body: None,
             crud: None,
         };
         let body = render_screen_template(
@@ -7211,6 +7633,7 @@ screens:
             label_field: None,
             checkbox_field: None,
             class: None,
+            body: None,
             crud: None,
         };
         let err = render_screen_template(
@@ -7223,6 +7646,107 @@ screens:
         )
         .unwrap_err();
         assert!(err.contains("unknown client_store"), "got: {err}");
+    }
+
+    #[test]
+    fn screen_template_empty_body_drops_placeholder() {
+        // `body: "empty"` (alias `"stub"`) on kind=empty should emit a bare
+        // `rsx! {}` and skip the placeholder div+h1, while keeping the imports
+        // and `use_<store>()` wiring intact.
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: None,
+            auto_id: Some(true),
+        };
+        let t = DslScreenTemplate {
+            kind: "empty".into(),
+            endpoint: None,
+            item_type: None,
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: Some("TodoStore".into()),
+            label_field: None,
+            checkbox_field: None,
+            class: None,
+            body: Some("empty".into()),
+            crud: None,
+        };
+        let body = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "TodoScreen",
+            "todo_screen",
+            None,
+            &[cs.clone()],
+            &t,
+        )
+        .unwrap();
+        assert!(
+            body.contains("let _store = use_todo_store();"),
+            "store wiring should remain, got:\n{body}"
+        );
+        assert!(
+            body.contains("rsx! {}"),
+            "expected bare `rsx! {{}}`, got:\n{body}"
+        );
+        assert!(
+            !body.contains("h1 {"),
+            "placeholder h1 should be dropped, got:\n{body}"
+        );
+        assert!(
+            !body.contains("div { class:"),
+            "placeholder div should be dropped, got:\n{body}"
+        );
+
+        // `body: stub` should behave the same as `body: empty`.
+        let t_stub = DslScreenTemplate {
+            body: Some("stub".into()),
+            ..t.clone()
+        };
+        let body_stub = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "TodoScreen",
+            "todo_screen",
+            None,
+            &[cs],
+            &t_stub,
+        )
+        .unwrap();
+        assert!(
+            body_stub.contains("rsx! {}"),
+            "stub alias should also drop the placeholder, got:\n{body_stub}"
+        );
+    }
+
+    #[test]
+    fn screen_template_empty_body_rejects_unknown_value() {
+        let t = DslScreenTemplate {
+            kind: "empty".into(),
+            endpoint: None,
+            item_type: None,
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: None,
+            label_field: None,
+            checkbox_field: None,
+            class: None,
+            body: Some("nope".into()),
+            crud: None,
+        };
+        let err = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "TodoScreen",
+            "todo_screen",
+            None,
+            &[],
+            &t,
+        )
+        .unwrap_err();
+        assert!(err.contains("\"empty\""), "got: {err}");
     }
 
     #[test]
