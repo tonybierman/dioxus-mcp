@@ -220,7 +220,7 @@ pub async fn create_component(
 
     // ensure mod.rs exports it
     let mod_rs = components_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -411,6 +411,96 @@ pub(crate) fn has_derive(attr: &syn::Attribute, target: &str) -> bool {
     found
 }
 
+/// Find the crate root .rs (src/main.rs preferred, then src/lib.rs).
+pub(crate) fn find_crate_root_file(crate_root: &Path) -> Option<PathBuf> {
+    for cand in &["src/main.rs", "src/lib.rs"] {
+        let p = crate_root.join(cand);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Idempotently declare `pub mod {module};` in the crate root (src/main.rs or
+/// src/lib.rs). Returns `Ok(Some(path))` if the file was modified, `Ok(None)`
+/// if the declaration was already present, and `Ok(None)` if no crate root
+/// could be located (silent no-op — callers fall back to a `next_steps` hint).
+///
+/// Insertion point: after the last existing `mod`/`pub mod` line if any, then
+/// after the last `use` line, else at the top after inner attributes.
+pub(crate) fn upsert_crate_mod(crate_root: &Path, module: &str) -> Result<Option<PathBuf>, String> {
+    let Some(path) = find_crate_root_file(crate_root) else {
+        return Ok(None);
+    };
+    let current = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+
+    // Already declared (either `pub mod foo;` or `mod foo;`, with any leading
+    // whitespace / attributes)?
+    let needle_pub = format!("pub mod {module};");
+    let needle_priv = format!("mod {module};");
+    for raw in current.lines() {
+        let t = raw.trim();
+        if t == needle_pub || t == needle_priv {
+            return Ok(None);
+        }
+    }
+
+    let lines: Vec<&str> = current.lines().collect();
+    // Find insertion line: after last `mod`/`pub mod` line, else after last
+    // `use` line, else after the leading attribute/comment block.
+    let mut insert_at = None;
+    for (i, raw) in lines.iter().enumerate() {
+        let t = raw.trim_start();
+        if t.starts_with("mod ") || t.starts_with("pub mod ") {
+            insert_at = Some(i + 1);
+        }
+    }
+    if insert_at.is_none() {
+        for (i, raw) in lines.iter().enumerate() {
+            let t = raw.trim_start();
+            if t.starts_with("use ") || t.starts_with("pub use ") {
+                insert_at = Some(i + 1);
+            }
+        }
+    }
+    let insert_at = insert_at.unwrap_or_else(|| {
+        // Skip a leading shebang, then any contiguous block of inner
+        // attributes / doc comments / blank lines.
+        let mut i = 0;
+        if i < lines.len() && lines[i].starts_with("#!") && !lines[i].starts_with("#![") {
+            i += 1;
+        }
+        while i < lines.len() {
+            let t = lines[i].trim();
+            if t.is_empty()
+                || t.starts_with("#![")
+                || t.starts_with("//!")
+                || t.starts_with("//")
+            {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        i
+    });
+
+    let mut new_lines: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
+    new_lines.insert(insert_at, format!("pub mod {module};"));
+    let mut rebuilt = new_lines.join("\n");
+    // Preserve trailing newline if the original had one.
+    if current.ends_with('\n') && !rebuilt.ends_with('\n') {
+        rebuilt.push('\n');
+    }
+
+    if rebuilt == current {
+        return Ok(None);
+    }
+    std::fs::write(&path, rebuilt).map_err(|e| e.to_string())?;
+    Ok(Some(path))
+}
+
 pub(crate) fn find_routable(crate_root: &Path) -> Option<PathBuf> {
     for cand in &["src/router.rs", "src/route.rs", "src/main.rs", "src/lib.rs"] {
         let p = crate_root.join(cand);
@@ -584,7 +674,7 @@ pub async fn create_server_fn(
 
     // ensure src/server/mod.rs declares it
     let mod_rs = server_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -624,9 +714,26 @@ pub(crate) enum ModUpsert {
 /// `unused_imports` when one of the synthesized items (e.g. a delete_* server
 /// fn) isn't called by anything yet, so suppressing the warning at the
 /// re-export site keeps `cargo check` clean during iteration.
-pub(crate) fn upsert_mod_entry(mod_rs: &Path, name: &str) -> Result<ModUpsert, String> {
+///
+/// When `cfg_attr` is `Some(attr)`, each emitted `pub mod` / `pub use` line is
+/// prefixed with that attribute on its own line — used for `src/state/mod.rs`
+/// because store files are themselves `#![cfg(feature = "server")]` and the
+/// module declarations need the same gate to not break the wasm build.
+pub(crate) fn upsert_mod_entry(
+    mod_rs: &Path,
+    name: &str,
+    cfg_attr: Option<&str>,
+) -> Result<ModUpsert, String> {
     if !mod_rs.exists() {
-        let body = format!("#![allow(unused_imports)]\npub mod {name};\npub use {name}::*;\n");
+        let mut body = String::from("#![allow(unused_imports)]\n");
+        for line in [format!("pub mod {name};"), format!("pub use {name}::*;")] {
+            if let Some(cfg) = cfg_attr {
+                body.push_str(cfg);
+                body.push('\n');
+            }
+            body.push_str(&line);
+            body.push('\n');
+        }
         std::fs::write(mod_rs, body).map_err(|e| e.to_string())?;
         return Ok(ModUpsert::Created);
     }
@@ -640,6 +747,11 @@ pub(crate) fn upsert_mod_entry(mod_rs: &Path, name: &str) -> Result<ModUpsert, S
         let line = raw.trim();
         if line == "#![allow(unused_imports)]" {
             had_allow_unused = true;
+            continue;
+        }
+        // Drop outer cfg attributes — we re-emit them uniformly from cfg_attr.
+        if line.starts_with("#[cfg(") {
+            header_done = true;
             continue;
         }
         if let Some(rest) = line.strip_prefix("pub mod ")
@@ -679,6 +791,10 @@ pub(crate) fn upsert_mod_entry(mod_rs: &Path, name: &str) -> Result<ModUpsert, S
     }
     for lines in entries.values() {
         for l in lines {
+            if let Some(cfg) = cfg_attr {
+                rebuilt.push_str(cfg);
+                rebuilt.push('\n');
+            }
             rebuilt.push_str(l);
             rebuilt.push('\n');
         }
@@ -809,7 +925,7 @@ mod mod_upsert_tests {
     fn creates_when_missing() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("mod.rs");
-        let r = upsert_mod_entry(&p, "foo").unwrap();
+        let r = upsert_mod_entry(&p, "foo", None).unwrap();
         assert_eq!(r, ModUpsert::Created);
         let body = std::fs::read_to_string(&p).unwrap();
         // Freshly-created mod.rs files carry an `#![allow(unused_imports)]`
@@ -831,7 +947,7 @@ mod mod_upsert_tests {
             "pub mod alpha;\npub use alpha::*;\npub mod zeta;\npub use zeta::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(&p, "mid").unwrap();
+        let r = upsert_mod_entry(&p, "mid", None).unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(
@@ -849,7 +965,7 @@ mod mod_upsert_tests {
             "pub mod zeta;\npub use zeta::*;\npub mod alpha;\npub use alpha::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(&p, "alpha").unwrap();
+        let r = upsert_mod_entry(&p, "alpha", None).unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(
@@ -864,7 +980,7 @@ mod mod_upsert_tests {
         let p = dir.path().join("mod.rs");
         let initial = "pub mod alpha;\npub use alpha::*;\npub mod beta;\npub use beta::*;\n";
         std::fs::write(&p, initial).unwrap();
-        let r = upsert_mod_entry(&p, "alpha").unwrap();
+        let r = upsert_mod_entry(&p, "alpha", None).unwrap();
         assert_eq!(r, ModUpsert::Unchanged);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(body, initial);
@@ -879,12 +995,52 @@ mod mod_upsert_tests {
             "// hand-written header\n//! crate doc\npub mod zeta;\npub use zeta::*;\n",
         )
         .unwrap();
-        let r = upsert_mod_entry(&p, "alpha").unwrap();
+        let r = upsert_mod_entry(&p, "alpha", None).unwrap();
         assert_eq!(r, ModUpsert::Modified);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(
             body,
             "// hand-written header\n//! crate doc\npub mod alpha;\npub use alpha::*;\npub mod zeta;\npub use zeta::*;\n"
+        );
+    }
+
+    #[test]
+    fn cfg_attr_emitted_for_fresh_file() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        let r =
+            upsert_mod_entry(&p, "product_store", Some("#[cfg(feature = \"server\")]")).unwrap();
+        assert_eq!(r, ModUpsert::Created);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            body,
+            "#![allow(unused_imports)]\n\
+             #[cfg(feature = \"server\")]\npub mod product_store;\n\
+             #[cfg(feature = \"server\")]\npub use product_store::*;\n"
+        );
+    }
+
+    #[test]
+    fn cfg_attr_added_to_existing_entries() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("mod.rs");
+        std::fs::write(
+            &p,
+            "#![allow(unused_imports)]\n\
+             #[cfg(feature = \"server\")]\npub mod alpha;\n\
+             #[cfg(feature = \"server\")]\npub use alpha::*;\n",
+        )
+        .unwrap();
+        let r = upsert_mod_entry(&p, "beta", Some("#[cfg(feature = \"server\")]")).unwrap();
+        assert_eq!(r, ModUpsert::Modified);
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            body,
+            "#![allow(unused_imports)]\n\
+             #[cfg(feature = \"server\")]\npub mod alpha;\n\
+             #[cfg(feature = \"server\")]\npub use alpha::*;\n\
+             #[cfg(feature = \"server\")]\npub mod beta;\n\
+             #[cfg(feature = \"server\")]\npub use beta::*;\n"
         );
     }
 }

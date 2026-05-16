@@ -233,7 +233,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Return the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for new CRUD features. Call this BEFORE `execute_code` so the model authors a valid YAML doc."
+        description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for new CRUD features."
     )]
     async fn get_dsl_spec(
         &self,
@@ -246,7 +246,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Materialize a Dioxus 0.7 file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, next_steps, and (when applicable) collisions. \
+        description = "Use this whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Materializes a file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, next_steps, and (when applicable) collisions. \
 \
 Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) without writing anything. Pass `if_missing: true` to skip primitives whose target leaf file already exists (reported in `collisions`) instead of erroring — makes re-runs during iteration safe."
     )]
@@ -344,6 +344,19 @@ impl ServerHandler for DioxusMcp {
              CALL THE TOOL instead of asking them to paste output or stack traces. \
              That is what these tools are for. \
              \
+             SCAFFOLDING ANY NEW CODE — models, components, server fns, routes, screens, \
+             stores, or full CRUD slices — ALWAYS start with `get_dsl_spec` then \
+             `execute_code`. This applies to every prompt shaped like \"build X\", \
+             \"add X\", \"scaffold X\", \"create a new model / screen / server fn\", \
+             \"wire up CRUD for X\", \"make a feature for X\", or \"build me an app\". \
+             The DSL handles single primitives just as well as full app slices; there is \
+             no \"too small\" case. The `Resource` primitive emits a complete \
+             model+store+server-fn+screens CRUD slice in one entry — prefer it for any \
+             new resource. Per-primitive tools (`create_component`, `create_route`, \
+             `create_server_fn`) exist for narrow agent workflows and are NOT the \
+             default — prefer the DSL. \
+             \
+             Other routing: \
              - Runtime / behavior questions (panics, crashes, renders, signal writes, \
                navigations, \"what just happened\", \"was there a panic\") -> runtime_events. \
              - Server-fn latency, error rates, in-flight calls -> server_fn_summary. \
@@ -354,8 +367,6 @@ impl ServerHandler for DioxusMcp {
                signal_lint, props_lint, asset_audit, audit_feature_flags, openapi_spec, \
                explain_signal_graph. Whole-project lint pass -> lint_project. \
              - Reading Dioxus 0.7 docs / canonical examples -> search_docs, find_example. \
-             - Scaffolding new code -> create_component, create_route, create_server_fn. \
-             - Bulk scaffolding from a YAML DSL -> get_dsl_spec then execute_code. \
              - RSX correctness check -> check_rsx. \
              \
              Probe note: runtime_events and server_fn_summary read the JSONL log written \

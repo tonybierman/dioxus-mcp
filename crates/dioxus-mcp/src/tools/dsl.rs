@@ -132,6 +132,14 @@ pub struct DslResource {
     /// `/products` and `/products/new` are appended automatically.
     #[serde(default)]
     pub route_base: Option<String>,
+    /// Override the auto-pluralized form of the resource name (used to build
+    /// the default `route_base` and the `list_{plural}` server-fn name).
+    /// Provide the snake_case plural — e.g. `plural: people` for `Person`,
+    /// `plural: mice` for `Mouse`. When unset, the built-in pluralizer is used
+    /// (handles regular `+s`, `+es` for s/sh/ch/x/z endings, and `y → ies`
+    /// after a consonant).
+    #[serde(default)]
+    pub plural: Option<String>,
     /// Extra derives forwarded to the synthesized Model.
     #[serde(default)]
     pub derives: Vec<String>,
@@ -580,12 +588,13 @@ const CORE_STORE: &str = r#"  Store:
 "#;
 
 const CORE_RESOURCE: &str = r#"  Resource:
-    description: "A meta-primitive that fans out into a Model + Store + 5 server fns (list/get/create/update/delete) + 2 screens (list at `{route_base}` and new at `{route_base}/new`). One entry yields a full CRUD slice. The model must declare an integer id field; defaults to id with type i64. URL params (e.g. an edit-by-id route) are not yet emitted — wire that manually."
+    description: "A meta-primitive that fans out into a Model + Store + 5 server fns (list/get/create/update/delete) + 3 screens (list at `{route_base}`, new at `{route_base}/new`, edit at `{route_base}/:id/edit`). One entry yields a full CRUD slice. The list screen renders a rich table with edit/delete actions; the new screen submits via create_{snake} and redirects to the list; the edit screen takes an `id` URL param, fetches via get_{snake}, and submits via update_{snake}. The model must declare an integer id field (defaults to `id: i64`)."
     fields:
       - {name: name, type: "PascalCase resource name (Product, Order, …)", required: true}
       - {name: fields, type: "ModelField[] — must contain the id field", required: true}
       - {name: id_field, type: "string (default \"id\")", required: false}
-      - {name: route_base, type: "string (default \"/{plural-snake}\")", required: false}
+      - {name: route_base, type: "string (default \"/{plural-snake}\"); plural follows `plural` if set, else the built-in algorithm (regular `+s`; `+es` for s/sh/ch/x/z endings; `y → ies` after a consonant)", required: false}
+      - {name: plural, type: "string — override the auto-pluralized form for irregular nouns (Person → people, Mouse → mice). Affects the default route_base and the list_{plural} server-fn name.", required: false}
       - {name: derives, type: "string[] forwarded to the synthesized Model", required: false}
     example:
       resources:
@@ -594,6 +603,11 @@ const CORE_RESOURCE: &str = r#"  Resource:
             - {name: id, type: i64}
             - {name: name, type: String}
             - {name: description, type: String, optional: true}
+        - name: Person
+          plural: people
+          fields:
+            - {name: id, type: i64}
+            - {name: name, type: String}
 "#;
 
 const CORE_MODIFY: &str = r#"  Modify:
@@ -1341,6 +1355,9 @@ use crate::components::{{ wrap_pascal }};
 {%- endif %}
 use crate::server::{{ list_endpoint }};
 use crate::server::{{ delete_endpoint }};
+{%- if route_link %}
+use {{ route_link.import_path }};
+{%- endif %}
 
 #[component]
 pub fn {{ pascal }}() -> Element {
@@ -1355,7 +1372,11 @@ pub fn {{ pascal }}() -> Element {
         {{ wrap_pascal }} {
             div { class: "screen {{ snake }}",
                 div { class: "toolbar",
+{%- if route_link %}
+                    Link { to: {{ route_link.enum_name }}::{{ route_link.new_variant }} {}, "New {{ humanized }}" }
+{%- else %}
                     a { href: "{{ new_route }}", "New {{ humanized }}" }
+{%- endif %}
                 }
                 match &*items.read_unchecked() {
                     None => rsx! { div { "Loading..." } },
@@ -1363,7 +1384,11 @@ pub fn {{ pascal }}() -> Element {
                     Some(Ok(rows)) if rows.is_empty() => rsx! {
                         div { class: "empty",
                             p { "No items yet." }
+{%- if route_link %}
+                            Link { to: {{ route_link.enum_name }}::{{ route_link.new_variant }} {}, "Add your first {{ humanized }}" }
+{%- else %}
                             a { href: "{{ new_route }}", "Add your first {{ humanized }}" }
+{%- endif %}
                         }
                     },
                     Some(Ok(rows)) => rsx! {
@@ -1380,10 +1405,14 @@ pub fn {{ pascal }}() -> Element {
                                 for row in rows.iter() {
                                     tr { key: "{{ '{' }}row.{{ id_field }}{{ '}' }}",
 {%- for col in columns %}
-                                        td { "{{ '{' }}row.{{ col.name }}{{ col.fmt }}{{ '}' }}" }
+                                        td { "{{ col.cell }}" }
 {%- endfor %}
                                         td {
+{%- if route_link %}
+                                            Link { to: {{ route_link.enum_name }}::{{ route_link.edit_variant }} { {{ route_link.id_field }}: row.{{ id_field }}.clone() }, "Edit" }
+{%- else %}
                                             a { href: "{{ list_route }}/{{ '{' }}row.{{ id_field }}{{ '}' }}/edit", "Edit" }
+{%- endif %}
                                             " "
                                             button {
                                                 onclick: {
@@ -1411,7 +1440,11 @@ pub fn {{ pascal }}() -> Element {
 {%- else %}
         div { class: "screen {{ snake }}",
             div { class: "toolbar",
+{%- if route_link %}
+                Link { to: {{ route_link.enum_name }}::{{ route_link.new_variant }} {}, "New {{ humanized }}" }
+{%- else %}
                 a { href: "{{ new_route }}", "New {{ humanized }}" }
+{%- endif %}
             }
             match &*items.read_unchecked() {
                 None => rsx! { div { "Loading..." } },
@@ -1419,7 +1452,11 @@ pub fn {{ pascal }}() -> Element {
                 Some(Ok(rows)) if rows.is_empty() => rsx! {
                     div { class: "empty",
                         p { "No items yet." }
+{%- if route_link %}
+                        Link { to: {{ route_link.enum_name }}::{{ route_link.new_variant }} {}, "Add your first {{ humanized }}" }
+{%- else %}
                         a { href: "{{ new_route }}", "Add your first {{ humanized }}" }
+{%- endif %}
                     }
                 },
                 Some(Ok(rows)) => rsx! {
@@ -1436,10 +1473,14 @@ pub fn {{ pascal }}() -> Element {
                             for row in rows.iter() {
                                 tr { key: "{{ '{' }}row.{{ id_field }}{{ '}' }}",
 {%- for col in columns %}
-                                    td { "{{ '{' }}row.{{ col.name }}{{ col.fmt }}{{ '}' }}" }
+                                    td { "{{ col.cell }}" }
 {%- endfor %}
                                     td {
+{%- if route_link %}
+                                        Link { to: {{ route_link.enum_name }}::{{ route_link.edit_variant }} { {{ route_link.id_field }}: row.{{ id_field }}.clone() }, "Edit" }
+{%- else %}
                                         a { href: "{{ list_route }}/{{ '{' }}row.{{ id_field }}{{ '}' }}/edit", "Edit" }
+{%- endif %}
                                         " "
                                         button {
                                             onclick: {
@@ -1773,7 +1814,6 @@ pub async fn execute_code(
         merge(&mut result, r);
     }
 
-    let mut store_emitted = false;
     for st in &doc.stores {
         if skip_or_record(
             &skip,
@@ -1784,7 +1824,6 @@ pub async fn execute_code(
         }
         let r = generate_store(&crate_root, st)?;
         merge(&mut result, r);
-        store_emitted = true;
     }
 
     for sf in &synth_server_fns {
@@ -1962,22 +2001,191 @@ pub async fn execute_code(
         );
     }
 
-    if models_emitted {
-        result.next_steps.push(
-            "ensure `serde = { version = \"1\", features = [\"derive\"] }` is in your Cargo.toml for the generated model(s)".into(),
-        );
-        result.next_steps.push(
-            "declare `pub mod model;` in your crate root (src/main.rs or src/lib.rs) so the generated types are reachable as `crate::model::*`".into(),
-        );
+    // Auto-declare top-level modules in the crate root (src/main.rs or
+    // src/lib.rs) for every subdir we wrote into. Skips quietly if no crate
+    // root is found (e.g. workspace-only layout); the generated files will
+    // still be on disk and a next_steps hint covers the manual case.
+    let touched_top_mods = top_level_modules_touched(&result, &crate_root);
+    for module in &touched_top_mods {
+        match scaffold::upsert_crate_mod(&crate_root, module) {
+            Ok(Some(path)) => result.files_modified.push(path),
+            Ok(None) => {}
+            Err(e) => {
+                result.next_steps.push(format!(
+                    "could not auto-declare `pub mod {module};` in crate root: {e} — add it yourself in src/main.rs or src/lib.rs"
+                ));
+            }
+        }
+    }
+    if scaffold::find_crate_root_file(&crate_root).is_none() && !touched_top_mods.is_empty() {
+        let mods = touched_top_mods.join(", ");
+        result.next_steps.push(format!(
+            "no src/main.rs or src/lib.rs found — declare `pub mod {{{mods}}};` in your crate root manually"
+        ));
     }
 
-    if store_emitted {
-        result.next_steps.push(
-            "declare `pub mod state;` in your crate root so server fns can resolve `crate::state::*` (the store files are `#![cfg(feature = \"server\")]` and compile to nothing on the wasm side)".into(),
-        );
+    if models_emitted {
+        match ensure_serde_in_cargo_toml(&crate_root) {
+            Ok(SerdePatch::AlreadyOk) => {}
+            Ok(SerdePatch::Patched(path)) => {
+                result.files_modified.push(path);
+                result
+                    .next_steps
+                    .push("patched Cargo.toml to add `serde = { version = \"1\", features = [\"derive\"] }` (required by the generated model(s))".into());
+            }
+            Ok(SerdePatch::PresentWithoutDeriveFeature) => {
+                result.next_steps.push(
+                    "your Cargo.toml has `serde` but not the `derive` feature — add `features = [\"derive\"]` so the generated model(s) compile".into(),
+                );
+            }
+            Ok(SerdePatch::NoCargoToml) => {
+                result.next_steps.push(
+                    "no Cargo.toml found at the crate root — ensure `serde = { version = \"1\", features = [\"derive\"] }` is declared somewhere upstream for the generated model(s)".into(),
+                );
+            }
+            Err(e) => {
+                result.next_steps.push(format!(
+                    "could not auto-patch Cargo.toml for serde: {e} — add `serde = {{ version = \"1\", features = [\"derive\"] }}` manually"
+                ));
+            }
+        }
     }
+
+    dedup_paths(&mut result.files_created);
+    dedup_paths(&mut result.files_modified);
+    dedup_paths(&mut result.collisions);
 
     Ok(result)
+}
+
+enum SerdePatch {
+    AlreadyOk,
+    Patched(std::path::PathBuf),
+    PresentWithoutDeriveFeature,
+    NoCargoToml,
+}
+
+/// Check whether the crate's Cargo.toml already pulls in `serde` with the
+/// `derive` feature. If not present at all, append a serde dep line under
+/// `[dependencies]`. If present without the derive feature, return a marker so
+/// the caller can emit a manual-fix hint (re-writing an existing dep table
+/// entry risks clobbering other settings the user authored).
+fn ensure_serde_in_cargo_toml(crate_root: &Path) -> Result<SerdePatch, String> {
+    let path = crate_root.join("Cargo.toml");
+    if !path.exists() {
+        return Ok(SerdePatch::NoCargoToml);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let parsed: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+
+    let serde_value = parsed
+        .get("dependencies")
+        .and_then(|d| d.as_table())
+        .and_then(|t| t.get("serde"));
+    match serde_value {
+        Some(v) => {
+            // Either a bare version string (no features) or a table — both need
+            // a `derive` feature for `#[derive(Serialize, Deserialize)]`.
+            let has_derive = v
+                .as_table()
+                .and_then(|t| t.get("features"))
+                .and_then(|f| f.as_array())
+                .map(|arr| arr.iter().any(|x| x.as_str() == Some("derive")))
+                .unwrap_or(false);
+            if has_derive {
+                Ok(SerdePatch::AlreadyOk)
+            } else {
+                Ok(SerdePatch::PresentWithoutDeriveFeature)
+            }
+        }
+        None => {
+            let new_text = append_dep_to_cargo_toml(
+                &text,
+                "serde",
+                r#"serde = { version = "1", features = ["derive"] }"#,
+            )?;
+            std::fs::write(&path, new_text).map_err(|e| e.to_string())?;
+            Ok(SerdePatch::Patched(path))
+        }
+    }
+}
+
+/// Append a new dep line into an existing `[dependencies]` table (or create
+/// the table at the end of the file if it doesn't exist). Preserves the
+/// user's existing formatting elsewhere — we only inject a single new line.
+fn append_dep_to_cargo_toml(text: &str, dep_name: &str, line: &str) -> Result<String, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    // Find the `[dependencies]` header; only the literal `[dependencies]` table
+    // (not `[dependencies.foo]` sub-tables, which write a single dep each).
+    let header_idx = lines
+        .iter()
+        .position(|l| l.trim() == "[dependencies]");
+    if let Some(idx) = header_idx {
+        // Insert right after the header (top of the table block).
+        let mut new_lines: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
+        // Skip past contiguous blank lines just after the header to land below
+        // any header-attached blank line.
+        let mut insert_at = idx + 1;
+        while insert_at < new_lines.len() && new_lines[insert_at].trim().is_empty() {
+            insert_at += 1;
+        }
+        new_lines.insert(insert_at, line.to_string());
+        let mut out = new_lines.join("\n");
+        if text.ends_with('\n') && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        Ok(out)
+    } else {
+        // No [dependencies] section at all — append one.
+        let mut out = text.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("\n[dependencies]\n");
+        out.push_str(line);
+        out.push('\n');
+        let _ = dep_name;
+        Ok(out)
+    }
+}
+
+/// Order-preserving dedup. `files_modified` in particular accumulates one
+/// entry per route/component insertion (e.g. src/main.rs and src/components/mod.rs
+/// show up dozens of times in a resource scaffold); deduping keeps the response
+/// scannable.
+fn dedup_paths(v: &mut Vec<std::path::PathBuf>) {
+    let mut seen: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    v.retain(|p| seen.insert(p.clone()));
+}
+
+/// Return the unique set of top-level src/{module}/ subdirs that received at
+/// least one emitted file. Used to drive crate-root `pub mod` injection.
+fn top_level_modules_touched(result: &ScaffoldResult, crate_root: &Path) -> Vec<String> {
+    let src = crate_root.join("src");
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    let scan = |paths: &Vec<std::path::PathBuf>, out: &mut BTreeSet<String>| {
+        for p in paths {
+            let Ok(rel) = p.strip_prefix(&src) else {
+                continue;
+            };
+            let mut comps = rel.components();
+            let Some(first) = comps.next() else { continue };
+            // Only count entries that are *inside* a subdir (i.e. there's
+            // another component after the first) — a bare `src/main.rs` edit
+            // isn't a module subdir.
+            if comps.next().is_none() {
+                continue;
+            }
+            if let std::path::Component::Normal(name) = first
+                && let Some(n) = name.to_str()
+            {
+                out.insert(n.to_string());
+            }
+        }
+    };
+    scan(&result.files_created, &mut out);
+    scan(&result.files_modified, &mut out);
+    out.into_iter().collect()
 }
 
 fn has_extra_documents(yaml: &str) -> bool {
@@ -2184,6 +2392,9 @@ fn plan_dsl(doc: &DslDoc, synth_server_fns: &[SynthServerFn], crate_root: &Path)
         }
     }
 
+    dedup_paths(&mut out.would_create);
+    dedup_paths(&mut out.would_modify);
+    dedup_paths(&mut out.collisions);
     out
 }
 
@@ -2465,8 +2676,17 @@ fn write_module_file(
         return Err(format!("{} already exists", target.display()));
     }
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
+    // src/state/ entries declare server-only store modules; without the
+    // matching cfg gate on the `pub mod`/`pub use` lines, the wasm (web-only)
+    // build fails with E0432 because the file is `#![cfg(feature = "server")]`
+    // and effectively absent.
+    let cfg_attr = if subdir == "src/state" {
+        Some("#[cfg(feature = \"server\")]")
+    } else {
+        None
+    };
     let mod_rs = dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, snake)?;
+    let upsert = upsert_mod_entry(&mod_rs, snake, cfg_attr)?;
     let (created, modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -2574,7 +2794,7 @@ fn generate_form(crate_root: &Path, f: &DslForm) -> Result<ScaffoldResult, Strin
             let validation = fd.validation.clone().unwrap_or_default();
             context! {
                 name => fd.name.to_snake_case(),
-                label => fd.name.to_pascal_case(),
+                label => humanize(&fd.name),
                 input_type => input_type,
                 tag => tag,
                 initial => initial,
@@ -2850,7 +3070,7 @@ async fn generate_screen(
                 wrap_pascal => wrap_pascal.clone(),
             },
         )?,
-        Some(t) => render_screen_template(&pascal, &snake, wrap_pascal.as_deref(), t)?,
+        Some(t) => render_screen_template(crate_root, &pascal, &snake, wrap_pascal.as_deref(), t)?,
     };
     let mut r = write_component_file(crate_root, &snake, body)?;
     if let Some(w) = &wrap_pascal {
@@ -2874,6 +3094,7 @@ async fn generate_screen(
 }
 
 fn render_screen_template(
+    crate_root: &Path,
     pascal: &str,
     snake: &str,
     wrap_pascal: Option<&str>,
@@ -2894,7 +3115,7 @@ fn render_screen_template(
             // table with edit/delete actions. Otherwise fall back to the
             // simple list ladder for user-authored cases.
             if let Some(crud) = &t.crud {
-                return render_resource_crud_list(pascal, snake, wrap_pascal, crud);
+                return render_resource_crud_list(crate_root, pascal, snake, wrap_pascal, crud);
             }
             let endpoint = t
                 .endpoint
@@ -2960,7 +3181,7 @@ fn render_screen_template(
                     };
                     context! {
                         name => fd.name.to_snake_case(),
-                        label => fd.name.to_pascal_case(),
+                        label => humanize(&fd.name),
                         input_type => input_type,
                         tag => tag,
                         initial => initial,
@@ -2990,7 +3211,64 @@ fn render_screen_template(
     }
 }
 
+/// Locate the Routable enum on disk and return the import path callers can use
+/// from a sibling component file (e.g. "crate::Route" when the enum is in
+/// main.rs / lib.rs; "crate::router::Route" when in src/router.rs). Returns
+/// None when no Routable enum is found, in which case the list template falls
+/// back to plain `<a href>` links to avoid emitting un-compilable code.
+fn detect_route_import(crate_root: &Path) -> Option<(String, String)> {
+    let path = scaffold::find_routable(crate_root)?;
+    let src_rel = path.strip_prefix(crate_root.join("src")).ok()?;
+    let src = std::fs::read_to_string(&path).ok()?;
+    let file = syn::parse_file(&src).ok()?;
+    let enum_name = file.items.iter().find_map(|it| match it {
+        syn::Item::Enum(e) => {
+            let has_routable = e.attrs.iter().any(|a| {
+                if !a.path().is_ident("derive") {
+                    return false;
+                }
+                let mut found = false;
+                let _ = a.parse_nested_meta(|m| {
+                    if m.path.is_ident("Routable") {
+                        found = true;
+                    }
+                    Ok(())
+                });
+                found
+            });
+            if has_routable {
+                Some(e.ident.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    })?;
+    // Module path from crate root: drop the trailing `.rs`, treat `main` /
+    // `lib` as the crate root (no module prefix), otherwise build
+    // `crate::a::b::Enum` from the parent dirs + filename stem.
+    let stem = src_rel.file_stem()?.to_str()?;
+    let parent_components: Vec<String> = src_rel
+        .parent()
+        .into_iter()
+        .flat_map(|p| p.components())
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => n.to_str().map(String::from),
+            _ => None,
+        })
+        .collect();
+    let import = if (stem == "main" || stem == "lib") && parent_components.is_empty() {
+        format!("crate::{enum_name}")
+    } else {
+        let mut segs = parent_components;
+        segs.push(stem.to_string());
+        format!("crate::{}::{}", segs.join("::"), enum_name)
+    };
+    Some((import, enum_name))
+}
+
 fn render_resource_crud_list(
+    crate_root: &Path,
     pascal: &str,
     snake: &str,
     wrap_pascal: Option<&str>,
@@ -3002,9 +3280,8 @@ fn render_resource_crud_list(
         .map(|f| {
             let inner = strip_option(&f.ty).unwrap_or(&f.ty);
             let optional = f.optional || strip_option(&f.ty).is_some();
-            // Option<...> doesn't impl Display; fall back to Debug. Custom
-            // (non-primitive) types may not impl Display either — use Debug to
-            // be safe; users can post-edit if they want a Display format.
+            // Non-Display fallback: custom types may not impl Display, so use
+            // Debug. Users can post-edit if they want a different format.
             let is_primitive = matches!(
                 inner,
                 "String"
@@ -3025,14 +3302,45 @@ fn render_resource_crud_list(
                     | "f64"
                     | "char"
             );
-            let fmt = if optional || !is_primitive { ":?" } else { "" };
+            let name = f.name.to_snake_case();
+            // For Option<T> we want a *value* in the cell, not `Some(...)` /
+            // `None` (Debug formatting); reach into the Option and render the
+            // inner via Display (or empty string for None).
+            let cell = if optional {
+                if is_primitive {
+                    format!("{{row.{name}.as_ref().map(|v| v.to_string()).unwrap_or_default()}}")
+                } else {
+                    // Non-Display inner — fall back to Debug of the inner value,
+                    // still avoiding the Some(..)/None wrapper.
+                    format!("{{row.{name}.as_ref().map(|v| format!(\"{{:?}}\", v)).unwrap_or_default()}}")
+                }
+            } else if is_primitive {
+                format!("{{row.{name}}}")
+            } else {
+                format!("{{row.{name}:?}}")
+            };
             context! {
-                name => f.name.to_snake_case(),
+                name => name,
                 label => humanize(&f.name),
-                fmt => fmt,
+                cell => cell,
             }
         })
         .collect();
+    // Build SPA-friendly Link expressions when we can resolve the Route enum
+    // import path. Fall back to plain `a { href: ... }` when no Routable enum
+    // is on disk (no router file yet) — that's at least correct.
+    let route_link = detect_route_import(crate_root).map(|(import_path, enum_name)| {
+        let new_variant = format!("{}NewScreen", crud.model_pascal);
+        let edit_variant = format!("{}EditScreen", crud.model_pascal);
+        context! {
+            import_path => import_path,
+            enum_name => enum_name,
+            new_variant => new_variant,
+            edit_variant => edit_variant,
+            id_field => crud.id_field.clone(),
+        }
+    });
+
     render(
         "screen_resource_crud_list",
         SCREEN_RESOURCE_CRUD_LIST_TPL,
@@ -3047,6 +3355,7 @@ fn render_resource_crud_list(
             id_field => crud.id_field.clone(),
             humanized => humanize(&crud.model_pascal),
             columns => columns,
+            route_link => route_link,
         },
     )
 }
@@ -3080,7 +3389,7 @@ fn render_resource_edit_form(
             let signal_init_from_item = signal_init_from_item(fd);
             context! {
                 name => fd.name.to_snake_case(),
-                label => fd.name.to_pascal_case(),
+                label => humanize(&fd.name),
                 input_type => input_type,
                 tag => tag,
                 is_bool => is_bool,
@@ -3360,9 +3669,6 @@ fn generate_store(crate_root: &Path, store: &DslStore) -> Result<ScaffoldResult,
         },
     )?;
     let mut r = write_module_file(crate_root, "src/state", &store_snake, body)?;
-    r.next_steps.push(format!(
-        "declare `pub mod state;` in your crate root so server fns can reach `crate::state::{store_snake}::{store_pascal}`"
-    ));
     if emit_tests {
         r.next_steps.push(format!(
             "run `cargo test --features server -p <crate>` to execute the generated CRUD tests for {store_pascal}"
@@ -3408,7 +3714,14 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
             .find(|f| f.name.to_snake_case() == id_field)
             .map(|f| f.ty.clone())
             .unwrap_or_else(|| "i64".into());
-        let plural = pluralize(&res_snake);
+        // Explicit override wins; otherwise fall back to the built-in
+        // pluralizer. Snake-case the override too so irregular forms still
+        // produce valid URL slugs / fn names.
+        let plural = r
+            .plural
+            .as_deref()
+            .map(|p| p.to_snake_case())
+            .unwrap_or_else(|| pluralize(&res_snake));
         // Default URL slugs are kebab-case (web convention): a model named
         // `StockMovement` lands at `/stock-movements`, not `/stock_movements`.
         // User-supplied `route_base` is taken verbatim.
@@ -3419,7 +3732,11 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
         let store_pascal = format!("{res_pascal}Store");
         let store_snake = format!("{res_snake}_store");
 
-        // 1. Model — synthesize unless already declared.
+        // 1. Model — synthesize unless already declared. Default is forced
+        // (here AND when patching an in-doc pre-declared model below) because
+        // resource expansion turns on emit_tests for the store, and the
+        // synthesized CRUD tests call `Model::default()`. Without this, tests
+        // wouldn't compile.
         if existing_models.insert(res_snake.clone()) {
             let mut derives = r.derives.clone();
             if !derives.iter().any(|d| d == "Default") {
@@ -3430,6 +3747,13 @@ fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, String> {
                 fields: r.fields.clone(),
                 derives,
             });
+        } else if let Some(m) = doc
+            .models
+            .iter_mut()
+            .find(|m| m.name.to_snake_case() == res_snake)
+            && !m.derives.iter().any(|d| d == "Default")
+        {
+            m.derives.push("Default".into());
         }
 
         // 2. Store — synthesize unless already declared.
@@ -3661,7 +3985,7 @@ async fn generate_synth_server_fn(
     )?;
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
     let mod_rs = server_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),
@@ -4355,6 +4679,16 @@ dioxus = { version = "0.7", features = ["fullstack"] }
         )
         .unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
+        // A minimal main.rs so the crate-root `pub mod` auto-injection has a
+        // file to patch — exercising the post-#2 behavior.
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+fn main() {}
+"#,
+        )
+        .unwrap();
 
         let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
         let result = execute_code(
@@ -4385,14 +4719,76 @@ models:
             "expected a serde next_step, got {:?}",
             result.next_steps
         );
+        // Cargo.toml should have been auto-patched with the serde dep line.
+        let cargo = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
         assert!(
-            result
-                .next_steps
-                .iter()
-                .any(|s| s.contains("pub mod model;")),
-            "expected a `pub mod model;` next_step, got {:?}",
-            result.next_steps
+            cargo.contains(r#"serde = { version = "1", features = ["derive"] }"#),
+            "expected Cargo.toml to be patched with serde dep, got:\n{cargo}"
         );
+        let cargo_path = root.join("Cargo.toml");
+        assert!(
+            result.files_modified.contains(&cargo_path),
+            "Cargo.toml should appear in files_modified after auto-patch, got {:?}",
+            result.files_modified
+        );
+        let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("pub mod model;"),
+            "expected main.rs to be patched with `pub mod model;`, got:\n{main_rs}"
+        );
+        let main_path = root.join("src/main.rs");
+        assert!(
+            result.files_modified.contains(&main_path),
+            "main.rs should appear in files_modified, got {:?}",
+            result.files_modified
+        );
+    }
+
+    #[test]
+    fn ensure_serde_no_op_when_already_correct() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "ok"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+"#,
+        )
+        .unwrap();
+        match ensure_serde_in_cargo_toml(root).unwrap() {
+            SerdePatch::AlreadyOk => {}
+            _ => panic!("expected AlreadyOk for serde with derive feature"),
+        }
+    }
+
+    #[test]
+    fn ensure_serde_reports_missing_derive_feature() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "missing_derive"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "1"
+"#,
+        )
+        .unwrap();
+        match ensure_serde_in_cargo_toml(root).unwrap() {
+            SerdePatch::PresentWithoutDeriveFeature => {}
+            other => panic!(
+                "expected PresentWithoutDeriveFeature, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
     }
 
     #[test]
@@ -4454,6 +4850,18 @@ pub enum Route {
     #[route("/")]
     Home {},
 }
+"#,
+        )
+        .unwrap();
+        // main.rs so the crate-root `pub mod` auto-injection has a file to
+        // patch. Without this, only a fallback next_steps hint is emitted.
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+pub mod router;
+
+fn main() {}
 "#,
         )
         .unwrap();
@@ -4523,7 +4931,12 @@ resources:
         syn::parse_file(&store_body).unwrap_or_else(|e| {
             panic!("generated store file should parse as Rust: {e}\n--- file ---\n{store_body}")
         });
-        assert!(root.join("src/state/mod.rs").exists());
+        let state_mod = std::fs::read_to_string(root.join("src/state/mod.rs")).unwrap();
+        assert!(
+            state_mod.contains(r#"#[cfg(feature = "server")]"#)
+                && state_mod.contains("pub mod product_store;"),
+            "state/mod.rs must cfg-gate store entries (otherwise wasm build fails E0432), got:\n{state_mod}"
+        );
 
         // 5 server fns
         for name in [
@@ -4556,15 +4969,16 @@ resources:
             "new screen should be in router, got:\n{router}"
         );
 
-        // Helpful next_steps
-        assert!(
-            result
-                .next_steps
-                .iter()
-                .any(|s| s.contains("pub mod state;")),
-            "expected a `pub mod state;` next_step, got {:?}",
-            result.next_steps
-        );
+        // main.rs should be auto-patched with `pub mod` declarations for
+        // every emitted top-level subdir (model, state, server, components).
+        let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        for needed in ["pub mod model;", "pub mod state;", "pub mod server;", "pub mod components;"]
+        {
+            assert!(
+                main_rs.contains(needed),
+                "expected main.rs to contain `{needed}`, got:\n{main_rs}"
+            );
+        }
 
         // The list screen uses use_resource + match ladder bound to list_products.
         let list_body =
@@ -4644,6 +5058,19 @@ resources:
             syn::parse_file(&body)
                 .unwrap_or_else(|e| panic!("emitted {rel} does not parse: {e}\n---\n{body}"));
         }
+
+        // files_modified should be deduplicated — without it, src/router.rs and
+        // src/components/mod.rs each appear once per route/component inserted.
+        let mut sorted = result.files_modified.clone();
+        sorted.sort();
+        let mut deduped = sorted.clone();
+        deduped.dedup();
+        assert_eq!(
+            sorted.len(),
+            deduped.len(),
+            "files_modified must be deduped; saw {:?}",
+            result.files_modified
+        );
     }
 
     #[tokio::test]
@@ -4792,9 +5219,23 @@ resources:
             list_body.contains("delete_product("),
             "delete button should call delete_product, got:\n{list_body}"
         );
+        // List uses typed Link to the route enum for SPA navigation rather than
+        // `<a href>` (which would force a full page reload).
         assert!(
-            list_body.contains("/products/{row.id}/edit"),
-            "edit link should point at /products/{{id}}/edit, got:\n{list_body}"
+            list_body.contains("Link { to: Route::ProductEditScreen { id: row.id.clone() }"),
+            "edit link should be a typed Link to the EditScreen route variant, got:\n{list_body}"
+        );
+        assert!(
+            list_body.contains("Link { to: Route::ProductNewScreen {}"),
+            "new link should be a typed Link to the NewScreen route variant, got:\n{list_body}"
+        );
+        assert!(
+            list_body.contains("use crate::router::Route;"),
+            "list screen should import the Route enum, got:\n{list_body}"
+        );
+        assert!(
+            !list_body.contains("a { href: \"/products/new\""),
+            "list should not retain the old `a {{ href: }}` form, got:\n{list_body}"
         );
         assert!(
             list_body.contains("*version.write() += 1"),
@@ -4804,6 +5245,41 @@ resources:
         assert!(
             !list_body.contains("li { \"{item:?}\" }"),
             "list should not retain the placeholder li body, got:\n{list_body}"
+        );
+        // Option<T> columns must render the inner value, not Debug-format the
+        // Option wrapper (which would produce literal "Some(...)" / "None" in
+        // the cell).
+        assert!(
+            list_body.contains("row.description.as_ref().map(|v| v.to_string()).unwrap_or_default()"),
+            "Option<String> column should be unwrapped, not Debug-formatted, got:\n{list_body}"
+        );
+        assert!(
+            list_body.contains("row.reorder_at.as_ref().map(|v| v.to_string()).unwrap_or_default()"),
+            "Option<i64> column should be unwrapped, not Debug-formatted, got:\n{list_body}"
+        );
+        assert!(
+            !list_body.contains("{row.description:?}")
+                && !list_body.contains("{row.reorder_at:?}"),
+            "no Option column should be Debug-formatted, got:\n{list_body}"
+        );
+
+        // Form labels in the new/edit screens should be human-readable
+        // (matching the list-screen <th> style), not raw PascalCase identifiers.
+        let new_body =
+            std::fs::read_to_string(root.join("src/components/product_new_screen.rs")).unwrap();
+        assert!(
+            new_body.contains("label { \"Reorder at\" }"),
+            "form label should be de-PascalCased, got:\n{new_body}"
+        );
+        assert!(
+            !new_body.contains("label { \"ReorderAt\" }"),
+            "form label should not be PascalCase, got:\n{new_body}"
+        );
+        let edit_body =
+            std::fs::read_to_string(root.join("src/components/product_edit_screen.rs")).unwrap();
+        assert!(
+            edit_body.contains("label { \"Reorder at\" }"),
+            "edit form label should be de-PascalCased, got:\n{edit_body}"
         );
 
         // The edit screen should pre-populate signals from the loaded item,
@@ -4891,6 +5367,70 @@ resources:
         assert!(
             !root.join("src/state/order_store.rs").exists(),
             "dry_run must not write"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_plural_override_drives_route_and_server_fn_names() {
+        // `Person → people` is the canonical irregular case; the built-in
+        // pluralizer would emit `persons`, so this exercises the `plural`
+        // override end-to-end (route slug + list_{plural} fn name).
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("plural_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+        execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+resources:
+  - name: Person
+    plural: people
+    fields:
+      - {name: id, type: i64}
+      - {name: name, type: String}
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed with plural override");
+
+        // Route slug uses the override.
+        let router = std::fs::read_to_string(root.join("src/router.rs")).unwrap();
+        assert!(
+            router.contains("/people") && !router.contains("/persons"),
+            "default route slug should follow the `plural:` override, got router:\n{router}"
+        );
+        // list_{plural} server fn uses the override.
+        assert!(
+            root.join("src/server/list_people.rs").exists(),
+            "list server fn should be named after the plural override"
+        );
+        assert!(
+            !root.join("src/server/list_persons.rs").exists(),
+            "auto-pluralized list_persons.rs must not be emitted when override is set"
         );
     }
 

@@ -226,5 +226,17 @@ fn render_summary(
         ));
     }
 
+    if let Some(i) = index
+        && i.components.is_empty()
+        && i.server_fns.is_empty()
+    {
+        out.push_str(
+            "\n> This project has no components or server fns yet. To scaffold \
+             anything in a Dioxus 0.7 project — a model, a screen, a server fn, \
+             or a full CRUD slice (model + store + server fns + screens) — call \
+             `get_dsl_spec` then `execute_code`.\n",
+        );
+    }
+
     out
 }
