@@ -80,37 +80,10 @@ separately in [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md).
   screens), idempotent `modify:` edits, and `remove:` operations that
   clear demo Routable variants / components from a `dx new` starter
   before adding your own. Pre-flights name and route-path collisions
-  plus cross-references before any file is written.
-
-#### Data-layer-only scaffolding (no UI)
-
-Every section in the DSL is optional. If you only want types and state
-plumbing generated — `models` + a `client_store`, or `models` +
-`server_fns` — omit `screens:` entirely and `execute_code` will generate
-exactly the requested primitives without touching the router or wiring
-the App body. This is the recommended shape when you want hand-rolled UI
-on top of generated data types: scaffold the data layer here, then write
-your components against `crate::model::*` / `crate::state::*` directly.
-No `screens:` means no Routable mutation, no `Router::<...>` injection,
-no `provide_*` wiring.
-
-#### Slim spec fetch
-
-The DSL spec is ~10KB. To avoid pulling the whole thing every call:
-- `get_dsl_spec { index_only: true }` returns a compact name +
-  one-line index of every primitive — use it to decide what you need.
-- `get_dsl_spec { sections: [model, client_store, ...] }` returns only
-  the listed sections (extension groups auto-included as needed).
-
-#### `client_crud` is a learning aid, not production UI
-
-The `client_crud` Screen template wires an in-memory todo-style UI to a
-`client_stores:` entry in one call — useful for getting a working
-end-to-end app on screen in seconds. For branded / production apps,
-treat the generated screen as a reference and hand-write the UI against
-the `provide_<store>()` / `use_<store>()` helpers. The same applies to
-`resource_list` / `resource_form`: the generated tables and forms are
-structural starting points, not design-system-ready components.
+  plus cross-references before any file is written. See
+  [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md#execute_code) for the
+  data-layer-only path and the `client_crud` "learning aid, not
+  production UI" caveat.
 
 ### Runtime
 See [RUNTIME_TOOLS.md](RUNTIME_TOOLS.md) for the full event schema and tool docs.

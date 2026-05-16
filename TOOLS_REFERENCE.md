@@ -313,7 +313,12 @@ Refuses if the project isn't fullstack-capable (no `fullstack` feature, and miss
 
 Returns the YAML DSL vocabulary used by `execute_code`. The core block covers `Model`, `Store`, `Resource`, `Component`, `Screen`, `ServerFn`, and `Modify`, plus the smaller primitives they compose on (`Form`, `List`, `Table`, `Signal`, `Socket`, `Feed`, `SessionState`, `LoginScreen`, `ProtectedRoute`). Three extension blocks (`crud`, `realtime`, `auth`) add further primitives on top. Each entry includes its fields and a runnable example.
 
-**Args:** `extensions?` (subset of `["crud", "realtime", "auth"]`; empty / omitted returns core only).
+**Args:** `extensions?` (subset of `["crud", "realtime", "auth"]`; empty / omitted returns core only), `sections?` (subset of primitive names — returns only those sections, with extension groups auto-included as needed), `index_only?` (boolean — returns a compact name + one-line index of every primitive instead of the full spec).
+
+**Slim fetch:** the full spec is ~10KB. To avoid pulling the whole thing every call:
+- `index_only: true` returns just the primitive index — use it to decide what you need.
+- `sections: [model, client_store, ...]` returns only the listed sections.
+- `include_prologue: false` / `include_examples: false` skip the preamble and per-primitive example blocks when you've already seen them.
 
 **Example call:**
 ```json
@@ -369,6 +374,14 @@ Parses a single YAML doc conforming to the spec and materializes the correspondi
 - `Store` primitives accept `emit_tests: true`, which adds five sync `#[test]`s (create, get, update, delete, list) to the generated store file.
 - `Screen` primitives accept a `template:` (e.g. `{ kind: resource_list, endpoint: "..." }` or `{ kind: resource_form, ... }`) that emits a resource-bound list ladder or controlled form, eliminating boilerplate around `use_resource`.
 - `Modify` is idempotent: re-running the same `modify:` entry against a file that already has the field/prop/arg is a no-op rather than an error.
+
+**Data-layer-only scaffolding (no UI):** every section in the DSL is optional. If you only want types and state plumbing — `models:` + a `client_stores:` entry, or `models:` + `server_fns:` — omit `screens:` entirely and `execute_code` generates exactly the requested primitives without touching the router. This is the recommended shape when you want hand-rolled UI on top of generated data types: scaffold the data layer here, then write your components against `crate::model::*` / `crate::state::*` directly. No `screens:` means no Routable mutation and no `Router::<...>` injection.
+
+Two mutations still happen automatically so the generated code compiles and is reachable from your own UI:
+- `pub mod model;` / `pub mod state;` / etc. are added to the crate root (`src/main.rs` or `src/lib.rs`) for every top-level subdir we wrote into. When `model` or `state` is touched but `src/components/` doesn't exist yet, an empty `src/components/mod.rs` is bootstrapped and `pub mod components;` is declared as well — so hand-written UI has a home with no follow-up scaffold step.
+- When `client_stores:` is declared, the matching `provide_{snake}()` calls are spliced into the top of your `fn App()` body (idempotent — skipped if `provide_{snake}()` already appears in the file). Without this, `use_{snake}()` would panic at runtime in the UI you add later. To opt out, omit `client_stores:` and call `provide_{snake}()` yourself, or strip the inserted line after the run.
+
+**`client_crud` is a learning aid, not production UI:** the `client_crud` Screen template wires an in-memory todo-style UI to a `client_stores:` entry in one call — useful for getting a working end-to-end app on screen in seconds. For branded / production apps, treat the generated screen as a reference and hand-write the UI against the `provide_<store>()` / `use_<store>()` helpers. The same applies to `resource_list` / `resource_form`: the generated tables and forms are structural starting points, not design-system-ready components.
 
 **Demonstrated in:** `tool_execute_code_screen_and_nav`, `tool_execute_code_form`, `tool_execute_code_list_calls_server_fn`, `tool_execute_code_protected_route`, `tool_execute_code_unknown_field_rejected`, `tool_execute_code_duplicate_names_rejected`, `tool_execute_code_multidoc_yaml_rejected`, `tool_execute_code_wrong_version_rejected` in [`crates/dioxus-mcp/tests/integration.rs`](crates/dioxus-mcp/tests/integration.rs).
 
