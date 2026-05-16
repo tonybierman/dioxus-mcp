@@ -345,6 +345,18 @@ fn plan_route_insertion(
                 )),
             };
         }
+        // Same path under a different variant name — Dioxus's Routable would
+        // route the first match and silently shadow the second. Surface it
+        // here so the user picks one.
+        if let Some(p) = variant_route_path(v)
+            && p == path
+        {
+            return Err(format!(
+                "route conflict: path {path:?} is already mapped by variant {} in {enum_name}; \
+                 rename one or change the path before re-running",
+                v.ident
+            ));
+        }
     }
 
     let fields = if params.is_empty() {
@@ -886,6 +898,17 @@ pub enum Route {
         let src = "pub enum NotRoutable { Foo, Bar }";
         let err = plan_route_insertion(src, "Foo", "/foo", &[]).unwrap_err();
         assert!(err.contains("Routable"));
+    }
+
+    #[test]
+    fn errors_on_path_collision_with_different_variant() {
+        // A new variant `Landing` at `/` collides with the existing
+        // `Home {}` at `/`. The variant name is fresh so a name-only check
+        // wouldn't catch it — the path-collision check should.
+        let err = plan_route_insertion(BASE, "Landing", "/", &[]).unwrap_err();
+        assert!(err.contains("route conflict"), "got: {err}");
+        assert!(err.contains("Home"), "should name the colliding variant, got: {err}");
+        assert!(err.contains("\"/\""), "should quote the colliding path, got: {err}");
     }
 }
 

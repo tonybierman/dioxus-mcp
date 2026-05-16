@@ -503,6 +503,16 @@ const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #     templates that pair with those server fns; do NOT load the `crud`
 #     extension for a client-only app — `client_crud` already covers it.
 #
+# Data-layer-only path (no UI):
+#   Every section is optional. If you only want types and state plumbing
+#   generated — say, models + a client_store, or models + server_fns — omit
+#   `screens:` entirely and execute_code will generate exactly the requested
+#   primitives without touching the router or wiring an App body. This is the
+#   recommended shape when you want hand-rolled UI on top of generated data
+#   types: scaffold the data layer here, then write your components against
+#   `crate::model::*` / `crate::state::*` directly. No `screens:` means no
+#   Routable mutation, no `Router::<...>` injection, no `provide_*` wiring.
+#
 # All field names are case-sensitive. Unknown fields are rejected.
 #
 # File layout (the blast radius of one execute_code call):
@@ -1459,7 +1469,6 @@ impl {{ pascal }} {
     }
 {%- if id_field %}
 
-    /// Returns true if an item was removed.
     pub fn remove_by_id(self, id: {{ id_type }}) -> bool {
         let mut items = self.items;
         let before = items.read().len();
@@ -1798,6 +1807,16 @@ pub struct GetDslSpecParams {
     /// "crud", "realtime", "auth". Empty / omitted returns core only.
     #[serde(default)]
     pub extensions: Vec<String>,
+    /// Optional list of individual section names to include (case-insensitive).
+    /// Valid core names: model, store, client_store, resource, component,
+    /// screen, server_fn, modify. Valid extension names: form, list, table
+    /// (crud), signal, socket, feed (realtime), session_state, login_screen,
+    /// protected_route (auth). When non-empty, only the listed sections are
+    /// emitted; extension blocks are auto-included as needed. Use this to
+    /// fetch a slim subset (e.g. just `model` + `client_store`) instead of
+    /// the full payload.
+    #[serde(default)]
+    pub sections: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1809,27 +1828,31 @@ pub async fn get_dsl_spec(
     _state: &Arc<State>,
     p: GetDslSpecParams,
 ) -> Result<GetDslSpecResult, String> {
-    let mut out = String::new();
-    out.push_str(CORE_PREAMBLE);
-    out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
-    out.push_str("\ncore:\n");
-    out.push_str(CORE_MODEL);
-    out.push_str(CORE_STORE);
-    out.push_str(CORE_CLIENT_STORE);
-    out.push_str(CORE_RESOURCE);
-    out.push_str(CORE_COMPONENT);
-    out.push_str(CORE_SCREEN);
-    out.push_str(CORE_SERVER_FN);
-    out.push_str(CORE_MODIFY);
+    // Canonical (snake_case) name → (group, body). The group decides whether
+    // a section is emitted under `core:` or under an `extensions: <group>:`
+    // block; the body is the constant text already authored above.
+    const SECTIONS: &[(&str, &str, &str)] = &[
+        ("model",            "core",     CORE_MODEL),
+        ("store",            "core",     CORE_STORE),
+        ("client_store",     "core",     CORE_CLIENT_STORE),
+        ("resource",         "core",     CORE_RESOURCE),
+        ("component",        "core",     CORE_COMPONENT),
+        ("screen",           "core",     CORE_SCREEN),
+        ("server_fn",        "core",     CORE_SERVER_FN),
+        ("modify",           "core",     CORE_MODIFY),
+        ("form",             "crud",     CRUD_FORM),
+        ("list",             "crud",     CRUD_LIST),
+        ("table",            "crud",     CRUD_TABLE),
+        ("signal",           "realtime", REALTIME_SIGNAL),
+        ("socket",           "realtime", REALTIME_SOCKET),
+        ("feed",             "realtime", REALTIME_FEED),
+        ("session_state",    "auth",     AUTH_SESSION),
+        ("login_screen",     "auth",     AUTH_LOGIN),
+        ("protected_route",  "auth",     AUTH_PROTECTED),
+    ];
 
-    let want = |k: &str| p.extensions.iter().any(|e| e.eq_ignore_ascii_case(k));
-    let any_ext = p.extensions.iter().any(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "crud" | "realtime" | "auth"
-        )
-    });
-
+    // Validate `extensions:` first so the error message is the same regardless
+    // of whether `sections:` is also set.
     for e in &p.extensions {
         let lc = e.to_ascii_lowercase();
         if !matches!(lc.as_str(), "crud" | "realtime" | "auth") {
@@ -1839,26 +1862,74 @@ pub async fn get_dsl_spec(
         }
     }
 
+    // Resolve `sections:` to canonical names. Empty => no filter.
+    let section_filter: Option<BTreeSet<String>> = if p.sections.is_empty() {
+        None
+    } else {
+        let known: BTreeSet<&str> = SECTIONS.iter().map(|(n, _, _)| *n).collect();
+        let mut set = BTreeSet::new();
+        for s in &p.sections {
+            let lc = s.to_ascii_lowercase();
+            if !known.contains(lc.as_str()) {
+                let mut valid: Vec<&str> = SECTIONS.iter().map(|(n, _, _)| *n).collect();
+                valid.sort();
+                return Err(format!(
+                    "unknown section {s:?}; valid: {}",
+                    valid.join(", ")
+                ));
+            }
+            set.insert(lc);
+        }
+        Some(set)
+    };
+
+    let want_extension = |k: &str| p.extensions.iter().any(|e| e.eq_ignore_ascii_case(k));
+
+    // A section is included when (a) no filter is active and its group is
+    // either "core" or a requested extension, or (b) a filter is active and
+    // names the section. Filters auto-pull in their parent extension block.
+    let include = |name: &str, group: &str| -> bool {
+        match &section_filter {
+            None => match group {
+                "core" => true,
+                ext => want_extension(ext),
+            },
+            Some(set) => set.contains(name),
+        }
+    };
+
+    let mut out = String::new();
+    out.push_str(CORE_PREAMBLE);
+    out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
+
+    let any_core = SECTIONS.iter().any(|(n, g, _)| *g == "core" && include(n, g));
+    if any_core {
+        out.push_str("\ncore:\n");
+        for (name, group, body) in SECTIONS.iter().filter(|(_, g, _)| *g == "core") {
+            if include(name, group) {
+                out.push_str(body);
+            }
+        }
+    }
+
+    let ext_groups = ["crud", "realtime", "auth"];
+    let any_ext = ext_groups
+        .iter()
+        .any(|g| SECTIONS.iter().any(|(n, sg, _)| sg == g && include(n, sg)));
     if any_ext {
         out.push_str("\nextensions:\n");
-    }
-    if want("crud") {
-        out.push_str(" crud:\n");
-        out.push_str(&indent(CRUD_FORM, " "));
-        out.push_str(&indent(CRUD_LIST, " "));
-        out.push_str(&indent(CRUD_TABLE, " "));
-    }
-    if want("realtime") {
-        out.push_str(" realtime:\n");
-        out.push_str(&indent(REALTIME_SIGNAL, " "));
-        out.push_str(&indent(REALTIME_SOCKET, " "));
-        out.push_str(&indent(REALTIME_FEED, " "));
-    }
-    if want("auth") {
-        out.push_str(" auth:\n");
-        out.push_str(&indent(AUTH_SESSION, " "));
-        out.push_str(&indent(AUTH_LOGIN, " "));
-        out.push_str(&indent(AUTH_PROTECTED, " "));
+        for g in ext_groups {
+            let group_active = SECTIONS.iter().any(|(n, sg, _)| sg == &g && include(n, sg));
+            if !group_active {
+                continue;
+            }
+            out.push_str(&format!(" {g}:\n"));
+            for (name, group, body) in SECTIONS.iter().filter(|(_, sg, _)| sg == &g) {
+                if include(name, group) {
+                    out.push_str(&indent(body, " "));
+                }
+            }
+        }
     }
 
     Ok(GetDslSpecResult { spec: out })
@@ -1898,6 +1969,12 @@ pub struct ExecuteCodeParams {
     /// collisions detected on disk. Default: false.
     #[serde(default)]
     pub dry_run: bool,
+    /// When true, run `cargo check` (no-op build) in the crate root after a
+    /// successful (non-dry-run) write to surface compile-time API drift
+    /// inline. Failures are appended as a single `next_steps` entry; the
+    /// written files are kept either way. Default: false.
+    #[serde(default)]
+    pub cargo_check: bool,
 }
 
 pub async fn execute_code(
@@ -1941,6 +2018,7 @@ pub async fn execute_code(
     // applies or nothing does.
     let bootstrap = bootstrap_router_if_needed(&doc, &crate_root)?;
     let app_wiring = wire_app_if_needed(&doc, &crate_root)?;
+    let routable_warning = routable_location_warning(&doc, &crate_root, &bootstrap);
 
     let skip: BTreeSet<std::path::PathBuf> = if p.if_missing {
         skip_set(&doc, &synth_server_fns, &crate_root)
@@ -1972,6 +2050,9 @@ pub async fn execute_code(
     // hints for cases we couldn't auto-wire land in next_steps.
     result.files_modified.extend(app_wiring.modified);
     result.next_steps.extend(app_wiring.next_steps);
+    if let Some(w) = routable_warning {
+        result.next_steps.push(w);
+    }
 
     // Order matters: models first (so server fn return types and stores can
     // resolve them), then server fns (fail-fast on fullstack gating), then
@@ -2286,21 +2367,21 @@ pub async fn execute_code(
                 result.files_modified.push(path);
                 result
                     .next_steps
-                    .push("patched Cargo.toml to add `serde = { version = \"1\", features = [\"derive\"] }` (required by the generated model(s))".into());
+                    .push("Cargo.toml: added `serde = { version = \"1\", features = [\"derive\"] }` (required by the generated model(s))".into());
             }
             Ok(SerdePatch::PresentWithoutDeriveFeature) => {
                 result.next_steps.push(
-                    "your Cargo.toml has `serde` but not the `derive` feature — add `features = [\"derive\"]` so the generated model(s) compile".into(),
+                    "Cargo.toml: `serde` is declared without the `derive` feature — add `features = [\"derive\"]` so the generated model(s) compile".into(),
                 );
             }
             Ok(SerdePatch::NoCargoToml) => {
                 result.next_steps.push(
-                    "no Cargo.toml found at the crate root — ensure `serde = { version = \"1\", features = [\"derive\"] }` is declared somewhere upstream for the generated model(s)".into(),
+                    "Cargo.toml: missing at the crate root — declare `serde = { version = \"1\", features = [\"derive\"] }` somewhere upstream for the generated model(s)".into(),
                 );
             }
             Err(e) => {
                 result.next_steps.push(format!(
-                    "could not auto-patch Cargo.toml for serde: {e} — add `serde = {{ version = \"1\", features = [\"derive\"] }}` manually"
+                    "Cargo.toml: auto-patch for serde failed ({e}) — add `serde = {{ version = \"1\", features = [\"derive\"] }}` manually"
                 ));
             }
         }
@@ -2317,26 +2398,26 @@ pub async fn execute_code(
                 result.files_modified.push(path);
                 result
                     .next_steps
-                    .push("patched Cargo.toml to enable the `router` feature on the `dioxus` dep (required by the generated screen(s))".into());
+                    .push("Cargo.toml: enabled the `router` feature on the `dioxus` dep (required by the generated screen(s))".into());
             }
             Ok(DioxusRouterPatch::DioxusNotATable) => {
                 result.next_steps.push(
-                    "your Cargo.toml's `dioxus` dep is a bare version string — switch it to a table and add `features = [\"router\"]` so the generated screen(s) compile".into(),
+                    "Cargo.toml: the `dioxus` dep is a bare version string — switch it to a table and add `features = [\"router\"]` so the generated screen(s) compile".into(),
                 );
             }
             Ok(DioxusRouterPatch::DioxusMissing) => {
                 result.next_steps.push(
-                    "your Cargo.toml has no `dioxus` dep — add one with `features = [\"router\"]` (or `\"fullstack\"`) so the generated screen(s) compile".into(),
+                    "Cargo.toml: no `dioxus` dep — add one with `features = [\"router\"]` (or `\"fullstack\"`) so the generated screen(s) compile".into(),
                 );
             }
             Ok(DioxusRouterPatch::NoCargoToml) => {
                 result.next_steps.push(
-                    "no Cargo.toml found at the crate root — ensure `dioxus` is declared with the `router` feature somewhere upstream for the generated screen(s)".into(),
+                    "Cargo.toml: missing at the crate root — declare `dioxus` with the `router` feature somewhere upstream for the generated screen(s)".into(),
                 );
             }
             Err(e) => {
                 result.next_steps.push(format!(
-                    "could not auto-patch Cargo.toml for dioxus/router: {e} — add `router` to the `dioxus` dep's features array manually"
+                    "Cargo.toml: auto-patch for dioxus/router failed ({e}) — add `router` to the `dioxus` dep's features array manually"
                 ));
             }
         }
@@ -2352,6 +2433,17 @@ pub async fn execute_code(
     // straight to the body lines that still need a human (TODO4 §4.2).
     append_todo_next_steps(&mut result, &crate_root);
 
+    // Opt-in `cargo check` so callers can surface compile-time breakage
+    // from generated-vs-host API drift in the same call instead of finding
+    // out 30s later. We only run it when the call actually wrote something
+    // — a pure no-change re-run wouldn't have new breakage to surface.
+    if p.cargo_check
+        && (!result.files_created.is_empty() || !result.files_modified.is_empty())
+        && let Some(msg) = run_cargo_check(&crate_root).await
+    {
+        result.next_steps.push(msg);
+    }
+
     // High-level outcome so callers don't have to interpret three vector
     // lengths. `no_changes` means everything collided (a totally idempotent
     // re-run); `partial` means at least one primitive was skipped while the
@@ -2365,6 +2457,50 @@ pub async fn execute_code(
     });
 
     Ok(result)
+}
+
+/// Run `cargo check --message-format=short` in `crate_root` with a generous
+/// timeout. Returns `Some(message)` when the check fails (or doesn't complete),
+/// `None` when it succeeds. The returned message is a single `next_steps`
+/// entry — we truncate stderr so a slow build doesn't bloat the response.
+async fn run_cargo_check(crate_root: &Path) -> Option<String> {
+    use tokio::process::Command;
+    use tokio::time::{Duration, timeout};
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("check")
+        .arg("--message-format=short")
+        .current_dir(crate_root);
+    // Quiet down build progress so the captured output is just diagnostics.
+    cmd.env("CARGO_TERM_COLOR", "never");
+
+    let fut = cmd.output();
+    let out = match timeout(Duration::from_secs(180), fut).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Some(format!(
+                "cargo_check: failed to spawn `cargo check`: {e} — run it yourself in {}",
+                crate_root.display()
+            ));
+        }
+        Err(_) => {
+            return Some(format!(
+                "cargo_check: `cargo check` exceeded the 180s budget — run it yourself in {}",
+                crate_root.display()
+            ));
+        }
+    };
+    if out.status.success() {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Pull the first ~20 lines of diagnostics — enough for the first few
+    // errors without burying the rest of the response.
+    let snippet: String = stderr.lines().take(20).collect::<Vec<_>>().join("\n");
+    Some(format!(
+        "cargo_check: `cargo check` failed (exit {:?}). First diagnostics:\n{snippet}",
+        out.status.code()
+    ))
 }
 
 /// Scan every freshly-created file for `// TODO` markers and surface
@@ -3260,6 +3396,47 @@ struct BootstrapRouter {
     next_step: Option<String>,
 }
 
+/// Surface a hint when the doc would mutate a Routable enum that lives
+/// somewhere other than `src/router.rs` / `src/route.rs` (the conventions
+/// our scaffolds and search assume). We don't refuse to act — host files
+/// like `src/main.rs` or `src/lib.rs` are still patched via syn — but a
+/// next_steps note tells the user where the edit landed so they can move
+/// the enum into a dedicated module if they want the rest of the codebase
+/// (and future runs of this tool) to stay consistent.
+///
+/// Returns None when:
+///   - the doc declares no routes (nothing to mutate), or
+///   - we just created `src/router.rs` ourselves (conventional location), or
+///   - the existing Routable lives at the conventional path.
+fn routable_location_warning(
+    doc: &DslDoc,
+    crate_root: &Path,
+    bootstrap: &BootstrapRouter,
+) -> Option<String> {
+    if doc.screens.is_empty() && doc.login_screens.is_empty() {
+        return None;
+    }
+    // If bootstrap created the router, it's at the canonical location by
+    // construction — skip the warning.
+    if !bootstrap.created.is_empty() {
+        return None;
+    }
+    let path = scaffold::find_routable(crate_root)?;
+    let rel = path.strip_prefix(crate_root).unwrap_or(&path);
+    // Normalize the relative path with forward slashes so the warning text
+    // is stable on Windows.
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    if rel_str == "src/router.rs" || rel_str == "src/route.rs" {
+        return None;
+    }
+    Some(format!(
+        "Routable enum found in non-conventional location {rel_str:?} — \
+         new route variants will be inserted there. For long-term \
+         consistency consider moving the enum into `src/router.rs` and \
+         re-exporting it from the host file."
+    ))
+}
+
 #[derive(Default)]
 struct WireApp {
     modified: Vec<std::path::PathBuf>,
@@ -3298,12 +3475,13 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
         let mut out = WireApp::default();
         for s in &store_snakes {
             out.next_steps.push(format!(
-                "call `crate::state::{s}::provide_{s}()` in your App component before rendering any screen that calls `use_{s}()`"
+                "(crate root: missing) — add a `fn App()` that calls `crate::state::{s}::provide_{s}()` before rendering any screen that uses `use_{s}()`"
             ));
         }
         return Ok(out);
     };
     let original = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let rel_path = relative_to_crate(crate_root, &path);
 
     let mut out = WireApp::default();
     let mut text = original.clone();
@@ -3315,13 +3493,13 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
         Some(r) => r,
         None => {
             if needs_router {
-                out.next_steps.push(
-                    "no `fn App()` found in your crate root — mount the router manually with `Router::<crate::router::Route> {}` in your top-level component".into(),
-                );
+                out.next_steps.push(format!(
+                    "{rel_path}: no `fn App()` found — mount the router manually with `Router::<crate::router::Route> {{}}` in your top-level component"
+                ));
             }
             for s in &store_snakes {
                 out.next_steps.push(format!(
-                    "call `crate::state::{s}::provide_{s}()` in your App component before rendering any screen that calls `use_{s}()`"
+                    "{rel_path}: call `crate::state::{s}::provide_{s}()` in your App component before rendering any screen that uses `use_{s}()`"
                 ));
             }
             return Ok(out);
@@ -3347,17 +3525,15 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
                 "{indent}let _ = crate::state::{s}::provide_{s}();\n"
             ));
         }
-        // Splice in just after the opening `{` of the App body — that is,
-        // at `app_body_range.start` + 1 (the byte after `{`). Drop any
-        // leading newline so we don't double up blank lines.
-        let insert_at = app_body_range.start + 1;
-        // Ensure there's a newline directly after `{`. If the next byte is
-        // already a newline we keep alignment; otherwise prepend one.
-        let needs_lead_nl = text.as_bytes().get(insert_at).copied() != Some(b'\n');
-        let payload = if needs_lead_nl {
-            format!("\n{insertion}")
+        // Splice in just after the opening `{` of the App body. If the next
+        // byte is a newline, insert *after* it so the let lands on its own
+        // line; otherwise prepend a `\n` so the let doesn't glue onto the
+        // same line as `{`.
+        let after_brace = app_body_range.start + 1;
+        let (insert_at, payload) = if text.as_bytes().get(after_brace).copied() == Some(b'\n') {
+            (after_brace + 1, insertion)
         } else {
-            insertion
+            (after_brace, format!("\n{insertion}"))
         };
         text.insert_str(insert_at, &payload);
     }
@@ -3371,13 +3547,17 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
             && let Some(rsx_inner) = find_rsx_inner_range(&text, body.clone())
         {
             let indent = detect_rsx_indent(&text, rsx_inner.clone()).unwrap_or_else(|| "        ".into());
+            // rsx_inner.start is the byte index of the rsx body's opening
+            // `{`. Insert AFTER it so the Router lands as a child of the
+            // rsx block rather than between `rsx!` and its `{`.
             let payload = format!("\n{indent}Router::<crate::router::Route> {{}}");
-            // Insert right after the rsx body's opening `{`.
-            text.insert_str(rsx_inner.start, &payload);
+            text.insert_str(rsx_inner.start + 1, &payload);
         } else if needs_router {
-            out.next_steps.push(
-                "couldn't find an `rsx! { ... }` block inside `fn App()` — mount the router manually with `Router::<crate::router::Route> {}`".into(),
-            );
+            // Best-effort line number of the App fn so the user can jump there.
+            let app_line = app_line_number(&text, app_body_range.start);
+            out.next_steps.push(format!(
+                "{rel_path}:{app_line}: couldn't find an `rsx! {{ ... }}` block inside `fn App()` — mount the router manually with `Router::<crate::router::Route> {{}}`"
+            ));
         }
     }
 
@@ -3386,6 +3566,24 @@ fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String
         out.modified.push(path);
     }
     Ok(out)
+}
+
+/// Render a path relative to the crate root with forward slashes — used in
+/// `next_steps` strings so users can paste them directly into editors.
+fn relative_to_crate(crate_root: &Path, path: &Path) -> String {
+    path.strip_prefix(crate_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// 1-based line number for a byte offset in `text`. Returns 1 when `offset`
+/// is past the end of the file (avoids zero/negative indices in messages).
+fn app_line_number(text: &str, offset: usize) -> usize {
+    if offset >= text.len() {
+        return 1;
+    }
+    text[..offset].bytes().filter(|b| *b == b'\n').count() + 1
 }
 
 /// Find the byte range of `fn {name}(...)`'s outer body braces. The returned
@@ -5428,10 +5626,80 @@ mod tests {
             &dummy,
             GetDslSpecParams {
                 extensions: vec!["bogus".into()],
+                sections: vec![],
             },
         )
         .await;
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn sections_filter_returns_only_requested_core_sections() {
+        let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+        let r = get_dsl_spec(
+            &dummy,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec!["model".into(), "client_store".into()],
+            },
+        )
+        .await
+        .expect("filter call should succeed");
+        assert!(r.spec.contains("Model:"), "expected Model section, got:\n{}", r.spec);
+        assert!(
+            r.spec.contains("ClientStore:"),
+            "expected ClientStore section, got:\n{}",
+            r.spec
+        );
+        // Other core sections must be excluded.
+        assert!(!r.spec.contains("Component:"), "Component should be filtered out");
+        assert!(!r.spec.contains("Screen:"), "Screen should be filtered out");
+        assert!(!r.spec.contains("ServerFn:"), "ServerFn should be filtered out");
+        assert!(!r.spec.contains("Modify:"), "Modify should be filtered out");
+        // No extensions:` header when the filter only selects core sections.
+        assert!(
+            !r.spec.contains("\nextensions:\n"),
+            "no extensions header expected, got:\n{}",
+            r.spec
+        );
+    }
+
+    #[tokio::test]
+    async fn sections_filter_auto_pulls_extension_group() {
+        let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+        let r = get_dsl_spec(
+            &dummy,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec!["form".into()],
+            },
+        )
+        .await
+        .expect("filter call should succeed");
+        assert!(r.spec.contains("\nextensions:\n"), "expected extensions header");
+        assert!(r.spec.contains(" crud:\n"), "expected crud group, got:\n{}", r.spec);
+        assert!(r.spec.contains("Form:"), "expected Form section");
+        // Other crud siblings must stay out when only `form` was requested.
+        assert!(!r.spec.contains("List:\n"));
+        assert!(!r.spec.contains("Table:\n"));
+        // No core block when only an extension section was requested.
+        assert!(!r.spec.contains("\ncore:\n"));
+    }
+
+    #[tokio::test]
+    async fn sections_filter_rejects_unknown_name() {
+        let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+        let err = get_dsl_spec(
+            &dummy,
+            GetDslSpecParams {
+                extensions: vec![],
+                sections: vec!["models".into()],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("unknown section"), "got: {err}");
+        assert!(err.contains("model"), "should list valid names, got: {err}");
     }
 
     #[test]
@@ -5578,6 +5846,7 @@ components:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: true,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -5650,6 +5919,7 @@ session_states:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: true,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -5704,6 +5974,7 @@ components:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: true,
+                cargo_check: false,
             },
         )
         .await
@@ -5811,6 +6082,7 @@ models:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -5957,6 +6229,7 @@ screens:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -5976,6 +6249,23 @@ screens:
         assert!(
             main_rs.contains(r#"div { "welcome" }"#),
             "original rsx children should be preserved, got:\n{main_rs}"
+        );
+        // Structural checks: the let must land on its own line (not glued
+        // to the App body's `{`), and Router must be a child of the rsx
+        // block (not inserted between `rsx!` and its opening `{`).
+        assert!(
+            !main_rs.contains("fn App() -> Element {    let "),
+            "provide_* let must start on a new line under fn App, got:\n{main_rs}"
+        );
+        assert!(
+            !main_rs.contains("rsx! \n"),
+            "Router must not be inserted between `rsx!` and its `{{`, got:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("rsx! {\n")
+                || main_rs.contains("rsx! {\r\n")
+                || main_rs.contains("rsx!{\n"),
+            "rsx! block opening should remain intact, got:\n{main_rs}"
         );
 
         // Re-run is idempotent: a second execute_code with `if_missing: true`
@@ -6007,6 +6297,7 @@ screens:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: true,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -6021,6 +6312,266 @@ screens:
             main_rs_after.matches("provide_todo_store()").count(),
             1,
             "provide_todo_store() must not duplicate on re-run:\n{main_rs_after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_steps_prefix_wire_app_hints_with_crate_root_path() {
+        // When wire_app falls back to manual hints (no `fn App()` in the
+        // crate root), the next_steps entries should name the file so the
+        // user can paste the path straight into an editor.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("hint_path_test"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // A main.rs WITHOUT an `fn App()` — forces wire_app's fallback path.
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+fn main() {
+    dioxus::launch(|| rsx! { div { "hi" } });
+}
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+                cargo_check: false,
+            },
+        )
+        .await
+        .expect("execute_code should still succeed when App fn is missing");
+
+        // Both hints should be prefixed with the relative file path.
+        let provide_hint = result
+            .next_steps
+            .iter()
+            .find(|s| s.contains("provide_todo_store"))
+            .unwrap_or_else(|| panic!("expected a provide_* hint, got {:?}", result.next_steps));
+        assert!(
+            provide_hint.starts_with("src/main.rs:"),
+            "provide_* hint should start with `src/main.rs:`, got: {provide_hint}"
+        );
+        let router_hint = result
+            .next_steps
+            .iter()
+            .find(|s| s.contains("no `fn App()` found"))
+            .unwrap_or_else(|| {
+                panic!("expected the wire_app no-App-fn hint, got {:?}", result.next_steps)
+            });
+        assert!(
+            router_hint.starts_with("src/main.rs:"),
+            "router hint should start with `src/main.rs:`, got: {router_hint}"
+        );
+    }
+
+    #[tokio::test]
+    async fn warns_when_routable_lives_in_non_conventional_file() {
+        // Set up a crate where the Routable enum lives in src/main.rs (not
+        // src/router.rs). execute_code should still patch it but should
+        // surface a next_steps hint pointing at the unusual location.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("non_conventional_routable"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+fn main() {
+    dioxus::launch(App);
+}
+
+#[component]
+fn App() -> Element {
+    rsx! {
+        Router::<Route> {}
+    }
+}
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/about")]
+    About {},
+}
+
+#[component]
+fn About() -> Element { rsx! { "about" } }
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+                cargo_check: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed when Routable lives in main.rs");
+
+        assert!(
+            result.next_steps.iter().any(|s| {
+                s.contains("non-conventional") && s.contains("src/main.rs")
+            }),
+            "expected a non-conventional Routable warning naming src/main.rs, got next_steps={:?}",
+            result.next_steps
+        );
+
+        // Sanity: route insertion still landed even though we warned.
+        let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("TodoScreen"),
+            "TodoScreen variant should have been inserted into the existing Routable in main.rs, got:\n{main_rs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_routable_warning_when_enum_lives_at_router_rs() {
+        // When the Routable is at src/router.rs (the canonical location)
+        // we must NOT push the warning. Verifies the helper doesn't fire
+        // on the happy path.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            cargo_toml_with_fullstack("conventional_routable"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"use dioxus::prelude::*;
+
+fn main() {
+    dioxus::launch(App);
+}
+
+#[component]
+fn App() -> Element {
+    rsx! {
+        Router::<crate::router::Route> {}
+    }
+}
+
+pub mod router;
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/router.rs"),
+            r#"use dioxus::prelude::*;
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/about")]
+    About {},
+}
+
+#[component]
+fn About() -> Element { rsx! { "about" } }
+"#,
+        )
+        .unwrap();
+
+        let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+        let result = execute_code(
+            &state,
+            ExecuteCodeParams {
+                code: r#"version: "1"
+models:
+  - name: Todo
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+                .into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                if_missing: false,
+                dry_run: false,
+                cargo_check: false,
+            },
+        )
+        .await
+        .expect("execute_code should succeed");
+        assert!(
+            !result.next_steps.iter().any(|s| s.contains("non-conventional")),
+            "no warning expected when Routable lives at src/router.rs, got next_steps={:?}",
+            result.next_steps
         );
     }
 
@@ -6271,6 +6822,7 @@ resources:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -6508,6 +7060,7 @@ resources:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -6733,6 +7286,7 @@ resources:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: true,
+                cargo_check: false,
             },
         )
         .await
@@ -6801,6 +7355,7 @@ resources:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -6864,6 +7419,7 @@ resources:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -6934,6 +7490,7 @@ client_stores:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7056,6 +7613,7 @@ screens:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7176,6 +7734,7 @@ screens:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7276,6 +7835,7 @@ screens:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7291,6 +7851,7 @@ screens:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: true,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7336,6 +7897,7 @@ forms:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7419,6 +7981,7 @@ models:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7443,6 +8006,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7472,6 +8036,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7511,6 +8076,7 @@ components:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7531,6 +8097,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7566,6 +8133,7 @@ components:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7585,6 +8153,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7619,6 +8188,7 @@ server_fns:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7642,6 +8212,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7679,6 +8250,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7699,6 +8271,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: true,
                 dry_run: false,
+                cargo_check: false,
             },
         )
         .await
@@ -7745,6 +8318,7 @@ modify:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: true,
+                cargo_check: false,
             },
         )
         .await
@@ -7830,6 +8404,7 @@ models:
                 project_root: Some(root.to_string_lossy().into_owned()),
                 if_missing: false,
                 dry_run: true,
+                cargo_check: false,
             },
         )
         .await
