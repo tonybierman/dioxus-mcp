@@ -2779,9 +2779,9 @@ pub async fn execute_code(
                 if !mod_rs.exists() {
                     match std::fs::write(&mod_rs, "") {
                         Ok(()) => result.files_created.push(mod_rs),
-                        Err(e) => result.next_steps.push(format!(
-                            "could not create `src/components/mod.rs`: {e}"
-                        )),
+                        Err(e) => result
+                            .next_steps
+                            .push(format!("could not create `src/components/mod.rs`: {e}")),
                     }
                 }
                 match scaffold::upsert_crate_mod(&crate_root, "components") {
@@ -7871,7 +7871,10 @@ client_stores:
         // No stale "create src/components/mod.rs manually" hint — bootstrap
         // handled it.
         assert!(
-            !result.next_steps.iter().any(|s| s.contains("create `src/components/mod.rs`")),
+            !result
+                .next_steps
+                .iter()
+                .any(|s| s.contains("create `src/components/mod.rs`")),
             "manual-bootstrap hint should be gone after auto-bootstrap, got {:?}",
             result.next_steps
         );
