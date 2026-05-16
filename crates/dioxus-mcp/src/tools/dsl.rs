@@ -86,6 +86,11 @@ pub struct DslDoc {
 /// Top-level remove kinds. Each entry idempotently deletes the named on-disk
 /// item. Targets that don't exist are silently skipped (no `if_missing` toggle
 /// — removal of an absent thing is a no-op by definition).
+//
+// The `Remove*` prefix is intentional: variant names match the on-wire
+// `kind: remove_*` discriminator (one-to-one via `rename_all = "snake_case"`)
+// so a user reading the YAML sees the same shape clippy wants us to elide.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DslRemove {
@@ -6081,9 +6086,9 @@ fn apply_removes(
     Ok(())
 }
 
-/// Delete `src/{subdir}/{snake}.rs` if present and strip the matching `pub mod`
-/// + `pub use` lines from the directory's mod.rs. Both operations are
-/// idempotent. The leaf path lands in `files_modified` (rather than a new
+/// Delete `src/{subdir}/{snake}.rs` if present and strip the matching
+/// `pub mod` and `pub use` lines from the directory's mod.rs. Both operations
+/// are idempotent. The leaf path lands in `files_modified` (rather than a new
 /// `files_removed` field — keeping the response shape stable).
 fn remove_module_file(
     crate_root: &Path,
