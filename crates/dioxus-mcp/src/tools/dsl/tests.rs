@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// For each colocated spec block, take its `example:` mapping (which is a
@@ -568,18 +567,6 @@ screens:
         doc.remove.is_empty(),
         "no existing collision → no synthesized removes, got: {:?}",
         doc.remove
-    );
-}
-
-#[test]
-fn normalize_route_path_collapses_param_names_and_trailing_slash() {
-    assert_eq!(normalize_route_path("/users"), "/users");
-    assert_eq!(normalize_route_path("/users/"), "/users");
-    assert_eq!(normalize_route_path("/"), "/");
-    assert_eq!(normalize_route_path("/users/:id"), "/users/:");
-    assert_eq!(
-        normalize_route_path("/users/:user_id"),
-        normalize_route_path("/users/:id")
     );
 }
 
@@ -1237,13 +1224,6 @@ screens:
     );
     // Sanity: dry_run must still not write anything to disk.
     assert!(!leaf.exists(), "dry_run must not write the screen file");
-}
-
-#[test]
-fn detects_multidoc_yaml() {
-    assert!(has_extra_documents("a: 1\n---\nb: 2"));
-    assert!(!has_extra_documents("---\na: 1\nb: 2"));
-    assert!(!has_extra_documents("# comment\na: 1"));
 }
 
 #[test]

@@ -5,8 +5,11 @@ use heck::{ToPascalCase, ToSnakeCase};
 
 use crate::tools::scaffold::{self, ScaffoldResult};
 
+use super::plan::normalize_route_path;
+use super::preflight::preflight;
+use super::resources::SynthServerFn;
 use super::types::*;
-use super::{SynthServerFn, leaf_for, normalize_route_path, preflight};
+use super::util::leaf_for;
 
 /// Expand every `replace_route: true` on Screen / LoginScreen into an explicit
 /// `RemoveRoute` entry on `doc.remove`. Looks at the on-disk Routable enum,

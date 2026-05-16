@@ -5,8 +5,8 @@ use heck::{ToPascalCase, ToSnakeCase};
 
 use crate::tools::scaffold::ScaffoldResult;
 
-use super::leaf_for;
 use super::types::*;
+use super::util::leaf_for;
 
 pub(super) fn apply_modify(
     crate_root: &Path,
