@@ -51,6 +51,12 @@ pub(crate) fn generate_client_store(
     crate_root: &Path,
     cs: &DslClientStore,
     model_names: &BTreeSet<String>,
+    // Optional bool-field name (e.g. `done`, `completed`) collected from any
+    // `client_crud` Screen template that references this store. When set, the
+    // generator emits a `clear_{field}` helper on the `#[store(pub)] impl` so
+    // call sites don't have to reach into `store.items().write().retain(...)`
+    // to implement the canonical "Clear completed" action.
+    checkbox_field: Option<&str>,
 ) -> Result<ScaffoldResult, String> {
     let pascal = cs.name.to_pascal_case();
     let snake = cs.name.to_snake_case();
@@ -59,6 +65,7 @@ pub(crate) fn generate_client_store(
     let id_type = cs.id_type.clone().unwrap_or_else(|| "i64".into());
     let initial = cs.initial.clone().unwrap_or_else(|| "Vec::new()".into());
     let auto_id = cs.auto_id.unwrap_or(false);
+    let checkbox_field = checkbox_field.map(|s| s.to_snake_case());
     if auto_id {
         if id_field.is_none() {
             return Err(format!(
@@ -94,6 +101,7 @@ pub(crate) fn generate_client_store(
             id_type_suffix => id_type_suffix,
             initial => initial,
             auto_id => auto_id,
+            checkbox_field => checkbox_field,
         },
     )?;
     // No server cfg gate — ClientStore runs in both wasm and server builds.
@@ -137,7 +145,7 @@ mod tests {
             id_type: None,
             auto_id: Some(true),
         };
-        let r = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap();
+        let r = generate_client_store(dir.path(), &cs, &BTreeSet::new(), None).unwrap();
         let file = r
             .files_created
             .iter()
@@ -145,16 +153,120 @@ mod tests {
             .expect("store file must be in files_created");
         let body = std::fs::read_to_string(file).unwrap();
         assert!(
-            body.contains("pub fn push_new(self, mut item: Todo)"),
-            "push_new must be emitted, got:\n{body}"
+            body.contains("fn push_new(&mut self, item: Todo)"),
+            "push_new must be emitted (note: no `pub` on trait items inside #[store(pub)] impl, and no `mut` in the param pattern), got:\n{body}"
         );
         assert!(
-            body.contains("next_id: Signal<i64>"),
+            body.contains("pub next_id: i64,"),
             "next_id field must be present, got:\n{body}"
         );
         assert!(
-            body.contains("Signal::new(1i64)"),
+            body.contains("next_id: 1i64,"),
             "next_id init must use typed literal, got:\n{body}"
+        );
+        assert!(
+            body.contains("#[derive(Store, Clone, Default)]"),
+            "derive Store must be emitted, got:\n{body}"
+        );
+        assert!(
+            body.contains("#[store(pub)]"),
+            "#[store(pub)] impl attribute must be emitted (pub makes the extension trait importable from other modules), got:\n{body}"
+        );
+        assert!(
+            body.contains("impl Store<TodoStore>"),
+            "#[store] impl must target Store<TodoStore>, not the bare struct, got:\n{body}"
+        );
+        assert!(
+            body.contains("pub fn provide_todo_store() -> Store<TodoStore>"),
+            "typed provider signature must be emitted, got:\n{body}"
+        );
+        assert!(
+            !body.contains("Signal<Vec<"),
+            "old Signal<Vec<...>> wrapper shape must be gone, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn client_store_no_auto_id_emits_derive_store_and_no_signal_wrapper() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "DraftStore".into(),
+            item_type: "String".into(),
+            initial: None,
+            id_field: None,
+            id_type: None,
+            auto_id: None,
+        };
+        let r = generate_client_store(dir.path(), &cs, &BTreeSet::new(), None).unwrap();
+        let file = r
+            .files_created
+            .iter()
+            .find(|p| p.ends_with("draft_store.rs"))
+            .expect("store file must be in files_created");
+        let body = std::fs::read_to_string(file).unwrap();
+        assert!(body.contains("#[derive(Store, Clone, Default)]"));
+        assert!(body.contains("#[store(pub)]"));
+        assert!(body.contains("impl Store<DraftStore>"));
+        assert!(body.contains("pub items: Vec<String>,"));
+        assert!(body.contains("pub fn use_draft_store() -> Store<DraftStore>"));
+        assert!(body.contains("pub fn provide_draft_store() -> Store<DraftStore>"));
+        assert!(!body.contains("Signal<Vec<"));
+        assert!(!body.contains("next_id"));
+    }
+
+    #[test]
+    fn client_store_with_checkbox_field_emits_clear_helper() {
+        // TODO14: when a companion client_crud Screen sets `checkbox_field`,
+        // the store's #[store(pub)] impl gains a `clear_{field}` helper so
+        // call sites can implement "Clear completed" without reaching into
+        // items().write().retain(...).
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: Some("i64".into()),
+            auto_id: Some(true),
+        };
+        let r = generate_client_store(dir.path(), &cs, &BTreeSet::new(), Some("done")).unwrap();
+        let file = r
+            .files_created
+            .iter()
+            .find(|p| p.ends_with("todo_store.rs"))
+            .expect("store file must be in files_created");
+        let body = std::fs::read_to_string(file).unwrap();
+        assert!(
+            body.contains("fn clear_done(&mut self)"),
+            "expected `fn clear_done` helper, got:\n{body}"
+        );
+        assert!(
+            body.contains("self.items().write().retain(|x| !x.done);"),
+            "clear_done body must drop items where `done` is true, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn client_store_without_checkbox_field_omits_clear_helper() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cs = DslClientStore {
+            name: "TodoStore".into(),
+            item_type: "Todo".into(),
+            initial: None,
+            id_field: Some("id".into()),
+            id_type: Some("i64".into()),
+            auto_id: Some(true),
+        };
+        let r = generate_client_store(dir.path(), &cs, &BTreeSet::new(), None).unwrap();
+        let file = r
+            .files_created
+            .iter()
+            .find(|p| p.ends_with("todo_store.rs"))
+            .expect("store file must be in files_created");
+        let body = std::fs::read_to_string(file).unwrap();
+        assert!(
+            !body.contains("fn clear_"),
+            "no `clear_{{field}}` helper should be emitted when checkbox_field is absent, got:\n{body}"
         );
     }
 
@@ -169,7 +281,7 @@ mod tests {
             id_type: None,
             auto_id: Some(true),
         };
-        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap_err();
+        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new(), None).unwrap_err();
         assert!(err.contains("id_field"), "got: {err}");
     }
 
@@ -184,7 +296,7 @@ mod tests {
             id_type: Some("String".into()),
             auto_id: Some(true),
         };
-        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new()).unwrap_err();
+        let err = generate_client_store(dir.path(), &cs, &BTreeSet::new(), None).unwrap_err();
         assert!(err.contains("primitive integer"), "got: {err}");
     }
 }

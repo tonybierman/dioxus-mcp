@@ -15,6 +15,52 @@ pub(super) fn preflight(
     crate_root: &Path,
     if_missing: bool,
 ) -> Result<(), String> {
+    preflight_inner(doc, synth_server_fns, crate_root, if_missing, false)
+}
+
+/// Same as `preflight`, but with cross-reference checks relaxed against
+/// the live filesystem — a `store:` / `endpoint:` / `socket:` / etc.
+/// reference is satisfied if the corresponding leaf file already exists on
+/// disk, even when it isn't redeclared in the doc. Used by execute_code in
+/// `dry_run` mode so callers can preview a Screen against an already-
+/// scaffolded primitive without copying its definition into the YAML.
+pub(super) fn preflight_disk_aware(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+    if_missing: bool,
+) -> Result<(), String> {
+    preflight_inner(doc, synth_server_fns, crate_root, if_missing, true)
+}
+
+/// True when the leaf file `src/{subdir}/{snake}.rs` exists under
+/// `crate_root`. Used by `preflight_inner` to relax cross-ref checks when
+/// the referenced primitive lives on disk rather than in the doc.
+fn leaf_exists(crate_root: &Path, subdir: &str, snake: &str) -> bool {
+    crate_root.join(subdir).join(format!("{snake}.rs")).exists()
+}
+
+/// True when a cross-ref is satisfied: either the referenced primitive is
+/// declared in this doc, or (disk_aware mode) the corresponding leaf file
+/// already exists on disk. Folds the seven near-identical `!in_doc && !(disk
+/// && leaf)` checks below into one readable predicate.
+fn xref_satisfied(
+    in_doc: &BTreeSet<String>,
+    snake: &str,
+    crate_root: &Path,
+    subdir: &str,
+    disk_aware: bool,
+) -> bool {
+    in_doc.contains(snake) || (disk_aware && leaf_exists(crate_root, subdir, snake))
+}
+
+fn preflight_inner(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+    if_missing: bool,
+    disk_aware: bool,
+) -> Result<(), String> {
     // 1. Collect every snake_case name across every primitive and reject dups
     //    that would land in the same target directory.
     let mut comp_names: BTreeSet<String> = BTreeSet::new();
@@ -121,9 +167,13 @@ pub(super) fn preflight(
         }
     }
 
-    // 2. Verify cross-references exist within the doc.
+    // 2. Verify cross-references exist within the doc. When `disk_aware`
+    //    (dry_run mode), a reference is also satisfied if its leaf file
+    //    already exists on disk — callers can preview a Screen without
+    //    redeclaring on-disk primitives in the YAML.
     for f in &doc.feeds {
-        if !sock_names.contains(&f.socket.to_snake_case()) {
+        let snake = f.socket.to_snake_case();
+        if !xref_satisfied(&sock_names, &snake, crate_root, "src/sockets", disk_aware) {
             return Err(format!(
                 "feed {:?} references unknown socket {:?}",
                 f.name, f.socket
@@ -131,7 +181,8 @@ pub(super) fn preflight(
         }
     }
     for l in &doc.lists {
-        if !srv_names.contains(&l.endpoint.to_snake_case()) {
+        let snake = l.endpoint.to_snake_case();
+        if !xref_satisfied(&srv_names, &snake, crate_root, "src/server", disk_aware) {
             return Err(format!(
                 "list {:?} references unknown server_fn {:?}; declare it under server_fns",
                 l.name, l.endpoint
@@ -139,7 +190,8 @@ pub(super) fn preflight(
         }
     }
     for t in &doc.tables {
-        if !srv_names.contains(&t.endpoint.to_snake_case()) {
+        let snake = t.endpoint.to_snake_case();
+        if !xref_satisfied(&srv_names, &snake, crate_root, "src/server", disk_aware) {
             return Err(format!(
                 "table {:?} references unknown server_fn {:?}; declare it under server_fns",
                 t.name, t.endpoint
@@ -148,27 +200,36 @@ pub(super) fn preflight(
     }
     let list_names: BTreeSet<String> = doc.lists.iter().map(|l| l.name.to_snake_case()).collect();
     for f in &doc.forms {
-        if let Some(target) = &f.feeds_into
-            && !list_names.contains(&target.to_snake_case())
-        {
-            return Err(format!(
-                "form {:?} feeds_into unknown list {:?}; declare it under lists",
-                f.name, target
-            ));
+        if let Some(target) = &f.feeds_into {
+            let snake = target.to_snake_case();
+            if !xref_satisfied(
+                &list_names,
+                &snake,
+                crate_root,
+                "src/components",
+                disk_aware,
+            ) {
+                return Err(format!(
+                    "form {:?} feeds_into unknown list {:?}; declare it under lists",
+                    f.name, target
+                ));
+            }
         }
     }
     for pr in &doc.protected_routes {
-        if let Some(req) = &pr.requires
-            && !sess_names.contains(&req.to_snake_case())
-        {
-            return Err(format!(
-                "protected_route {:?} requires unknown session_state {:?}; declare it under session_states",
-                pr.name, req
-            ));
+        if let Some(req) = &pr.requires {
+            let snake = req.to_snake_case();
+            if !xref_satisfied(&sess_names, &snake, crate_root, "src/auth", disk_aware) {
+                return Err(format!(
+                    "protected_route {:?} requires unknown session_state {:?}; declare it under session_states",
+                    pr.name, req
+                ));
+            }
         }
     }
     for s in &doc.stores {
-        if !model_names.contains(&s.resource.to_snake_case()) {
+        let snake = s.resource.to_snake_case();
+        if !xref_satisfied(&model_names, &snake, crate_root, "src/model", disk_aware) {
             return Err(format!(
                 "store {:?} references unknown model {:?}; declare it under models",
                 s.name, s.resource
@@ -287,7 +348,14 @@ pub(super) fn preflight(
                     sc.name
                 )
             })?;
-            if !client_store_names.contains(&store.to_snake_case()) {
+            let store_snake = store.to_snake_case();
+            if !xref_satisfied(
+                &client_store_names,
+                &store_snake,
+                crate_root,
+                "src/state",
+                disk_aware,
+            ) {
                 return Err(format!(
                     "screen {:?} references unknown client_store {:?}; declare it under client_stores",
                     sc.name, store

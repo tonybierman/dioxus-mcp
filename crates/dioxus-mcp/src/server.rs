@@ -371,6 +371,11 @@ impl ServerHandler for DioxusMcp {
                explain_signal_graph. Whole-project lint pass -> lint_project. \
              - Reading Dioxus 0.7 docs / canonical examples -> search_docs, find_example. \
              - RSX correctness check -> check_rsx. \
+             - UI primitive asks (\"add a button\", \"build a dialog\", \"a date \
+               picker\", \"a sidebar\", etc.): call `get_dsl_spec { sections: \
+               [components] }` to see the 45-entry official Dioxus component \
+               catalog and prefer `dx components add <name>` over scaffolding a \
+               custom `Component:` for widgets that already exist. \
              \
              Probe note: runtime_events and server_fn_summary read the JSONL log written \
              by the dioxus-mcp-probe crate. If the cwd isn't the Dioxus app, pass \

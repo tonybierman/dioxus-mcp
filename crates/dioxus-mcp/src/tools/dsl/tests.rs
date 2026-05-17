@@ -104,10 +104,19 @@ async fn sections_filter_returns_only_requested_core_sections() {
         "expected ClientStore section, got:\n{}",
         r.spec
     );
-    // Other core sections must be excluded.
+    // Other core sections must be excluded. Use the section's own header
+    // line (newline + 2-space indent + name + colon) so the assertion
+    // doesn't trip over `Components:` — which contains `Component:` as a
+    // substring but is a separate section.
     assert!(
-        !r.spec.contains("Component:"),
-        "Component should be filtered out"
+        !r.spec.contains("\n  Component:\n"),
+        "Component should be filtered out, got:\n{}",
+        r.spec
+    );
+    assert!(
+        !r.spec.contains("\n  Components:\n"),
+        "Components should be filtered out, got:\n{}",
+        r.spec
     );
     assert!(!r.spec.contains("Screen:"), "Screen should be filtered out");
     assert!(
@@ -247,6 +256,69 @@ async fn include_examples_false_strips_example_blocks() {
         !r.spec.contains("     example:"),
         "extension example blocks should be stripped, got:\n{}",
         r.spec
+    );
+}
+
+#[tokio::test]
+async fn components_section_renders_catalog_and_indexes() {
+    let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+    // Full block under the `components` filter — catalog body must appear.
+    let full = get_dsl_spec(
+        &dummy,
+        GetDslSpecParams {
+            extensions: vec![],
+            sections: vec!["components".into()],
+            index_only: false,
+            include_prologue: Some(false),
+            include_examples: true,
+        },
+    )
+    .await
+    .expect("components section should be fetchable on its own");
+    assert!(
+        full.spec.contains("Components:"),
+        "expected Components header, got:\n{}",
+        full.spec
+    );
+    assert!(
+        full.spec.contains("button:"),
+        "expected `button` catalog entry, got:\n{}",
+        full.spec
+    );
+    assert!(
+        full.spec.contains("dropdown_menu:"),
+        "expected `dropdown_menu` catalog entry, got:\n{}",
+        full.spec
+    );
+    assert!(
+        full.spec.contains("dx components add"),
+        "expected install hint, got:\n{}",
+        full.spec
+    );
+    // Index-only mode must surface the section as a single line.
+    let idx = get_dsl_spec(
+        &dummy,
+        GetDslSpecParams {
+            extensions: vec![],
+            sections: vec![],
+            index_only: true,
+            include_prologue: Some(false),
+            include_examples: true,
+        },
+    )
+    .await
+    .expect("index_only call should succeed");
+    assert!(
+        idx.spec.contains("Components:"),
+        "expected Components row in index, got:\n{}",
+        idx.spec
+    );
+    // The 45 catalog rows must NOT appear in index mode — only the
+    // section-level summary line should make it through.
+    assert!(
+        !idx.spec.contains("dropdown_menu:"),
+        "catalog rows leaked into index, got:\n{}",
+        idx.spec
     );
 }
 
@@ -509,6 +581,289 @@ components:
     assert!(
         !root.join("src/components/widget.rs").exists(),
         "dry_run must not write the file"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_treats_existing_leaf_as_collision_not_error() {
+    // TODO10: dry_run must never hard-error on an existing leaf — collisions
+    // belong in the plan output, not as a preflight abort.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "dry_run_collision_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7" }
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src/state")).unwrap();
+    let existing = root.join("src/state/todo_store.rs");
+    std::fs::write(&existing, "// pre-existing file\n").unwrap();
+
+    let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+    let result = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+client_stores:
+  - name: TodoStore
+    item_type: String
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: true,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("dry_run on an existing leaf must not error");
+
+    assert!(result.dry_run);
+    assert!(
+        result.collisions.iter().any(|p| p == &existing),
+        "expected the existing leaf in `collisions`, got: {:?}",
+        result.collisions
+    );
+    assert_eq!(
+        std::fs::read_to_string(&existing).unwrap(),
+        "// pre-existing file\n",
+        "dry_run must not modify the existing file"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_resolves_cross_refs_from_disk() {
+    // TODO11: callers should be able to dry-run a Screen that targets an
+    // already-scaffolded client_store / model without redeclaring those
+    // primitives in the YAML. preflight relaxes cross-ref checks to look
+    // on disk in dry_run mode.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "dry_run_xref_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7" }
+"#,
+    )
+    .unwrap();
+    // Pre-scaffold the leaf files the Screen will cross-reference: a model
+    // file (Todo) and a client_store file (TodoStore). The bodies don't
+    // matter for the dry-run preflight — only their on-disk presence.
+    std::fs::create_dir_all(root.join("src/model")).unwrap();
+    std::fs::write(
+        root.join("src/model/todo.rs"),
+        "pub struct Todo { pub id: i64, pub title: String }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src/state")).unwrap();
+    std::fs::write(
+        root.join("src/state/todo_store.rs"),
+        "// pre-existing client store\n",
+    )
+    .unwrap();
+
+    let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+    // The YAML omits `models:` and `client_stores:` entirely — both live on
+    // disk. Without the disk-aware relaxation this would error with
+    // "screen references unknown client_store ...".
+    let result = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: true,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("dry_run must accept on-disk cross-references");
+
+    assert!(result.dry_run);
+    // The Screen leaf is fresh, so it lands in `would_create`.
+    assert!(
+        result
+            .would_create
+            .iter()
+            .any(|p| p.ends_with("todo_screen.rs")),
+        "expected todo_screen.rs in would_create, got {:?}",
+        result.would_create
+    );
+    // The pre-existing files must still be on disk after the dry-run.
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/state/todo_store.rs")).unwrap(),
+        "// pre-existing client store\n",
+        "dry_run must not modify pre-existing leaves"
+    );
+}
+
+#[tokio::test]
+async fn dx_components_attempts_install_and_validates_names() {
+    // TODO15: top-level `dx_components: [...]` shells out to `dx components
+    // add <name>` for each catalog-valid entry. On failure (e.g. `dx` not on
+    // PATH in CI / sandboxed test env) it falls back to surfacing the
+    // install command. Either way the typo entry is rejected up front.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "dx_components_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7" }
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+    let result = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+dx_components: [button, dialog, somethingunknown]
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("dx_components run must not fail on a typo — it surfaces it as a hint");
+
+    let steps = result.next_steps.join("\n");
+    // The unknown name should NOT yield an install attempt; instead a
+    // validation hint calls it out.
+    assert!(
+        steps.contains("\"somethingunknown\"") && steps.contains("not in the official"),
+        "expected catalog-validation hint for the typo, got:\n{steps}"
+    );
+    // Either we successfully installed both (line: "installed via ... button, dialog")
+    // OR fell back to printing the install commands. Both shapes are valid.
+    let installed_ok =
+        steps.contains("installed via `dx components add`") && steps.contains("button");
+    let fallback_printed =
+        steps.contains("dx components add button") && steps.contains("dx components add dialog");
+    assert!(
+        installed_ok || fallback_printed,
+        "expected either successful install or fallback install commands, got:\n{steps}"
+    );
+    // First-time setup reminder fires either way.
+    assert!(
+        steps.contains("mod components;"),
+        "expected one-time mod components reminder, got:\n{steps}"
+    );
+    // Import hint mentions both valid items with `crate::components::...::Pascal`.
+    assert!(
+        steps.contains("crate::components::button::Button"),
+        "expected import hint for Button, got:\n{steps}"
+    );
+    assert!(
+        steps.contains("crate::components::dialog::Dialog"),
+        "expected import hint for Dialog, got:\n{steps}"
+    );
+}
+
+#[tokio::test]
+async fn dx_components_hints_surface_in_dry_run() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "dx_components_dry_run_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7" }
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+    let result = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+dx_components: [tooltip]
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: true,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("dry_run with dx_components must succeed");
+    assert!(result.dry_run);
+    let steps = result.next_steps.join("\n");
+    // Dry-run path uses the "would run …" shape so callers can preview the
+    // install plan without anything happening on disk.
+    assert!(
+        steps.contains("would run `dx components add tooltip`"),
+        "dry_run must surface dx_components install hints, got:\n{steps}"
+    );
+}
+
+#[test]
+fn dx_components_catalog_matches_spec_block() {
+    // The Rust-side catalog (DX_COMPONENT_CATALOG in execute.rs) and the
+    // YAML catalog in CORE_COMPONENTS (specs.rs) need to stay in lockstep —
+    // a `dx_components: [foo]` entry that's "valid" by the Rust check but
+    // missing from the spec catalog would be a UX bug the next time someone
+    // reads the catalog. This test parses the spec block and asserts the
+    // two sources have the same set of names.
+    use super::execute::DX_COMPONENT_CATALOG;
+    let raw = CORE_COMPONENTS;
+    let v: serde_yml::Value = serde_yml::from_str(raw).expect("CORE_COMPONENTS must be valid YAML");
+    let components = v
+        .get("Components")
+        .and_then(|m| m.get("catalog"))
+        .and_then(|m| m.as_mapping())
+        .expect("Components.catalog must be a mapping");
+    let spec_names: std::collections::BTreeSet<String> = components
+        .keys()
+        .filter_map(|k| k.as_str().map(|s| s.to_string()))
+        .collect();
+    let code_names: std::collections::BTreeSet<String> =
+        DX_COMPONENT_CATALOG.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        spec_names, code_names,
+        "spec catalog and DX_COMPONENT_CATALOG must match; refresh both when the upstream registry changes"
     );
 }
 
@@ -2113,7 +2468,7 @@ stores:
 }
 
 #[tokio::test]
-async fn client_store_emits_signal_backed_store_without_server_gate() {
+async fn client_store_emits_derive_store_without_server_gate() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -2174,27 +2529,58 @@ client_stores:
         body.contains("pub fn use_todo_store()"),
         "missing use_ fn: {body}"
     );
-    assert!(body.contains("pub fn push("), "missing push helper: {body}");
+    // Methods inside `#[store(pub)] impl Store<T>` become trait items, which
+    // share the visibility of the trait — so no `pub` qualifier on the fns.
+    assert!(body.contains("fn push("), "missing push helper: {body}");
     assert!(
-        body.contains("pub fn remove_by_id("),
+        body.contains("fn remove_by_id("),
         "missing remove_by_id helper: {body}"
     );
     assert!(
-        body.contains("pub fn update_by_id("),
+        body.contains("fn update_by_id("),
         "missing update_by_id helper: {body}"
     );
-    // Regression: `remove_by_id` must bind the post-write length to a local
-    // before returning. The naive `items.read().len() < before` form leaves a
-    // GenerationalRef alive past the Signal it borrows from and fails E0597
-    // on `cargo check`. Keep this assertion until we have a fixture project
-    // that runs a real `cargo check` in CI.
+    // Canonical Dioxus 0.7 shape: #[derive(Store)] on the plain struct and a
+    // #[store(pub)] impl block on `Store<TodoStore>` for the typed extension
+    // methods. The provider and hook expose `Store<TodoStore>` over context.
     assert!(
-        body.contains("let after = items.read().len();"),
-        "remove_by_id must bind post-write length to a local (E0597 regression), got:\n{body}"
+        body.contains("#[derive(Store, Clone, Default)]"),
+        "missing Store derive: {body}"
     );
     assert!(
-        !body.contains("items.read().len() < before"),
-        "remove_by_id is using the inline-borrow form that fails borrow-check (E0597), got:\n{body}"
+        body.contains("#[store(pub)]"),
+        "missing #[store(pub)] impl attribute (pub needed for cross-module use of the extension trait): {body}"
+    );
+    assert!(
+        body.contains("impl Store<TodoStore>"),
+        "#[store] impl must target Store<TodoStore>: {body}"
+    );
+    assert!(
+        body.contains("pub fn provide_todo_store() -> Store<TodoStore>"),
+        "provider must return Store<TodoStore>: {body}"
+    );
+    assert!(
+        body.contains("pub fn use_todo_store() -> Store<TodoStore>"),
+        "hook must return Store<TodoStore>: {body}"
+    );
+    assert!(
+        !body.contains("Signal<Vec<"),
+        "old Signal<Vec<...>> wrapper shape must be gone: {body}"
+    );
+    // remove_by_id uses the Store<Vec<_>> lens via `self.items()` and binds
+    // before/after length locals around the write — keeps the borrow check
+    // happy and mirrors the canonical Writable<Target=Vec<_>> usage.
+    assert!(
+        body.contains("let mut items = self.items();"),
+        "remove_by_id should bind a local Store lens for self.items(): {body}"
+    );
+    assert!(
+        body.contains("let after = items.read().len();"),
+        "remove_by_id should bind the post-write length to a local before comparing: {body}"
+    );
+    assert!(
+        body.contains("after < before"),
+        "remove_by_id should compare bound length locals (E0597 regression guard): {body}"
     );
     // Syntactic sanity-check on the whole emitted file.
     syn::parse_file(&body)
@@ -2279,8 +2665,8 @@ screens:
     let screen = root.join("src/components/todo_screen.rs");
     let body = std::fs::read_to_string(&screen).unwrap();
     assert!(
-        body.contains("use crate::state::todo_store::use_todo_store;"),
-        "missing client_store import:\n{body}"
+        body.contains("use crate::state::todo_store::*;"),
+        "missing client_store glob import (needed to bring the #[store(pub)] extension trait into scope):\n{body}"
     );
     assert!(
         body.contains("use crate::model::Todo;"),
@@ -2294,13 +2680,34 @@ screens:
         body.contains("title: value,"),
         "missing label_field assignment:\n{body}"
     );
+    // Copy id (i64) → no `let id = item.id.clone()` shim; the handler reads
+    // the field directly. Non-Copy ids still get the clone dance (covered by
+    // `client_crud_non_copy_id_keeps_clone_shim`).
     assert!(
-        body.contains("store.remove_by_id(id);"),
-        "missing delete handler:\n{body}"
+        body.contains("store.remove_by_id(item.id)"),
+        "missing direct-field delete handler:\n{body}"
     );
     assert!(
-        body.contains("store.update_by_id(id, |t| t.done = !t.done);"),
-        "missing checkbox toggle:\n{body}"
+        body.contains("store.update_by_id(item.id, |t| t.done = !t.done)"),
+        "missing direct-field checkbox toggle:\n{body}"
+    );
+    assert!(
+        !body.contains(".clone()"),
+        "Copy id (i64) must not emit any .clone() in handler bodies:\n{body}"
+    );
+    // TODO13: checkbox uses `onchange` (semantically correct for toggle
+    // controls), not `oninput` which over-fires on some browsers.
+    assert!(
+        body.contains("onchange:"),
+        "checkbox must use onchange (not oninput):\n{body}"
+    );
+    assert!(
+        !body.contains("oninput: move |_| store.update_by_id"),
+        "checkbox toggle must not use oninput:\n{body}"
+    );
+    assert!(
+        body.contains("store.items().read().iter()"),
+        "client_crud must iterate via the Store field accessor:\n{body}"
     );
     // Boolean attributes must bind the bool field directly, not a
     // stringified `"{item.done}"` form (which rsx would parse as a
@@ -2338,6 +2745,43 @@ screens:
     assert!(
         !cs.contains("#![cfg(feature = \"server\")]"),
         "todo store should be client-side:\n{cs}"
+    );
+    // Canonical Dioxus 0.7 shape: #[derive(Store)] + #[store] impl, with the
+    // typed Store<T> exposed through context.
+    assert!(
+        cs.contains("#[derive(Store, Clone, Default)]"),
+        "expected Store derive on client store:\n{cs}"
+    );
+    assert!(
+        cs.contains("#[store(pub)]"),
+        "expected #[store(pub)] impl block on client store (pub is required for cross-module use of the extension trait):\n{cs}"
+    );
+    assert!(
+        cs.contains("impl Store<TodoStore>"),
+        "expected #[store] impl block to target Store<TodoStore>:\n{cs}"
+    );
+    assert!(
+        cs.contains("pub fn use_todo_store() -> Store<TodoStore>"),
+        "expected typed hook returning Store<TodoStore>:\n{cs}"
+    );
+    assert!(
+        cs.contains("pub fn provide_todo_store() -> Store<TodoStore>"),
+        "expected typed provider returning Store<TodoStore>:\n{cs}"
+    );
+    assert!(
+        !cs.contains("Signal<Vec<"),
+        "old Signal<Vec<...>> wrapper shape must be gone:\n{cs}"
+    );
+    // TODO14: the screen sets `checkbox_field: done`, so the store gains a
+    // `clear_done` helper on its #[store(pub)] impl. Call sites should be
+    // able to wire "Clear completed" by calling `store.clear_done()` directly.
+    assert!(
+        cs.contains("fn clear_done(&mut self)"),
+        "expected clear_done helper on the store, got:\n{cs}"
+    );
+    assert!(
+        cs.contains("self.items().write().retain(|x| !x.done);"),
+        "clear_done must drop items with done=true:\n{cs}"
     );
 
     // next_steps should mention provide_*
@@ -3263,6 +3707,62 @@ fn client_crud_styled_tailwind_emits_utility_classes() {
     assert!(
         body.contains("checked: item.done,"),
         "checked must remain a bare bool:\n{body}"
+    );
+}
+
+#[test]
+fn client_crud_non_copy_id_keeps_clone_shim() {
+    // TODO12: non-Copy id types (String, Uuid, ...) still need the
+    // `let id = item.id.clone();` shim so the FnMut handler can fire more
+    // than once. Only Copy primitive integers drop the shim.
+    let cs = DslClientStore {
+        name: "TodoStore".into(),
+        item_type: "Todo".into(),
+        initial: None,
+        id_field: Some("id".into()),
+        id_type: Some("String".into()),
+        auto_id: None,
+    };
+    let t = DslScreenTemplate {
+        kind: "client_crud".into(),
+        endpoint: None,
+        item_type: Some("Todo".into()),
+        on_submit: None,
+        redirect_to: None,
+        fields: vec![],
+        store: Some("TodoStore".into()),
+        label_field: Some("title".into()),
+        checkbox_field: Some("done".into()),
+        class: None,
+        body: None,
+        styled: None,
+        crud: None,
+    };
+    let body = render_screen_template(
+        std::env::temp_dir().as_path(),
+        "TodoScreen",
+        "todo_screen",
+        None,
+        &[cs],
+        &t,
+    )
+    .unwrap();
+    assert!(
+        body.contains("let id = item.id.clone();"),
+        "non-Copy id must still capture via let-clone shim:\n{body}"
+    );
+    assert!(
+        body.contains("let id = id.clone();"),
+        "non-Copy id must clone again inside the FnMut closure body:\n{body}"
+    );
+    assert!(
+        body.contains("store.remove_by_id(id);"),
+        "non-Copy id path still calls remove_by_id with the cloned local:\n{body}"
+    );
+    // Still flipped to onchange (TODO13).
+    assert!(
+        body.contains("onchange:"),
+        "checkbox onchange must be emitted regardless of id type:\n{body}"
     );
 }
 

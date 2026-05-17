@@ -5,6 +5,7 @@ use super::super::super::render::*;
 use super::super::super::templates::*;
 use super::super::super::types::*;
 use super::super::humanize;
+use super::super::store::is_primitive_integer_ty;
 
 /// Bag of class strings / attribute snippets per design-system preset for the
 /// `client_crud` template. Keeps the rendering loop above readable instead of
@@ -129,6 +130,11 @@ pub(crate) fn render_client_crud_screen(
         | "usize" => id_type.to_string(),
         _ => String::new(),
     };
+    // Copy ids (primitive integers) can be captured by `move` closures without
+    // the inner `let id = id.clone();` shim — calling them repeatedly just
+    // re-copies the id. Non-Copy ids (String, Uuid, ...) still need the clone
+    // dance so the FnMut handler can fire more than once.
+    let id_is_copy = is_primitive_integer_ty(&id_type);
     // With auto_id on, the store owns the allocator — the screen doesn't need
     // its own next_id signal. Without it (and with a primitive integer id),
     // the screen falls back to the historical local-allocator scaffold.
@@ -210,7 +216,7 @@ pub(crate) fn render_client_crud_screen(
         list_cls = style.list_class(snake)
     ));
     body.push_str(&format!(
-        "{ind}    for item in store.items.read().iter() {{\n"
+        "{ind}    for item in store.items().read().iter() {{\n"
     ));
     body.push_str(&format!(
         "{ind}        li {{ key: \"{{item.{id_field}}}\",{li_attrs}\n",
@@ -225,19 +231,29 @@ pub(crate) fn render_client_crud_screen(
         // Idiomatic Dioxus 0.7 boolean attribute: bind the bool field
         // directly, not its formatted-string form.
         body.push_str(&format!("{ind}                checked: item.{cb},\n"));
-        body.push_str(&format!("{ind}                oninput: {{\n"));
-        body.push_str(&format!(
-            "{ind}                    let id = item.{id_field}.clone();\n"
-        ));
-        body.push_str(&format!("{ind}                    move |_| {{\n"));
-        body.push_str(&format!(
-            "{ind}                        let id = id.clone();\n"
-        ));
-        body.push_str(&format!(
-            "{ind}                        store.update_by_id(id, |t| t.{cb} = !t.{cb});\n"
-        ));
-        body.push_str(&format!("{ind}                    }}\n"));
-        body.push_str(&format!("{ind}                }},\n"));
+        // `onchange` is the semantically correct event for a checkbox —
+        // browsers fire it once per toggle. `oninput` over-fires on some
+        // browsers and isn't what users expect for a boolean control.
+        if id_is_copy {
+            // Copy id captured by `move`; no inner clone shim needed.
+            body.push_str(&format!(
+                "{ind}                onchange: move |_| store.update_by_id(item.{id_field}, |t| t.{cb} = !t.{cb}),\n"
+            ));
+        } else {
+            body.push_str(&format!("{ind}                onchange: {{\n"));
+            body.push_str(&format!(
+                "{ind}                    let id = item.{id_field}.clone();\n"
+            ));
+            body.push_str(&format!("{ind}                    move |_| {{\n"));
+            body.push_str(&format!(
+                "{ind}                        let id = id.clone();\n"
+            ));
+            body.push_str(&format!(
+                "{ind}                        store.update_by_id(id, |t| t.{cb} = !t.{cb});\n"
+            ));
+            body.push_str(&format!("{ind}                    }}\n"));
+            body.push_str(&format!("{ind}                }},\n"));
+        }
         body.push_str(&format!("{ind}            }}\n"));
     }
     body.push_str(&format!(
@@ -248,19 +264,26 @@ pub(crate) fn render_client_crud_screen(
         "{ind}            button {{ class: \"{del_cls}\",\n",
         del_cls = style.delete_button_class,
     ));
-    body.push_str(&format!("{ind}                onclick: {{\n"));
-    body.push_str(&format!(
-        "{ind}                    let id = item.{id_field}.clone();\n"
-    ));
-    body.push_str(&format!("{ind}                    move |_| {{\n"));
-    body.push_str(&format!(
-        "{ind}                        let id = id.clone();\n"
-    ));
-    body.push_str(&format!(
-        "{ind}                        store.remove_by_id(id);\n"
-    ));
-    body.push_str(&format!("{ind}                    }}\n"));
-    body.push_str(&format!("{ind}                }},\n"));
+    if id_is_copy {
+        // Copy id captured directly by `move`; no clone shim required.
+        body.push_str(&format!(
+            "{ind}                onclick: move |_| {{ store.remove_by_id(item.{id_field}); }},\n"
+        ));
+    } else {
+        body.push_str(&format!("{ind}                onclick: {{\n"));
+        body.push_str(&format!(
+            "{ind}                    let id = item.{id_field}.clone();\n"
+        ));
+        body.push_str(&format!("{ind}                    move |_| {{\n"));
+        body.push_str(&format!(
+            "{ind}                        let id = id.clone();\n"
+        ));
+        body.push_str(&format!(
+            "{ind}                        store.remove_by_id(id);\n"
+        ));
+        body.push_str(&format!("{ind}                    }}\n"));
+        body.push_str(&format!("{ind}                }},\n"));
+    }
     body.push_str(&format!("{ind}                \"Delete\"\n"));
     body.push_str(&format!("{ind}            }}\n"));
     body.push_str(&format!("{ind}        }}\n"));

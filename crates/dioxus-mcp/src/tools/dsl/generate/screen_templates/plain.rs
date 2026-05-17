@@ -208,8 +208,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            body.contains("use crate::state::todo_store::use_todo_store;"),
-            "expected store import, got:\n{body}"
+            body.contains("use crate::state::todo_store::*;"),
+            "expected store glob import (needed to bring the #[store(pub)] extension trait into scope), got:\n{body}"
         );
         assert!(
             body.contains("let _store = use_todo_store();"),

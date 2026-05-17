@@ -3,7 +3,9 @@ pub(super) const SCREEN_TPL: &str = r#"use dioxus::prelude::*;
 use crate::components::{{ wrap_pascal }};
 {%- endif %}
 {%- if store_snake %}
-use crate::state::{{ store_snake }}::use_{{ store_snake }};
+// Glob-import brings `use_{{ store_snake }}` AND the `#[store(pub)]`-generated
+// extension trait into scope so call sites can invoke the typed methods.
+use crate::state::{{ store_snake }}::*;
 {%- endif %}
 
 #[component]
@@ -581,91 +583,107 @@ pub fn {{ pascal }}() -> Element {
 }
 "#;
 
-/// Client-side reactive list, exposed via context. NOT gated on the server
-/// feature — runs anywhere Dioxus runs. Helpers mirror the spec: `push`,
-/// `clear`, and (when `id_field` is set) `remove_by_id` + `update_by_id`.
-/// With `auto_id` the store owns a `next_id: Signal<id_type>` and exposes a
+/// Client-side reactive store, exposed via context. NOT gated on the server
+/// feature — runs anywhere Dioxus runs. Uses Dioxus 0.7's canonical
+/// `#[derive(Store)]` + `#[store]` extension trait for path-isolated
+/// reactivity. Helpers mirror the spec: `push`, `clear`, and (when
+/// `id_field` is set) `remove_by_id` + `update_by_id`. With `auto_id` the
+/// store owns a plain `next_id: {id_type}` field and exposes a
 /// `push_new(item)` helper that sets `item.{id_field}` before pushing.
 pub(super) const CLIENT_STORE_TPL: &str = r#"use dioxus::prelude::*;
 {%- if needs_model_import %}
 use crate::model::{{ item_type }};
 {%- endif %}
 
-#[derive(Copy, Clone)]
+#[derive(Store, Clone, Default)]
 pub struct {{ pascal }} {
-    pub items: Signal<Vec<{{ item_type }}>>,
+    pub items: Vec<{{ item_type }}>,
 {%- if auto_id %}
-    pub next_id: Signal<{{ id_type }}>,
+    pub next_id: {{ id_type }},
 {%- endif %}
 }
 
-impl {{ pascal }} {
-    pub fn push(self, item: {{ item_type }}) {
-        let mut items = self.items;
-        items.write().push(item);
+// The `pub` argument makes the generated `{{ pascal }}StoreExt` extension
+// trait public so consumers in other modules can call these methods after
+// a `use crate::state::{{ snake }}::*;` import. Method visibility tracks
+// the trait, so no `pub` qualifier on the individual fns.
+#[store(pub)]
+impl Store<{{ pascal }}> {
+    fn push(&mut self, item: {{ item_type }}) {
+        self.items().write().push(item);
     }
 
-    pub fn clear(self) {
-        let mut items = self.items;
-        items.write().clear();
+    fn clear(&mut self) {
+        self.items().write().clear();
     }
 {%- if auto_id %}
 
     /// Assign the next id to `item.{{ id_field }}` then push. The id
     /// allocator lives inside the store, so call sites can drop the id
     /// field from the struct literal.
-    pub fn push_new(self, mut item: {{ item_type }}) -> {{ id_type }} {
-        let mut next_id = self.next_id;
-        let id = next_id();
-        *next_id.write() = id + 1;
+    fn push_new(&mut self, item: {{ item_type }}) -> {{ id_type }} {
+        let mut item = item;
+        let id = self.next_id().cloned();
+        self.next_id().set(id + 1{{ id_type_suffix }});
         item.{{ id_field }} = id;
-        let mut items = self.items;
-        items.write().push(item);
+        self.items().write().push(item);
         id
     }
 {%- endif %}
 {%- if id_field %}
 
-    pub fn remove_by_id(self, id: {{ id_type }}) -> bool {
-        let mut items = self.items;
+    fn remove_by_id(&mut self, id: {{ id_type }}) -> bool {
+        let mut items = self.items();
         let before = items.read().len();
         items.write().retain(|x| x.{{ id_field }} != id);
         let after = items.read().len();
         after < before
     }
 
-    pub fn update_by_id(self, id: {{ id_type }}, f: impl FnOnce(&mut {{ item_type }})) {
-        let mut items = self.items;
+    fn update_by_id(&mut self, id: {{ id_type }}, f: impl FnOnce(&mut {{ item_type }})) {
+        let mut items = self.items();
         let mut guard = items.write();
         if let Some(item) = guard.iter_mut().find(|x| x.{{ id_field }} == id) {
             f(item);
         }
     }
 {%- endif %}
-}
+{%- if checkbox_field %}
 
-pub fn provide_{{ snake }}() -> {{ pascal }} {
-    use_context_provider(|| {{ pascal }} {
-        items: Signal::new({{ initial }}),
-{%- if auto_id %}
-        next_id: Signal::new(1{{ id_type_suffix }}),
+    /// Drop every item whose `{{ checkbox_field }}` field is true. Mirrors the
+    /// canonical "Clear completed" action so call sites can stay in the
+    /// store's typed extension trait instead of reaching into
+    /// `self.items().write().retain(...)`.
+    fn clear_{{ checkbox_field }}(&mut self) {
+        self.items().write().retain(|x| !x.{{ checkbox_field }});
+    }
 {%- endif %}
-    })
 }
 
-pub fn use_{{ snake }}() -> {{ pascal }} {
-    use_context::<{{ pascal }}>()
+pub fn provide_{{ snake }}() -> Store<{{ pascal }}> {
+    use_context_provider(|| Store::new({{ pascal }} {
+        items: {{ initial }},
+{%- if auto_id %}
+        next_id: 1{{ id_type_suffix }},
+{%- endif %}
+    }))
+}
+
+pub fn use_{{ snake }}() -> Store<{{ pascal }}> {
+    use_context::<Store<{{ pascal }}>>()
 }
 "#;
 
 /// Screen template that wires an "add input + list with delete (and optional
 /// checkbox)" UI to a ClientStore. No server fn round-trip — all state lives
-/// in the Signal-backed context store.
+/// in the `Store<T>`-backed context store.
 pub(super) const CLIENT_CRUD_SCREEN_TPL: &str = r#"use dioxus::prelude::*;
 {%- if wrap_pascal %}
 use crate::components::{{ wrap_pascal }};
 {%- endif %}
-use crate::state::{{ store_snake }}::use_{{ store_snake }};
+// Glob-import brings `use_{{ store_snake }}` AND the `#[store(pub)]`-generated
+// extension trait into scope so call sites can invoke the typed methods.
+use crate::state::{{ store_snake }}::*;
 {%- if needs_model_import %}
 use crate::model::{{ item_type }};
 {%- endif %}

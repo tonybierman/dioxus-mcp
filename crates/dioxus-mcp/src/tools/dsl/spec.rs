@@ -14,13 +14,16 @@ pub struct GetDslSpecParams {
     #[serde(default)]
     pub extensions: Vec<String>,
     /// Optional list of individual section names to include (case-insensitive).
-    /// Valid core names: model, store, client_store, resource, component,
-    /// screen, server_fn, modify. Valid extension names: form, list, table
-    /// (crud), signal, socket, feed (realtime), session_state, login_screen,
-    /// protected_route (auth). When non-empty, only the listed sections are
-    /// emitted; extension blocks are auto-included as needed. Use this to
-    /// fetch a slim subset (e.g. just `model` + `client_store`) instead of
-    /// the full payload.
+    /// Valid core names: model, store, client_store, resource, components,
+    /// component, screen, server_fn, modify, remove. Valid extension names:
+    /// form, list, table (crud), signal, socket, feed (realtime),
+    /// session_state, login_screen, protected_route (auth). When non-empty,
+    /// only the listed sections are emitted; extension blocks are
+    /// auto-included as needed. Use this to fetch a slim subset (e.g. just
+    /// `model` + `client_store`) instead of the full payload. The
+    /// `components` section is an informational catalog of the 45 official
+    /// Dioxus components installable via `dx components add` — pull it
+    /// before scaffolding UI primitives like buttons, dialogs, or calendars.
     #[serde(default)]
     pub sections: Vec<String>,
     /// When true, return a compact index (primitive name + one-line summary)
@@ -76,6 +79,7 @@ pub async fn get_dsl_spec(
         ("store", "core", CORE_STORE),
         ("client_store", "core", CORE_CLIENT_STORE),
         ("resource", "core", CORE_RESOURCE),
+        ("components", "core", CORE_COMPONENTS),
         ("component", "core", CORE_COMPONENT),
         ("screen", "core", CORE_SCREEN),
         ("server_fn", "core", CORE_SERVER_FN),

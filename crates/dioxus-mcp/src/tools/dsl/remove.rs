@@ -6,7 +6,7 @@ use heck::{ToPascalCase, ToSnakeCase};
 use crate::tools::scaffold::{self, ScaffoldResult};
 
 use super::plan::normalize_route_path;
-use super::preflight::preflight;
+use super::preflight::{preflight, preflight_disk_aware};
 use super::resources::SynthServerFn;
 use super::types::*;
 use super::util::leaf_for;
@@ -156,9 +156,22 @@ pub(super) fn preflight_with_removes(
     crate_root: &Path,
     if_missing: bool,
     to_be_removed: &BTreeSet<std::path::PathBuf>,
+    // Dry-run callers pass `disk_aware: true` so cross-ref checks
+    // (Screen.template.store, List.endpoint, Store.resource, …) are satisfied
+    // by the corresponding on-disk leaf file as well as by an in-doc
+    // declaration. Lets agents preview a Screen against an already-scaffolded
+    // primitive without redeclaring it in the YAML.
+    disk_aware: bool,
 ) -> Result<(), String> {
+    let pf = |if_m: bool| {
+        if disk_aware {
+            preflight_disk_aware(doc, synth_server_fns, crate_root, if_m)
+        } else {
+            preflight(doc, synth_server_fns, crate_root, if_m)
+        }
+    };
     if to_be_removed.is_empty() {
-        return preflight(doc, synth_server_fns, crate_root, if_missing);
+        return pf(if_missing);
     }
     // Bypass strategy: clone the doc and filter out *create* primitives whose
     // leaf paths overlap a remove target. That way the existence check inside
@@ -191,7 +204,7 @@ pub(super) fn preflight_with_removes(
         }
         any
     };
-    preflight(doc, synth_server_fns, crate_root, if_missing || any_overlap)
+    pf(if_missing || any_overlap)
 }
 
 /// Execute every `remove:` entry. Each kind is idempotent — naming a target

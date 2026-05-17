@@ -54,6 +54,18 @@ pub struct DslDoc {
     /// component with your own.
     #[serde(default)]
     pub remove: Vec<DslRemove>,
+    /// Official Dioxus 0.7 components from the `dx components add` catalog to
+    /// pull into this project (e.g. `["button", "dialog", "calendar"]`). Names
+    /// are validated against the 45-entry catalog surfaced by
+    /// `get_dsl_spec { sections: [components] }`. execute_code shells out to
+    /// `dx components add <name>` for each valid entry (per-command 180s
+    /// timeout); on failure (`dx` missing, network error, non-zero exit) it
+    /// falls back to surfacing the install command on `next_steps`. Dry-run
+    /// emits `would run …` previews instead of installing. Either way the
+    /// first-time `mod components;` + theme stylesheet reminders are appended
+    /// to `next_steps`.
+    #[serde(default)]
+    pub dx_components: Vec<String>,
 }
 
 /// Top-level remove kinds. Each entry idempotently deletes the named on-disk

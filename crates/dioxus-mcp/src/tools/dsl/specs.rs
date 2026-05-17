@@ -60,6 +60,17 @@ pub(super) const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #     templates that pair with those server fns; do NOT load the `crud`
 #     extension for a client-only app — `client_crud` already covers it.
 #
+# Official component catalog (READ BEFORE scaffolding any UI widget):
+#   45 production-ready Dioxus 0.7 components ship via `dx components add
+#   <name>` — button, dialog, calendar, dropdown_menu, combobox, sheet,
+#   sidebar, tooltip, and more. See the `Components:` section below for the
+#   full list. PREFER one of these over hand-authored rsx! or a custom
+#   `Component:` entry whenever the user asks for a UI primitive that's in
+#   the catalog — the official versions ship with ARIA, keyboard handling,
+#   theming, and state plumbing already wired. To pull just the catalog
+#   without the rest of the spec: `get_dsl_spec { sections: [components],
+#   include_prologue: false }`.
+#
 # Keep-the-wiring, rewrite-the-body workflow:
 #   When a prompt asks for a "designed" or custom-styled Screen, do NOT skip
 #   the Screen primitive in favor of hand-writing the file from scratch. The
@@ -148,7 +159,7 @@ pub(super) const CORE_MODEL: &str = r#"  Model:
 "#;
 
 pub(super) const CORE_COMPONENT: &str = r#"  Component:
-    description: "A reusable UI element. Generates src/components/{snake}.rs. The `template` field picks a stub-body skeleton — omit (or `empty`) for the historical placeholder div. Other kinds: `form` (form + submit handler), `list` (ul with empty-state), `crud_table` (table + toolbar), `resource_view` (article with field list + edit/delete actions). Templates are structural only — they don't bind to any data; pair with `props:` and edit afterwards. For data-bound screens use `screens:` with a Screen template instead."
+    description: "A reusable UI element. Generates src/components/{snake}.rs. BEFORE scaffolding: if the user wants a button, dialog, calendar, dropdown, combobox, sheet, sidebar, tooltip, or any other widget listed in the `Components:` catalog, install that with `dx components add <name>` instead — the official version ships with accessibility and styling already wired and you'd just be reinventing it. Use this primitive for app-specific composites (UserCard, ProductTable, OrderRow). The `template` field picks a stub-body skeleton — omit (or `empty`) for the historical placeholder div. Other kinds: `form` (form + submit handler), `list` (ul with empty-state), `crud_table` (table + toolbar), `resource_view` (article with field list + edit/delete actions). Templates are structural only — they don't bind to any data; pair with `props:` and edit afterwards. For data-bound screens use `screens:` with a Screen template instead."
     fields:
       - {name: name, type: string, required: true}
       - {name: props, type: "PropDef[]", required: false}
@@ -242,7 +253,7 @@ pub(super) const CORE_STORE: &str = r#"  Store:
 "#;
 
 pub(super) const CORE_CLIENT_STORE: &str = r#"  ClientStore:
-    description: "A typed client-side reactive list. Generates `src/state/{snake}.rs` (no server feature gate) exposing a `Signal<Vec<T>>`-backed store via context — call `provide_{snake}()` once in your root component and `use_{snake}()` from any descendant. Emits `push`, `clear`, and (when `id_field` is set) `remove_by_id` and `update_by_id` helpers. With `auto_id: true` the store also owns a monotonic id allocator and exposes `push_new(item)` that assigns the next id before pushing — call sites can drop the id field from the struct literal. Pair with a Screen template `kind: client_crud` for one-call todo-style apps. NO server fn round-trip — ideal for in-memory state, todo lists, drafts, ephemeral UI selections."
+    description: "A typed client-side reactive list. Generates `src/state/{snake}.rs` (no server feature gate) exposing a `Store<{Pascal}>`-backed store via context using Dioxus 0.7's canonical `#[derive(Store)]` + `#[store]` extension methods for path-isolated reactivity — call `provide_{snake}()` once in your root component and `use_{snake}()` from any descendant to get a `Store<{Pascal}>`. Emits `push`, `clear`, and (when `id_field` is set) `remove_by_id` and `update_by_id` helpers via the `#[store] impl` extension trait. With `auto_id: true` the store also owns a monotonic id allocator and exposes `push_new(item)` that assigns the next id before pushing — call sites can drop the id field from the struct literal. When a companion `client_crud` Screen sets `checkbox_field`, the store also gains a `clear_{checkbox_field}` helper that drops every item with that bool set — so call sites can implement \"Clear completed\" without poking at `items().write().retain(...)`. Pair with a Screen template `kind: client_crud` for one-call todo-style apps. NO server fn round-trip — ideal for in-memory state, todo lists, drafts, ephemeral UI selections."
     fields:
       - {name: name, type: string, required: true}
       - {name: item_type, type: "Rust type (Model in this doc OR a built-in like String / i32). When it matches a Model name, the file emits `use crate::model::{ItemType};`.", required: true}
@@ -494,4 +505,62 @@ pub(super) const AUTH_PROTECTED: &str = r#"  ProtectedRoute:
         - name: Dashboard
           redirect_to: /login
           requires: session
+"#;
+
+// Informational catalog (NOT a generative primitive — there is no
+// `components:` key in the DslDoc). Surfacing it via get_dsl_spec lets the
+// agent discover the official Dioxus 0.7 component library without an extra
+// tool call or shelling out to `dx components list`. The 45 names below are
+// the upstream registry snapshot; refresh by running `dx components list`
+// inside any binary crate and copy-pasting the new entries.
+pub(super) const CORE_COMPONENTS: &str = r#"  Components:
+    description: "Official Dioxus 0.7 component catalog — 45 pre-built, accessible widgets (button, dialog, calendar, dropdown_menu, combobox, sheet, sidebar, tooltip, …) installed via `dx components add <name>`. PREFER these over hand-authored rsx! or a custom `Component:` entry whenever the user asks for a UI primitive that appears in the catalog below — the official versions ship with ARIA, keyboard handling, theming, and state plumbing already wired. This is INFORMATIONAL ONLY: there is no `components:` key in the DSL and execute_code does not install anything; the agent (or user) runs `dx components add <name>` once per component from the project root. First-time install also requires `mod components;` in main.rs and an `asset!(\"/assets/dx-components-theme.css\")` stylesheet — `dx components add` prints both steps after writing files. After install, files live at `src/components/{name}/component.rs` with `pub use component::*;` re-exports, so use as `use crate::components::{name}::{Pascal};` and drop straight into rsx!."
+    install: "dx components add <name>     # creates src/components/{name}/, updates src/components/mod.rs"
+    import: "use crate::components::{name}::{Pascal};   # e.g. use crate::components::dropdown_menu::DropdownMenu;"
+    catalog:
+      accordion: "An accordion component for displaying collapsible content sections."
+      alert_dialog: "An alert dialog component for displaying important messages and requiring user confirmation."
+      aspect_ratio: "An aspect ratio component for maintaining a consistent width-to-height ratio of an element."
+      avatar: "An avatar component for displaying user profile images or initials."
+      badge: "A small label to display status or categorization."
+      button: "A button component for triggering actions or events when clicked."
+      calendar: "A calendar grid component for selecting dates."
+      card: "A simple card component."
+      checkbox: "A togglable checkbox component."
+      collapsible: "A collapsible component for showing and hiding content sections."
+      color_picker: "Allows selecting a color using a variety of input methods."
+      combobox: "An autocomplete input + popover for picking a value from a filterable list of options."
+      context_menu: "A context menu component for displaying a list of actions or options after right-clicking an area."
+      date_picker: "A date picker component for selecting or inputting dates."
+      dialog: "A dialog component for displaying modal content."
+      drag_and_drop_list: "A vertically sortable list supporting drag-and-drop, touch, or keyboard input."
+      dropdown_menu: "A dropdown menu component for selecting options from a list."
+      form: "A form component for collecting user input."
+      hover_card: "A hover card component for displaying additional information on hover."
+      input: "An input field component for user text entry."
+      item: "A component for displaying content."
+      label: "An accessible label component for form elements."
+      menubar: "A menubar component for a collection of menu items."
+      navbar: "A navbar component for navigation between pages."
+      pagination: "Navigation controls for paged content."
+      popover: "A popover component for collapsible content."
+      progress: "An accessible progress-bar indicator."
+      radio_group: "A group of radio buttons for selecting one option from a set."
+      scroll_area: "A scrollable area component."
+      select: "A select dropdown component with typeahead support."
+      separator: "A visual separator between different sections of the page."
+      sheet: "A sheet component as an edge panel that complements the main content."
+      sidebar: "A sidebar component as a vertical panel fixed to the screen edge for quick access to different sections."
+      skeleton: "A placeholder component for all loading elements."
+      slider: "An accessible slider component."
+      switch: "A togglable switch component."
+      tabs: "A tabbed interface component."
+      textarea: "A textarea component for multi-line text input."
+      toast: "A toast notification component."
+      toggle: "A simple toggle button component."
+      toggle_group: "A group of toggle buttons for selecting one or more options from a set."
+      toolbar: "A toolbar component for grouping related inputs."
+      tooltip: "A tooltip component for additional information on hover or focus."
+      virtual_list: "A virtualized list component for large datasets."
+    install_via_dsl: "Top-level `dx_components: [name1, name2]` list (sibling of `screens:`, `models:`, etc.) declares which catalog entries this scaffold needs. execute_code validates each name against the catalog above and shells out to `dx components add <name>` for each valid entry (per-command 180s timeout). On failure (missing `dx`, network error, non-zero exit) it falls back to surfacing the install command on `next_steps` so the caller still sees what to run. Dry-run mode emits `would run …` previews instead of installing. The first-time `mod components;` + `asset!(\"/assets/dx-components-theme.css\")` reminders are surfaced either way. Example: `dx_components: [button, dialog, calendar]`."
 "#;

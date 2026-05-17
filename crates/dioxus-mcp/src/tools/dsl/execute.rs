@@ -96,12 +96,19 @@ pub async fn execute_code(
     // create my Hero" in one call.
     let to_be_removed = removed_leaf_paths(&doc, &crate_root);
 
+    // Dry-run must never write, so collisions belong in the plan output, not
+    // as fatal preflight errors. Force `if_missing` semantics for the dry-run
+    // FS check — existing leaves become `collisions` in the plan instead of
+    // aborting the call. `disk_aware: true` (dry_run) also relaxes cross-ref
+    // checks so a Screen can reference an already-scaffolded store/model/etc.
+    // without redeclaring it in the YAML.
     preflight_with_removes(
         &doc,
         &synth_server_fns,
         &crate_root,
-        p.if_missing,
+        p.if_missing || p.dry_run,
         &to_be_removed,
+        p.dry_run,
     )?;
 
     if p.dry_run {
@@ -124,6 +131,9 @@ pub async fn execute_code(
                 plan.previews.insert(leaf, body);
             }
         }
+        // `dx_components:` install hints are surfaced in dry-run too so
+        // callers can preview the install plan before committing.
+        surface_dx_components_hints(&doc, &crate_root, &mut plan);
         return Ok(plan);
     }
 
@@ -245,6 +255,32 @@ pub async fn execute_code(
 
     let model_names_for_imports: BTreeSet<String> =
         doc.models.iter().map(|m| m.name.to_snake_case()).collect();
+    // For each client_store, find any client_crud Screen that references it
+    // and harvest the `checkbox_field`. The first hit wins — multiple screens
+    // pointing at the same store with different checkbox fields is unusual,
+    // so we don't try to merge them; the lookup just gives the store its
+    // canonical "toggleable bool" field name for the `clear_{field}` helper.
+    let checkbox_field_for_store = |cs_name: &str| -> Option<String> {
+        let cs_snake = cs_name.to_snake_case();
+        for sc in &doc.screens {
+            let Some(tpl) = sc.template.as_ref() else {
+                continue;
+            };
+            if tpl.kind != "client_crud" {
+                continue;
+            }
+            let Some(store_ref) = tpl.store.as_deref() else {
+                continue;
+            };
+            if store_ref.to_snake_case() != cs_snake {
+                continue;
+            }
+            if let Some(cb) = tpl.checkbox_field.as_deref() {
+                return Some(cb.to_snake_case());
+            }
+        }
+        None
+    };
     for cs in &doc.client_stores {
         if skip_or_record(
             &skip,
@@ -253,7 +289,8 @@ pub async fn execute_code(
         ) {
             continue;
         }
-        let r = generate_client_store(&crate_root, cs, &model_names_for_imports)?;
+        let cb = checkbox_field_for_store(&cs.name);
+        let r = generate_client_store(&crate_root, cs, &model_names_for_imports, cb.as_deref())?;
         merge(&mut result, r);
     }
 
@@ -601,6 +638,12 @@ pub async fn execute_code(
     // through scaffold::create_server_fn which doesn't gate on fullstack).
     surface_feature_gap_hints(&doc, &synth_server_fns, &crate_root, &mut result);
 
+    // Install any `dx_components:` entries inline: shell out to
+    // `dx components add <name>` for each catalog-valid entry. On failure
+    // (missing `dx`, network error, …) falls back to surfacing the install
+    // command in `next_steps` so the caller still sees what to run.
+    install_dx_components(&doc, &crate_root, &mut result).await;
+
     dedup_paths(&mut result.files_created);
     dedup_paths(&mut result.files_modified);
     dedup_paths(&mut result.collisions);
@@ -722,6 +765,220 @@ fn surface_feature_gap_hints(
         "audit hint: this run added server fn(s) but the `dioxus` dep's features ({:?}) don't include `fullstack` (or `server`+`web`) — call `audit_feature_flags` for the recommended patch, or add `features = [\"fullstack\"]` to the `dioxus` dep so the server-side code compiles",
         active
     ));
+}
+
+/// Names in the official Dioxus 0.7 component catalog (`dx components add
+/// <name>`). Kept in sync with the catalog block in `specs.rs` —
+/// `spec_components_catalog_matches_install_set` (in tests.rs) wires the
+/// two sources together so this list can't silently drift.
+pub(super) const DX_COMPONENT_CATALOG: &[&str] = &[
+    "accordion",
+    "alert_dialog",
+    "aspect_ratio",
+    "avatar",
+    "badge",
+    "button",
+    "calendar",
+    "card",
+    "checkbox",
+    "collapsible",
+    "color_picker",
+    "combobox",
+    "context_menu",
+    "date_picker",
+    "dialog",
+    "drag_and_drop_list",
+    "dropdown_menu",
+    "form",
+    "hover_card",
+    "input",
+    "item",
+    "label",
+    "menubar",
+    "navbar",
+    "pagination",
+    "popover",
+    "progress",
+    "radio_group",
+    "scroll_area",
+    "select",
+    "separator",
+    "sheet",
+    "sidebar",
+    "skeleton",
+    "slider",
+    "switch",
+    "tabs",
+    "textarea",
+    "toast",
+    "toggle",
+    "toggle_group",
+    "toolbar",
+    "tooltip",
+    "virtual_list",
+];
+
+/// Validate `doc.dx_components` against the catalog. Returns the deduped
+/// snake-case-normalized list of valid names; typos and unknown entries are
+/// appended to `result.next_steps` so the caller sees them either way.
+fn validate_dx_components(doc: &DslDoc, result: &mut ScaffoldResult) -> Vec<String> {
+    if doc.dx_components.is_empty() {
+        return Vec::new();
+    }
+    let catalog: BTreeSet<&str> = DX_COMPONENT_CATALOG.iter().copied().collect();
+    let mut valid: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for raw in &doc.dx_components {
+        let name = raw.trim().to_snake_case();
+        if name.is_empty() {
+            continue;
+        }
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if !catalog.contains(name.as_str()) {
+            result.next_steps.push(format!(
+                "dx_components: {raw:?} is not in the official Dioxus 0.7 catalog — call `get_dsl_spec {{ sections: [components], include_prologue: false }}` to list the 45 valid names"
+            ));
+            continue;
+        }
+        valid.push(name);
+    }
+    valid
+}
+
+/// Append the post-install import hint (`crate::components::{name}::{Pascal}`)
+/// so the caller knows the path to type into rsx!. Shared between the
+/// dry-run hint path and the real-install path.
+fn push_import_hint(valid: &[String], result: &mut ScaffoldResult) {
+    if valid.is_empty() {
+        return;
+    }
+    let import_paths: Vec<String> = valid
+        .iter()
+        .map(|name| {
+            let pascal = name.to_pascal_case();
+            format!("crate::components::{name}::{pascal}")
+        })
+        .collect();
+    result.next_steps.push(format!(
+        "dx_components: drop into rsx! via {}",
+        import_paths.join(", ")
+    ));
+}
+
+/// Dry-run path: surface `dx components add <name>` commands as next_steps
+/// for each catalog-valid entry, plus the one-time setup reminders. Used
+/// only when `dry_run: true` — non-dry-run calls go through
+/// `install_dx_components` which actually shells out.
+fn surface_dx_components_hints(doc: &DslDoc, crate_root: &Path, result: &mut ScaffoldResult) {
+    let valid = validate_dx_components(doc, result);
+    if valid.is_empty() {
+        return;
+    }
+    for name in &valid {
+        result.next_steps.push(format!(
+            "dx_components: would run `dx components add {name}` in {} (dry_run)",
+            crate_root.display()
+        ));
+    }
+    result.next_steps.push(
+        "dx_components: first-time install also needs `mod components;` in your crate root (main.rs or lib.rs) and \
+         `asset!(\"/assets/dx-components-theme.css\")` mounted in your App body — `dx components add` prints these reminders after writing files".into(),
+    );
+    push_import_hint(&valid, result);
+}
+
+/// Real-install path: shell out to `dx components add <name>` for each
+/// catalog-valid entry, with a per-command timeout. On failure (missing
+/// `dx`, network error, non-zero exit) the function falls back to surfacing
+/// the install command on `next_steps` so the caller still sees what to run.
+async fn install_dx_components(doc: &DslDoc, crate_root: &Path, result: &mut ScaffoldResult) {
+    use tokio::process::Command;
+    use tokio::time::{Duration, timeout};
+
+    let valid = validate_dx_components(doc, result);
+    if valid.is_empty() {
+        return;
+    }
+
+    let mut installed: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for name in &valid {
+        let mut cmd = Command::new("dx");
+        cmd.arg("components")
+            .arg("add")
+            .arg(name)
+            .current_dir(crate_root);
+        // Quiet down ANSI in the captured output so a failure snippet pastes
+        // cleanly into the response.
+        cmd.env("CARGO_TERM_COLOR", "never");
+
+        let fut = cmd.output();
+        match timeout(Duration::from_secs(180), fut).await {
+            Ok(Ok(out)) if out.status.success() => {
+                installed.push(name.clone());
+            }
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let snippet: String = stderr.lines().take(10).collect::<Vec<_>>().join("\n");
+                failed.push((
+                    name.clone(),
+                    format!("exit {:?}: {snippet}", out.status.code()),
+                ));
+            }
+            Ok(Err(e)) => {
+                // Spawn failure — `dx` not on PATH, permission denied, etc.
+                // Stop iterating: subsequent names will hit the same failure.
+                failed.push((name.clone(), format!("failed to spawn `dx`: {e}")));
+                for remaining in valid.iter().skip(installed.len() + failed.len()) {
+                    failed.push((
+                        remaining.clone(),
+                        "skipped — `dx` not available on PATH".into(),
+                    ));
+                }
+                break;
+            }
+            Err(_) => {
+                failed.push((name.clone(), "exceeded 180s timeout".into()));
+            }
+        }
+    }
+
+    if !installed.is_empty() {
+        // The newly-installed component dir lands under src/components/{name}/.
+        // We don't enumerate the files `dx` wrote (it owns the layout) — the
+        // dir path is enough for the caller to inspect.
+        for name in &installed {
+            let dir = crate_root.join("src/components").join(name);
+            if dir.exists() {
+                result.files_created.push(dir);
+            }
+        }
+        result.next_steps.push(format!(
+            "dx_components: installed via `dx components add` → {}",
+            installed.join(", ")
+        ));
+    }
+    if !failed.is_empty() {
+        result.next_steps.push(
+            "dx_components: install failed for some entries — fall back to running these by hand:"
+                .into(),
+        );
+        for (name, reason) in &failed {
+            result.next_steps.push(format!(
+                "  - `dx components add {name}` in {} ({reason})",
+                crate_root.display()
+            ));
+        }
+    }
+    // First-time-setup reminder always fires — `dx` prints these on every
+    // install but the caller may have missed them in the captured output.
+    result.next_steps.push(
+        "dx_components: first-time install also needs `mod components;` in your crate root (main.rs or lib.rs) and \
+         `asset!(\"/assets/dx-components-theme.css\")` mounted in your App body".into(),
+    );
+    push_import_hint(&valid, result);
 }
 
 /// Run `cargo check --message-format=short` in `crate_root` with a generous
