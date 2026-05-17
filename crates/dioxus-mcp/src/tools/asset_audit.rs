@@ -151,28 +151,72 @@ impl<'a, 'ast> Visit<'ast> for AssetVisitor<'a> {
             .segments
             .last()
             .map(|s| s.ident.to_string().to_lowercase());
-        if last.as_deref() == Some("asset") {
-            let line = m.path.span().start().line;
-            match first_string_literal(&m.tokens) {
-                Some(lit) => {
-                    self.referenced.insert(lit.clone());
-                    let matched = self.file_index.contains(&lit)
-                        || self.file_index.contains(lit.trim_start_matches('/'))
-                        || self
-                            .file_index
-                            .contains(&format!("/{}", lit.trim_start_matches('/')));
-                    if !matched {
-                        self.missing.push(MissingAsset {
-                            path: lit,
-                            file: self.file.clone(),
-                            line,
-                        });
-                    }
-                }
-                None => *self.dynamic += 1,
+        match last.as_deref() {
+            Some("asset") => {
+                let line = m.path.span().start().line;
+                self.record_asset_lit(first_string_literal(&m.tokens), line);
             }
+            // syn::Visit doesn't recurse into macro token bodies. The 0.7 rsx!
+            // macro can nest `asset!()` calls many levels deep — re-tokenize
+            // and walk for them here. (Cover the small handful of macros that
+            // legitimately wrap rsx so things like `rsx_node!` keep working.)
+            Some("rsx") | Some("rsx_node") | Some("render") => {
+                self.scan_tokens_for_asset(&m.tokens);
+            }
+            _ => {}
         }
         syn::visit::visit_macro(self, m);
+    }
+}
+
+impl<'a> AssetVisitor<'a> {
+    fn record_asset_lit(&mut self, lit: Option<String>, line: usize) {
+        match lit {
+            Some(lit) => {
+                self.referenced.insert(lit.clone());
+                let matched = self.file_index.contains(&lit)
+                    || self.file_index.contains(lit.trim_start_matches('/'))
+                    || self
+                        .file_index
+                        .contains(&format!("/{}", lit.trim_start_matches('/')));
+                if !matched {
+                    self.missing.push(MissingAsset {
+                        path: lit,
+                        file: self.file.clone(),
+                        line,
+                    });
+                }
+            }
+            None => *self.dynamic += 1,
+        }
+    }
+
+    fn scan_tokens_for_asset(&mut self, tokens: &proc_macro2::TokenStream) {
+        let mut it = tokens.clone().into_iter().peekable();
+        while let Some(tt) = it.next() {
+            match tt {
+                TokenTree::Ident(id) if id == "asset" => {
+                    // Match `asset ! ( ... )` — bang then a parenthesized group.
+                    let Some(TokenTree::Punct(p)) = it.peek() else {
+                        continue;
+                    };
+                    if p.as_char() != '!' {
+                        continue;
+                    }
+                    it.next();
+                    let Some(TokenTree::Group(g)) = it.next() else {
+                        continue;
+                    };
+                    let line = id.span().start().line;
+                    self.record_asset_lit(first_string_literal(&g.stream()), line);
+                }
+                TokenTree::Group(g) => {
+                    // Recurse into nested groups (rsx! bodies are mostly braced).
+                    self.scan_tokens_for_asset(&g.stream());
+                }
+                _ => {}
+            }
+        }
     }
 }
 

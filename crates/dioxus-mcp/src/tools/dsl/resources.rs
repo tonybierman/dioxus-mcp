@@ -508,15 +508,18 @@ pub(super) async fn generate_synth_server_fn(
         Some(root) => crate::project::ProjectInfo::detect(std::path::Path::new(root)),
         None => state.project.lock().await.clone(),
     };
-    let active = &project.dioxus_features;
-    let fullstack_capable = active.iter().any(|f| f == "fullstack")
-        || (active.iter().any(|f| f == "server") && active.iter().any(|f| f == "web"));
-    if !fullstack_capable {
-        return Err(
-            "this project does not have `fullstack` (or `web`+`server`) enabled on the dioxus dep; \
-             resource: server fns require a fullstack setup. Run audit_feature_flags for guidance."
-                .into(),
-        );
+    if !project.fullstack_capable() {
+        let hint = if project_root.is_none() && !project.is_dioxus_project {
+            " (the MCP server's cwd has no Dioxus Cargo.toml — pass `project_root` so the audit \
+              reads your real manifest)"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "this project does not have `fullstack` (or `web`+`server`, or an opt-in \
+             `server = [\"dioxus/server\"]` sibling feature) enabled on the dioxus dep; \
+             resource: server fns require a fullstack setup. Run audit_feature_flags for guidance.{hint}"
+        ));
     }
 
     let snake = sf.name.to_snake_case();

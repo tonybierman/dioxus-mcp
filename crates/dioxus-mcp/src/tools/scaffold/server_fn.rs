@@ -10,8 +10,13 @@ use super::types::{CreateServerFnParams, ModUpsert, ScaffoldResult};
 
 const SERVER_FN_TPL: &str = r#"use dioxus::prelude::*;
 
-#[{{ method }}("{{ path }}")]
+#[{{ method }}("{{ path }}"
+{%- for e in extractors %}, {{ e.name }}: {{ e.ty }}{% endfor -%}
+)]
 pub async fn {{ snake }}(
+{%- for e in extractors %}
+    {{ e.name }}: {{ e.ty }},
+{%- endfor %}
 {%- for a in args %}
     {{ a.name }}: {{ a.ty }},
 {%- endfor %}
@@ -81,15 +86,18 @@ pub async fn create_server_fn(
         Some(root) => crate::project::ProjectInfo::detect(std::path::Path::new(root)),
         None => state.project.lock().await.clone(),
     };
-    let active = &project.dioxus_features;
-    let fullstack_capable = active.iter().any(|f| f == "fullstack")
-        || (active.iter().any(|f| f == "server") && active.iter().any(|f| f == "web"));
-    if !fullstack_capable {
-        return Err(
-            "this project does not have `fullstack` (or `web`+`server`) enabled on the dioxus dep; \
-             server fns require a fullstack setup. Run audit_feature_flags for guidance."
-                .into(),
-        );
+    if !project.fullstack_capable() {
+        let hint = if p.project_root.is_none() && !project.is_dioxus_project {
+            " (the MCP server's cwd has no Dioxus Cargo.toml — pass `project_root` so the audit \
+              reads your real manifest)"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "this project does not have `fullstack` (or `web`+`server`, or an opt-in \
+             `server = [\"dioxus/server\"]` sibling feature) enabled on the dioxus dep; \
+             server fns require a fullstack setup. Run audit_feature_flags for guidance.{hint}"
+        ));
     }
 
     let crate_root = project
@@ -134,6 +142,7 @@ pub async fn create_server_fn(
             method => method,
             path => route_path,
             args => p.args.iter().map(|a| context!{ name => a.name.clone(), ty => a.ty.clone() }).collect::<Vec<_>>(),
+            extractors => p.extractors.iter().map(|a| context!{ name => a.name.clone(), ty => a.ty.clone() }).collect::<Vec<_>>(),
         })
         .map_err(|e| e.to_string())?;
     std::fs::write(&target, rendered).map_err(|e| e.to_string())?;

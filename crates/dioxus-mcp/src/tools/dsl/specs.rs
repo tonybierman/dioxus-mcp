@@ -164,7 +164,7 @@ pub(super) const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 "#;
 
 pub(super) const CORE_MODEL: &str = r#"  Model:
-    description: "A shared data type with serde derives. Generates src/model/{snake}.rs and exposes the struct as crate::model::{Pascal}. Server fns can name it in their return_type (e.g. `Vec<Product>`); forthcoming `store:` and `resource:` primitives will consume it directly. Project must depend on `serde = { version = \"1\", features = [\"derive\"] }`. AUTO-DEFAULT: when a `client_crud` Screen references this model (directly or via its `client_stores:` entry), `Default` is auto-added to `derives:` before scaffolding — the `client_crud` body uses `..Default::default()` on the push call. The patch covers both in-doc models and existing on-disk model files at `src/model/{snake}.rs`. You don't need to add `Default` yourself."
+    description: "A shared data type with serde derives. Generates src/model/{snake}.rs and exposes the struct as crate::model::{Pascal}. Server fns can name it in their return_type (e.g. `Vec<Product>`); forthcoming `store:` and `resource:` primitives will consume it directly. Project must depend on `serde = { version = \"1\", features = [\"derive\"] }`. AUTO-DEFAULT: when a `client_crud` Screen references this model (directly or via its `client_stores:` entry), `Default` is auto-added to `derives:` before scaffolding — the `client_crud` body uses `..Default::default()` on the push call. The patch covers both in-doc models and existing on-disk model files at `src/model/{snake}.rs`. You don't need to add `Default` yourself. AUTO-IMPORT: a field type like `column: Column` (or `Vec<Column>`, `Option<Column>`, etc.) that names another Model declared in the same doc auto-emits `use crate::model::column::Column;` at the top of the generated file. Also works for ViewState-declared enums (resolved to `use crate::state::{snake}::{Pascal};`). Path-qualified references (`crate::model::column::Column`) suppress the import so you don't get a duplicate."
     fields:
       - {name: name, type: string, required: true}
       - {name: fields, type: "ModelField[] — each {name, type, optional?}", required: true}
@@ -242,6 +242,7 @@ pub(super) const CORE_SERVER_FN: &str = r#"  ServerFn:
       - {name: return_type, type: "string — the INNER type only; do NOT wrap in Result<_, ServerFnError> or ServerFnResult<_>, the template adds that wrapper for you. Wrapping is rejected with a clear error.", required: false}
       - {name: method, type: "get|post (defaults: post if args else get)", required: false}
       - {name: path, type: "string (default: /api/{snake_name})", required: false}
+      - {name: extractors, type: "ArgDef[] — Axum-style request extractors. Each {name, type} entry lands BOTH in the `#[get/post(...)]` attribute's argument list AND in the fn signature, so a cookie-bearing handler is one DSL entry instead of a hand-edit. Example: extractors: [{name: cookies, type: \"TypedHeader<Cookie>\"}] emits `#[get(\"/api/board\", cookies: TypedHeader<Cookie>)]` and `pub async fn handler(cookies: TypedHeader<Cookie>, ...)`. You're responsible for adding the relevant extractor crates (axum_extra, axum::headers, tower_cookies, …) to Cargo.toml so the type resolves.", required: false}
     example:
       server_fns:
         - name: fetch_users
@@ -251,6 +252,14 @@ pub(super) const CORE_SERVER_FN: &str = r#"  ServerFn:
           return_type: "Vec<String>"
           method: post
           path: /api/users
+        - name: fetch_board
+          # Cookie-authed example. Pair with a session-touching prologue in the
+          # body and you've got the canonical protected endpoint shape.
+          method: get
+          path: /api/board
+          extractors:
+            - {name: cookies, type: "TypedHeader<Cookie>"}
+          return_type: "Board"
 "#;
 
 pub(super) const CORE_STORE: &str = r#"  Store:

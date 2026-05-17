@@ -96,8 +96,7 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
     // cargo feature unification flag false positives like "fullstack
     // enabled but web is not" when web *is* enabled through default.
     let manifest_text = std::fs::read_to_string(&manifest).ok();
-    let effective_dioxus_features =
-        collect_effective_dioxus_features(&project.dioxus_features, manifest_text.as_deref());
+    let effective_dioxus_features = project.effective_dioxus_features.clone();
     let active: Vec<&str> = effective_dioxus_features
         .iter()
         .map(|s| s.as_str())
@@ -119,11 +118,22 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
                 fix: Some("add `web` to the dioxus features".into()),
             });
         }
-        if !active.contains(&"server") {
+        // Standard 0.7 layout: `default = ["web"]` and a sibling
+        // `server = ["dioxus/server"]` feature that gets enabled only when
+        // building the server binary (`dx serve --features server`). In that
+        // setup `server` is never in `effective_dioxus_features` for the
+        // default build, but it IS wired up — don't warn.
+        let has_optin = manifest_text
+            .as_deref()
+            .is_some_and(crate::project::manifest_has_optin_server_feature);
+        if !active.contains(&"server") && !has_optin {
             findings.push(Finding {
                 level: "warning",
                 message: "`fullstack` is enabled but `server` is not".into(),
-                fix: Some("add `server` to the dioxus features".into()),
+                fix: Some(
+                    "either add `server` to the dioxus dep's features, or declare an opt-in `server = [\"dioxus/server\"]` feature that the server binary enables explicitly"
+                        .into(),
+                ),
             });
         }
     } else if render_targets.len() > 1 {
@@ -179,69 +189,51 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
     }
 }
 
-/// Compute the effective set of dioxus features for the project, starting
-/// from features set directly on the `dioxus` dep line and walking the
-/// project's own `[features]` table to follow `dioxus/<name>` indirections.
-///
-/// Cargo activates `default` automatically (unless `default-features = false`
-/// on a downstream crate — but we're inspecting the project itself, so default
-/// is in scope). Any named feature reachable from `default` whose value list
-/// contains `dioxus/X` contributes `X` to the effective set.
-fn collect_effective_dioxus_features(
-    direct_dep_features: &[String],
-    manifest_text: Option<&str>,
-) -> Vec<String> {
-    use std::collections::BTreeSet;
-    let mut effective: BTreeSet<String> = direct_dep_features.iter().cloned().collect();
-    let Some(text) = manifest_text else {
-        return effective.into_iter().collect();
-    };
-    let Ok(parsed) = text.parse::<toml::Table>() else {
-        return effective.into_iter().collect();
-    };
-    let Some(features) = parsed.get("features").and_then(|v| v.as_table()) else {
-        return effective.into_iter().collect();
-    };
-
-    // Seed the work queue with `default` (cargo activates it by default for
-    // path-level builds, which is what `dx serve` and `cargo build` do).
-    let mut work: Vec<String> = Vec::new();
-    if let Some(default) = features.get("default").and_then(|v| v.as_array()) {
-        for v in default {
-            if let Some(s) = v.as_str() {
-                work.push(s.to_string());
-            }
-        }
-    }
-
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    while let Some(name) = work.pop() {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        // Accept both `dioxus/web` and the weak-dep form `dioxus?/web`.
-        if let Some(stripped) = name
-            .strip_prefix("dioxus/")
-            .or_else(|| name.strip_prefix("dioxus?/"))
-        {
-            effective.insert(stripped.to_string());
-            continue;
-        }
-        if let Some(arr) = features.get(name.as_str()).and_then(|v| v.as_array()) {
-            for v in arr {
-                if let Some(s) = v.as_str() {
-                    work.push(s.to_string());
-                }
-            }
-        }
-    }
-
-    effective.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::collect_effective_dioxus_features;
+    use crate::project::{effective_dioxus_features, manifest_has_optin_server_feature};
+
+    fn collect_effective_dioxus_features(direct: &[String], text: Option<&str>) -> Vec<String> {
+        effective_dioxus_features(direct, text)
+    }
+    fn has_optin_server_feature(text: &str) -> bool {
+        manifest_has_optin_server_feature(text)
+    }
+
+    #[test]
+    fn detects_optin_server_feature() {
+        // Standard 0.7 fullstack layout — server is a sibling feature, not
+        // in default.
+        let manifest = r#"
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+server = ["dioxus/server"]
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#;
+        assert!(has_optin_server_feature(manifest));
+
+        // Weak-dep marker should also count.
+        let manifest_weak = r#"
+[features]
+default = ["web"]
+server = ["dioxus?/server"]
+"#;
+        assert!(has_optin_server_feature(manifest_weak));
+
+        // No server-wired feature at all → no opt-in.
+        let manifest_none = r#"
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#;
+        assert!(!has_optin_server_feature(manifest_none));
+    }
 
     #[test]
     fn picks_up_features_routed_through_project_features_table() {

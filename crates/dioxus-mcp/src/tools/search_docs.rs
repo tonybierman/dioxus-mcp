@@ -16,10 +16,23 @@ pub struct SearchDocsParams {
 
 #[derive(Debug, Serialize)]
 pub struct DocHit {
+    /// Human-friendly URL with the section anchor — opens in a browser,
+    /// but 404s via WebFetch because dioxuslabs.com serves SPA HTML, not
+    /// the anchored fragment. Use `raw_url` for programmatic fetches.
     pub url: String,
+    /// WebFetch-safe URL pointing at the canonical llms-full.txt dump the
+    /// search index was built from. Fetching it returns the entire corpus —
+    /// the agent can scan for the section heading to recover full prose
+    /// when `body` was truncated.
+    pub raw_url: String,
     pub title: Option<String>,
     pub score: f32,
+    /// Best 240-char excerpt around the matched query term — for quick triage.
     pub snippet: String,
+    /// Full section text (capped at 4000 chars) so the agent doesn't have
+    /// to re-fetch the corpus for typical lookups. Truncation is signaled by
+    /// a trailing `... [truncated]` marker.
+    pub body: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,9 +71,11 @@ pub async fn search_docs(
         let snippet = best_snippet(&sec.body, &qterms);
         hits.push(DocHit {
             url: section_url(&version, &sec.heading),
+            raw_url: raw_corpus_url(&version),
             title: Some(sec.heading.clone()),
             score,
             snippet,
+            body: section_body_capped(&sec.body),
         });
     }
 
@@ -131,6 +146,23 @@ fn section_url(version: &str, heading: &str) -> String {
         version,
         slugify(heading)
     )
+}
+
+fn raw_corpus_url(version: &str) -> String {
+    format!("https://dioxuslabs.com/learn/{version}/llms-full.txt")
+}
+
+const SECTION_BODY_CAP: usize = 4000;
+
+fn section_body_capped(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.len() <= SECTION_BODY_CAP {
+        return trimmed.to_string();
+    }
+    let end = floor_char_boundary(trimmed, SECTION_BODY_CAP);
+    let mut out = trimmed[..end].to_string();
+    out.push_str("\n\n… [truncated; fetch `raw_url` for the full corpus]");
+    out
 }
 
 fn slugify(s: &str) -> String {

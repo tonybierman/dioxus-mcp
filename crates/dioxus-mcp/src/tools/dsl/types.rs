@@ -391,6 +391,17 @@ pub struct DslServerFn {
     /// "/api/{snake_name}".
     #[serde(default)]
     pub path: Option<String>,
+    /// Axum-style request extractors. Each `{name, type}` entry lands BOTH in
+    /// the `#[get/post(...)]` attribute argument list AND in the fn
+    /// signature, so a cookie-bearing handler is one DSL entry instead of a
+    /// hand-edit. Example:
+    /// `extractors: [{ name: cookies, type: "TypedHeader<Cookie>" }]`
+    /// emits `#[get("/api/board", cookies: TypedHeader<Cookie>)]` plus
+    /// `pub async fn fetch_board(cookies: TypedHeader<Cookie>, ...)`.
+    /// The user is responsible for adding `axum_extra` / `axum::headers` /
+    /// `tower_cookies` / etc. to the project so the extractor type resolves.
+    #[serde(default)]
+    pub extractors: Vec<DslArgDef>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

@@ -176,6 +176,21 @@ fn tool_project_index() {
         .collect();
     assert!(server_names.contains(&"fetch_user"));
     assert!(server_names.contains(&"orphan_fn"));
+    assert!(
+        server_names.contains(&"fetch_health"),
+        "attribute-form #[get(...)] server fn must be detected: {server_names:?}",
+    );
+
+    // The attribute-form entry exposes method + route_path; the legacy
+    // #[server(...)] form omits them.
+    let health = r["server_fns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "fetch_health")
+        .unwrap();
+    assert_eq!(health["method"], "get");
+    assert_eq!(health["route_path"], "/health");
 }
 
 #[test]
@@ -232,6 +247,13 @@ fn tool_asset_audit() {
     assert!(
         unreferenced.contains(&"assets/orphan.css"),
         "unreferenced: {unreferenced:?}"
+    );
+    // logo.png is referenced via asset!() nested *inside* an rsx! body —
+    // make sure the macro-token walker resolves it (it must not appear as
+    // unreferenced).
+    assert!(
+        !unreferenced.contains(&"assets/logo.png"),
+        "logo.png is referenced inside rsx!(...): {unreferenced:?}",
     );
     let missing = r["missing_assets"].as_array().unwrap();
     assert!(
@@ -422,6 +444,45 @@ fn tool_audit_feature_flags() {
 }
 
 #[test]
+fn tool_audit_feature_flags_optin_server_layout_is_clean() {
+    // Canonical 0.7 fullstack layout: `default = ["web"]`, fullstack on the
+    // dep, server is an opt-in sibling feature the server binary turns on.
+    // The audit must not warn that `server` is missing — it's wired
+    // through the [features] table, just gated on build flags.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = r#"[package]
+name = "fullstack-optin"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+server = ["dioxus/server"]
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#;
+    std::fs::write(tmp.path().join("Cargo.toml"), manifest).unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let r = call_tool_at(tmp.path(), "audit_feature_flags", json!({}));
+    assert_eq!(r["ok"], true, "audit findings: {:#?}", r["findings"]);
+    let server_warning = r["findings"].as_array().unwrap().iter().find(|f| {
+        f["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("`server` is not")
+    });
+    assert!(
+        server_warning.is_none(),
+        "canonical opt-in fullstack layout should not produce a server warning, got: {:?}",
+        server_warning,
+    );
+}
+
+#[test]
 fn tool_explain_signal_graph() {
     let r = call_tool(
         "explain_signal_graph",
@@ -503,6 +564,17 @@ fn tool_openapi_spec() {
         paths.contains_key("/blog/{slug}"),
         "route path keys: {:?}",
         paths.keys().collect::<Vec<_>>()
+    );
+
+    // Attribute-form #[get("/health")] should land at /health with a `get`
+    // operation and no requestBody (GET has no body).
+    let health = paths
+        .get("/health")
+        .unwrap_or_else(|| panic!("paths: {paths:?}"));
+    assert!(health.get("get").is_some(), "expected get op: {health:?}");
+    assert!(
+        health["get"].get("requestBody").is_none(),
+        "GET ops should not have a requestBody: {health:?}",
     );
 
     // Server fns without #[server(Name)] aren't in our fixture, so guessed_paths is empty.
@@ -587,13 +659,19 @@ fn tool_runtime_events() {
         json!({"log_path": "/nonexistent/dioxus-mcp/events.jsonl"}),
     );
     assert!(missing["events"].as_array().unwrap().is_empty());
+    let note = missing["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|n| n.as_str())
+        .unwrap_or_default();
     assert!(
-        missing["notes"].as_array().unwrap().iter().any(|n| n
-            .as_str()
-            .unwrap_or("")
-            .contains("install dioxus-mcp-probe")),
-        "notes: {}",
-        missing["notes"]
+        note.contains("cargo add dioxus-mcp-probe"),
+        "missing probe note must include the install one-liner: {note}",
+    );
+    assert!(
+        note.contains("dioxus_mcp_probe::install()"),
+        "missing probe note must mention the install() call: {note}",
     );
 }
 
@@ -647,11 +725,20 @@ fn tool_server_fn_summary() {
         json!({"log_path": "/nonexistent/path/events.jsonl"}),
     );
     assert!(missing["summaries"].as_array().unwrap().is_empty());
-    assert!(missing["notes"].as_array().unwrap().iter().any(|n| {
-        n.as_str()
-            .unwrap_or("")
-            .contains("install dioxus-mcp-probe")
-    }));
+    let note = missing["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|n| n.as_str())
+        .unwrap_or_default();
+    assert!(
+        note.contains("cargo add dioxus-mcp-probe"),
+        "note must include install one-liner: {note}",
+    );
+    assert!(
+        note.contains("dioxus_mcp_probe::install()"),
+        "note must include install() call: {note}",
+    );
 }
 
 #[test]
@@ -667,6 +754,15 @@ fn tool_search_docs() {
     assert!(top.get("title").is_some(), "hit missing title: {top}");
     assert!(top.get("url").is_some(), "hit missing url: {top}");
     assert!(top.get("snippet").is_some(), "hit missing snippet: {top}");
+    let raw_url = top
+        .get("raw_url")
+        .and_then(|v| v.as_str())
+        .expect("hit must include raw_url");
+    assert!(
+        raw_url.ends_with("/llms-full.txt"),
+        "raw_url must point at the WebFetch-safe corpus: {raw_url}",
+    );
+    assert!(top.get("body").is_some(), "hit must include body: {top}");
 }
 
 #[test]
@@ -1014,6 +1110,58 @@ server_fns:
     assert!(
         poster.contains("#[post(\"/api/create_note\")]"),
         "poster: {poster}"
+    );
+}
+
+#[test]
+fn tool_execute_code_server_fn_extractors() {
+    // Extractors must land in BOTH the route attribute argument list AND the
+    // function signature, so cookie-bearing handlers stop forcing a hand-edit.
+    let tmp = copy_fixture_to_temp();
+    let yaml = r#"version: "1"
+server_fns:
+  - name: fetch_board
+    method: get
+    path: /api/board
+    extractors:
+      - {name: cookies, type: "TypedHeader<Cookie>"}
+    return_type: String
+  - name: post_message
+    method: post
+    path: /api/message
+    args:
+      - {name: body, type: String}
+    extractors:
+      - {name: cookies, type: "TypedHeader<Cookie>"}
+      - {name: state, type: "axum::extract::State<AppState>"}
+    return_type: String
+"#;
+    let _ = call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
+    let fetch = std::fs::read_to_string(tmp.path().join("src/server/fetch_board.rs")).unwrap();
+    assert!(
+        fetch.contains("#[get(\"/api/board\", cookies: TypedHeader<Cookie>)]"),
+        "attribute should carry the extractor: {fetch}"
+    );
+    assert!(
+        fetch.contains("cookies: TypedHeader<Cookie>,"),
+        "signature should carry the extractor: {fetch}"
+    );
+
+    let post = std::fs::read_to_string(tmp.path().join("src/server/post_message.rs")).unwrap();
+    assert!(
+        post.contains(
+            "#[post(\"/api/message\", cookies: TypedHeader<Cookie>, state: axum::extract::State<AppState>)]"
+        ),
+        "multi-extractor attribute: {post}"
+    );
+    // Extractors come before user args in the signature.
+    let sig_start = post.find("pub async fn post_message(").unwrap();
+    let sig = &post[sig_start..];
+    let cookies_at = sig.find("cookies: TypedHeader<Cookie>").unwrap();
+    let body_at = sig.find("body: String").unwrap();
+    assert!(
+        cookies_at < body_at,
+        "extractors must precede user args in signature: {sig}"
     );
 }
 

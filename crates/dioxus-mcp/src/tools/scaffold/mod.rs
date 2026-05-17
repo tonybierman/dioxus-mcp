@@ -34,9 +34,20 @@ pub(crate) async fn crate_root(
         }
         None => {
             let project = state.project.lock().await;
-            project
-                .manifest_dir()
-                .ok_or_else(|| "no Cargo.toml found from project root".to_string())
+            project.manifest_dir().ok_or_else(|| {
+                // The MCP server's startup cwd has no Dioxus Cargo.toml. Most
+                // common cause: the caller forgot to pass project_root and
+                // the server was launched from somewhere else (parent
+                // workspace, repo root, etc.).
+                let cwd = std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "<unknown cwd>".to_string());
+                format!(
+                    "no Cargo.toml with a `dioxus` dep was found from the MCP server's cwd ({cwd}). \
+                     Pass `project_root: \"<absolute-path-to-project>\"` to this tool, or restart \
+                     the MCP server from the project directory."
+                )
+            })
         }
     }
 }

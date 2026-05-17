@@ -973,7 +973,7 @@ fn model_template_emits_struct_with_derives_and_optional_fields() {
         derives: vec!["Eq".into(), "Clone".into()],
     };
     let dir = tempfile::TempDir::new().unwrap();
-    let r = generate_model(dir.path(), &m).unwrap();
+    let r = generate_model(dir.path(), &m, &Default::default()).unwrap();
     let path = dir.path().join("src/model/product.rs");
     assert!(r.files_created.iter().any(|p| p == &path));
     let body = std::fs::read_to_string(&path).unwrap();
@@ -987,6 +987,81 @@ fn model_template_emits_struct_with_derives_and_optional_fields() {
     // mod.rs should reference the new module.
     let mod_rs = std::fs::read_to_string(dir.path().join("src/model/mod.rs")).unwrap();
     assert!(mod_rs.contains("pub mod product;"));
+}
+
+#[tokio::test]
+async fn execute_code_model_auto_imports_sibling_models() {
+    // A model field whose type is another in-doc Model should emit
+    // `use crate::model::{snake}::{Pascal};` at the top of the generated file
+    // — including when the reference is wrapped in Vec / Option.
+    use crate::tools::dsl::ExecuteCodeParams;
+    use crate::tools::dsl::execute_code;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("cross_model_imports"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "use dioxus::prelude::*;\nfn main() {}\n",
+    )
+    .unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let _ = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+models:
+  - name: Column
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+  - name: Board
+    fields:
+      - {name: id, type: i64}
+      - {name: columns, type: "Vec<Column>"}
+      - {name: featured, type: Column, optional: true}
+      - {name: explicit, type: "crate::model::column::Column"}
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("scaffold should succeed");
+
+    let board = std::fs::read_to_string(root.join("src/model/board.rs")).unwrap();
+    assert!(
+        board.contains("use crate::model::column::Column;"),
+        "Board should auto-import Column: {board}"
+    );
+    // Only one import line — `Vec<Column>` and `Column` (twice) share it.
+    assert_eq!(
+        board.matches("use crate::model::column::Column;").count(),
+        1,
+        "exactly one Column import expected: {board}"
+    );
+    // The path-qualified field is still emitted as written.
+    assert!(
+        board.contains("pub explicit: crate::model::column::Column,"),
+        "path-qualified field preserved: {board}"
+    );
+
+    // The Column model itself does not get a `use crate::model::column::Column;`
+    // self-import.
+    let column = std::fs::read_to_string(root.join("src/model/column.rs")).unwrap();
+    assert!(
+        !column.contains("use crate::model::column::"),
+        "Column should not import itself: {column}"
+    );
 }
 
 #[tokio::test]
@@ -4277,6 +4352,119 @@ screens:
 }
 
 #[tokio::test]
+async fn prune_dx_new_starter_surfaces_orphan_references() {
+    // After the prune, leftover `Hero {}` / `use ...::Hero;` / `fn Home()`
+    // references in the crate root must show up as `next_steps` entries so
+    // the caller knows what to hand-fix before `cargo check` will pass.
+    use crate::tools::dsl::ExecuteCodeParams;
+    use crate::tools::dsl::execute_code;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("prune_orphans_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src/components")).unwrap();
+    // dx-new-shaped main.rs: imports Hero, defines a Home component that
+    // renders Hero. After prune both should be flagged.
+    std::fs::write(
+        root.join("src/main.rs"),
+        r#"use dioxus::prelude::*;
+use components::Hero;
+mod components;
+
+#[derive(Routable, Clone, PartialEq)]
+enum Route {
+    #[route("/")]
+    Home {},
+}
+
+fn main() {}
+
+#[component]
+fn Home() -> Element {
+    rsx! { Hero {} }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/components/hero.rs"),
+        "use dioxus::prelude::*;\n#[component]\npub fn Hero() -> Element { rsx! { div {} } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/components/mod.rs"),
+        "pub mod hero;\npub use hero::*;\n",
+    )
+    .unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let r = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+prune_dx_new_starter: true
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+    auto_id: true
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("prune scaffold should succeed");
+
+    let summary = r
+        .next_steps
+        .iter()
+        .find(|s| s.contains("dx-new orphan reference"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an orphan summary in next_steps: {:?}",
+                r.next_steps
+            )
+        });
+    assert!(
+        summary.contains("orphan reference"),
+        "summary should name the kind of issue: {summary}"
+    );
+
+    let body: String = r.next_steps.join("\n");
+    assert!(
+        body.contains("src/main.rs") && body.contains("`Hero`"),
+        "should flag the use components::Hero / rsx Hero call sites in main.rs: {body}"
+    );
+    assert!(
+        body.contains("`Home`"),
+        "should flag the surviving Home fn def in main.rs: {body}"
+    );
+}
+
+#[tokio::test]
 async fn prune_dx_new_starter_is_silent_noop_when_targets_absent() {
     use crate::tools::dsl::ExecuteCodeParams;
     use crate::tools::dsl::execute_code;
@@ -4708,4 +4896,69 @@ pub fn Button() -> Element {
     );
     let patched2 = std::fs::read_to_string(&path).unwrap();
     assert_eq!(patched, patched2, "second run must not change the file");
+}
+
+#[test]
+fn record_dx_component_files_lists_each_file_individually() {
+    // After `dx components add button` lays out
+    // src/components/button/{mod.rs, component.rs, docs.md}, the recorder
+    // must surface each file separately in `files_created` / `files_modified`
+    // instead of just the dir — callers asked to skip the ls + verify_install
+    // round-trip.
+    use super::execute::record_dx_component_files;
+    use crate::tools::scaffold::ScaffoldResult;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let button_dir = root.join("src/components/button");
+    std::fs::create_dir_all(&button_dir).unwrap();
+    std::fs::write(
+        button_dir.join("mod.rs"),
+        "pub mod component;\npub use component::*;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        button_dir.join("component.rs"),
+        "use dioxus::prelude::*;\n\npub enum ButtonVariant { Primary, Secondary }\n\n#[component]\npub fn Button() -> Element { rsx! { button {} } }\n",
+    )
+    .unwrap();
+    std::fs::write(button_dir.join("docs.md"), "# Button\n").unwrap();
+
+    let mut result = ScaffoldResult::default();
+    record_dx_component_files(root, "button", &mut result);
+
+    let created: Vec<String> = result
+        .files_created
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let modified: Vec<String> = result
+        .files_modified
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        created.iter().any(|p| p.ends_with("button/mod.rs")),
+        "expected mod.rs in files_created, got {created:?}"
+    );
+    assert!(
+        created.iter().any(|p| p.ends_with("button/docs.md")),
+        "expected docs.md in files_created, got {created:?}"
+    );
+    // `pub enum ButtonVariant` triggered the dead-code touch-up; component.rs
+    // moves to files_modified.
+    assert!(
+        modified.iter().any(|p| p.ends_with("button/component.rs")),
+        "expected component.rs in files_modified after dead-code touch-up, got {modified:?}"
+    );
+    assert!(
+        !created.iter().any(|p| p.ends_with("button/component.rs")),
+        "component.rs must not appear in both lists, got created={created:?}"
+    );
+    // The dir itself is NOT recorded — only individual files.
+    assert!(
+        !created.iter().any(|p| p.ends_with("src/components/button")
+            && !p.ends_with(".rs")
+            && !p.ends_with(".md")),
+        "dir path should not be recorded when files are enumerated"
+    );
 }

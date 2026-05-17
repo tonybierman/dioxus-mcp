@@ -439,6 +439,120 @@ pub(super) fn remove_route_variant(
     Ok(())
 }
 
+/// After a `prune_dx_new_starter: true` run, scan the crate-root file and the
+/// other component files for any lingering references to the removed
+/// boilerplate (the `Hero` component, the demo `Home` route's component def,
+/// etc.) so the caller knows which lines still need a hand-edit before
+/// `cargo check` will pass. Lines that already happen to be commented out are
+/// skipped. Reports `path:line — message` strings via `result.next_steps`.
+///
+/// Conservative by design: only matches `Hero` as a whole-word identifier and
+/// only scans the crate root file plus `src/components/*.rs` /
+/// `src/views/*.rs` (the two layouts `dx new` has shipped). Auto-rewriting
+/// would risk corrupting a hand-edited App body — leaving the cleanup to the
+/// caller keeps the run safe.
+pub(super) fn surface_dx_new_orphans(doc: &DslDoc, crate_root: &Path, result: &mut ScaffoldResult) {
+    if !doc.prune_dx_new_starter {
+        return;
+    }
+
+    // Map removed component names → the orphan markers we should hunt for.
+    // The dx-new prune currently removes `Hero` + the `Home` route variant.
+    // The `Home` route's *component* (a `fn Home() -> Element { ... Hero {} }`
+    // body in main.rs) typically lingers, so we report that too.
+    let mut targets: BTreeSet<String> = BTreeSet::new();
+    targets.insert("Hero".to_string());
+    // The `Home` component definition is the other half of the dx-new demo —
+    // it survives the route removal and now points at the deleted Hero.
+    targets.insert("Home".to_string());
+
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(root_file) = scaffold::find_crate_root_file(crate_root) {
+        paths.push(root_file);
+    }
+    for sub in ["src/components", "src/views"] {
+        let dir = crate_root.join(sub);
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("rs")
+                    && p.file_name().and_then(|s| s.to_str()) != Some("mod.rs")
+                {
+                    paths.push(p);
+                }
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+
+    let mut hits: Vec<String> = Vec::new();
+    for path in &paths {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (i, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for ident in &targets {
+                if !line.contains(ident.as_str()) {
+                    continue;
+                }
+                // Whole-word check: bytes around the match must not be
+                // alphanumeric / underscore (so `HomeScreen` doesn't match
+                // `Home`).
+                if !matches_whole_word(line, ident) {
+                    continue;
+                }
+                let rel = path.strip_prefix(crate_root).unwrap_or(path);
+                hits.push(format!(
+                    "{}:{} — references removed `{ident}` (left behind by `prune_dx_new_starter`); delete or rewrite this line",
+                    rel.display(),
+                    i + 1
+                ));
+                break;
+            }
+        }
+    }
+    if !hits.is_empty() {
+        hits.sort();
+        result.next_steps.push(format!(
+            "{} dx-new orphan reference(s) detected after prune — hand-edit these to clear the demo:",
+            hits.len()
+        ));
+        result.next_steps.extend(hits);
+    }
+}
+
+/// Check whether `needle` appears in `haystack` as a whole identifier — i.e.
+/// the characters immediately before and after each match are not alphanumeric
+/// or underscore. Avoids `Hero` matching inside `HeroSection`.
+fn matches_whole_word(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let n_bytes = needle.as_bytes();
+    if n_bytes.is_empty() || bytes.len() < n_bytes.len() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(off) = haystack[start..].find(needle) {
+        let abs = start + off;
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
+        let end = abs + n_bytes.len();
+        let after_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + n_bytes.len();
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::modify::remove_struct_fields;

@@ -8,9 +8,15 @@ mod lint_demo;
 
 #[component]
 pub fn App() -> Element {
-    let _logo = asset!("/assets/logo.png");
-    let _broken = asset!("/assets/missing.svg");
-    rsx! { Router::<router::Route> {} }
+    rsx! {
+        // asset!() nested inside rsx! — exercises the macro-token walker.
+        // `logo.png` exists; `missing.svg` is the deliberate hole picked up
+        // in `missing_assets`. (`orphan.css` is intentionally never
+        // referenced — see the unreferenced_files assertion.)
+        img { src: asset!("/assets/logo.png") }
+        img { src: asset!("/assets/missing.svg") }
+        Router::<router::Route> {}
+    }
 }
 
 fn main() {}

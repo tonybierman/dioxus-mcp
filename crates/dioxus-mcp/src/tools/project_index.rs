@@ -57,6 +57,14 @@ pub struct ServerFnEntry {
     pub args: Vec<ServerArg>,
     /// Inner type of `ServerFnResult<T>`, or the raw return type if the shape doesn't match.
     pub return_type: String,
+    /// HTTP method for `#[get/post/put/delete/patch("/path")]` attribute-style server fns.
+    /// None for legacy `#[server]` attribute form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Route path literal from the HTTP attribute, e.g. `/api/board` from `#[get("/api/board")]`.
+    /// None for legacy `#[server]` attribute form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,12 +107,20 @@ pub async fn project_index(
 
             let has_component = f.attrs.iter().any(|a| last_seg_is(a.path(), "component"));
             let server_attr = f.attrs.iter().find(|a| last_seg_is(a.path(), "server"));
+            let http_attr = f
+                .attrs
+                .iter()
+                .find_map(|a| http_method_for(a.path()).map(|m| (a, m)));
 
             if want_components && has_component {
                 components.push(build_component(f, path, &props_structs));
             }
-            if want_server_fns && let Some(attr) = server_attr {
-                server_fns.push(build_server_fn(f, attr, path));
+            if want_server_fns {
+                if let Some(attr) = server_attr {
+                    server_fns.push(build_server_fn(f, attr, path));
+                } else if let Some((attr, method)) = http_attr {
+                    server_fns.push(build_http_server_fn(f, attr, method, path));
+                }
             }
         }
     }
@@ -178,8 +194,48 @@ fn build_server_fn(f: &syn::ItemFn, attr: &syn::Attribute, path: &Path) -> Serve
         .ok()
         .and_then(|p| p.segments.last().map(|s| s.ident.to_string()));
 
-    let args: Vec<ServerArg> = f
-        .sig
+    let args: Vec<ServerArg> = server_fn_args(f);
+    let return_type = server_fn_return_type(f);
+
+    ServerFnEntry {
+        name,
+        server_name,
+        file: path.to_path_buf(),
+        line,
+        args,
+        return_type,
+        method: None,
+        route_path: None,
+    }
+}
+
+fn build_http_server_fn(
+    f: &syn::ItemFn,
+    attr: &syn::Attribute,
+    method: String,
+    path: &Path,
+) -> ServerFnEntry {
+    let name = f.sig.ident.to_string();
+    let line = f.sig.fn_token.span.start().line;
+    let route_path = extract_http_path_lit(attr);
+
+    let args: Vec<ServerArg> = server_fn_args(f);
+    let return_type = server_fn_return_type(f);
+
+    ServerFnEntry {
+        name,
+        server_name: None,
+        file: path.to_path_buf(),
+        line,
+        args,
+        return_type,
+        method: Some(method),
+        route_path,
+    }
+}
+
+fn server_fn_args(f: &syn::ItemFn) -> Vec<ServerArg> {
+    f.sig
         .inputs
         .iter()
         .filter_map(|i| match i {
@@ -189,9 +245,11 @@ fn build_server_fn(f: &syn::ItemFn, attr: &syn::Attribute, path: &Path) -> Serve
             }),
             _ => None,
         })
-        .collect();
+        .collect()
+}
 
-    let return_type = match &f.sig.output {
+fn server_fn_return_type(f: &syn::ItemFn) -> String {
+    match &f.sig.output {
         syn::ReturnType::Type(_, ty) => {
             if let Some(inner) = unwrap_server_fn_result(ty) {
                 tighten_type(&inner.to_token_stream().to_string())
@@ -200,16 +258,30 @@ fn build_server_fn(f: &syn::ItemFn, attr: &syn::Attribute, path: &Path) -> Serve
             }
         }
         syn::ReturnType::Default => "()".into(),
-    };
-
-    ServerFnEntry {
-        name,
-        server_name,
-        file: path.to_path_buf(),
-        line,
-        args,
-        return_type,
     }
+}
+
+fn http_method_for(p: &syn::Path) -> Option<String> {
+    let last = p.segments.last()?;
+    let name = last.ident.to_string();
+    if matches!(name.as_str(), "get" | "post" | "put" | "delete" | "patch") {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn extract_http_path_lit(attr: &syn::Attribute) -> Option<String> {
+    // Parse the first comma-separated arg as a string literal.
+    // `#[get("/api/board")]` or `#[get("/api/board", cookies: TypedHeader<Cookie>)]`
+    let meta = match &attr.meta {
+        syn::Meta::List(l) => l,
+        _ => return None,
+    };
+    let mut tokens = meta.tokens.clone().into_iter();
+    let first = tokens.next()?;
+    let lit: syn::LitStr = syn::parse2(first.into_token_stream()).ok()?;
+    Some(lit.value())
 }
 
 fn extract_props_from_struct(s: &syn::ItemStruct) -> Vec<PropEntry> {

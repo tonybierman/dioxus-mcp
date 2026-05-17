@@ -75,10 +75,7 @@ pub async fn server_fn_summary(
     let mut scanned: Vec<PathBuf> = Vec::new();
 
     if !live_path.exists() {
-        notes.push(format!(
-            "log file not found at {} — install dioxus-mcp-probe in your app and run it at least once",
-            live_path.display()
-        ));
+        notes.push(crate::tools::runtime_events::probe_missing_note(&live_path));
         return Ok(ServerFnSummaryReport {
             summaries: Vec::new(),
             log_files_scanned: scanned,

@@ -136,7 +136,8 @@ pub async fn openapi_spec(
 
     let mut notes = vec![
         "server-fn endpoint paths assume the JSON-POST default codec; custom codecs are not detected",
-        "for server fns without #[server(Name)], the path is the fn ident — Dioxus may hash this at runtime",
+        "for #[server] fns without an explicit Name, the path is the fn ident — Dioxus may hash this at runtime",
+        "#[get/post/put/delete/patch(\"/path\")] server fns use their literal path verbatim (no /api prefix applied)",
         "schemas come from local #[derive(Serialize)] / #[derive(Deserialize)] types; unknowns fall back to {type: object}",
     ];
     if routes.is_some() {
@@ -175,7 +176,9 @@ fn read_crate_metadata(crate_root: &std::path::Path) -> (String, String) {
 }
 
 fn server_fn_path(prefix: &str, sf: &ServerFnEntry) -> (String, bool) {
-    if let Some(name) = &sf.server_name {
+    if let Some(path) = &sf.route_path {
+        (path.clone(), false)
+    } else if let Some(name) = &sf.server_name {
         (format!("{prefix}/{name}"), false)
     } else {
         (format!("{prefix}/{}", sf.name), true)
@@ -208,38 +211,49 @@ fn server_fn_path_item(sf: &ServerFnEntry, resolver: &mut TypeResolver) -> Value
         sf.line
     );
 
-    json!({
-        "post": {
-            "operationId": sf.name,
-            "summary": summary,
-            "requestBody": {
+    let method = sf.method.as_deref().unwrap_or("post");
+    let has_body = !matches!(method, "get" | "delete");
+    let mut op = Map::new();
+    op.insert("operationId".into(), json!(sf.name));
+    op.insert("summary".into(), json!(summary));
+    if has_body {
+        op.insert(
+            "requestBody".into(),
+            json!({
                 "required": true,
                 "content": {
                     "application/json": {
                         "schema": Value::Object(request_schema),
                     }
                 }
-            },
-            "responses": {
-                "200": {
-                    "description": "Success",
-                    "content": {
-                        "application/json": {
-                            "schema": response_schema,
-                        }
+            }),
+        );
+    }
+    op.insert(
+        "responses".into(),
+        json!({
+            "200": {
+                "description": "Success",
+                "content": {
+                    "application/json": {
+                        "schema": response_schema,
                     }
-                },
-                "500": {
-                    "description": "Server function error",
-                    "content": {
-                        "application/json": {
-                            "schema": {"$ref": "#/components/schemas/ServerFnError"},
-                        }
+                }
+            },
+            "500": {
+                "description": "Server function error",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/ServerFnError"},
                     }
                 }
             }
-        }
-    })
+        }),
+    );
+
+    let mut item = Map::new();
+    item.insert(method.to_string(), Value::Object(op));
+    Value::Object(item)
 }
 
 fn route_path_item(r: &RouteEntry) -> (String, Value) {

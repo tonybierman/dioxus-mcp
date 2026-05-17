@@ -504,6 +504,12 @@ to one name), `log_path?` (override), `project_root?`.
 
 Returns ranked snippets with URLs. Cached for 15 minutes.
 
+Each hit carries both the human-facing `url` (a dioxuslabs.com page with a
+section anchor — works in a browser but 404s via WebFetch) and a
+`raw_url` pointing at the canonical `llms-full.txt` corpus (WebFetch-safe).
+The `body` field includes the full section text (capped at 4 KB) so most
+follow-ups don't need a refetch.
+
 **Args:** `query` (required), `version?` (e.g. `"0.7"`), `limit?`
 (default 5).
 

@@ -120,6 +120,17 @@ pub struct CreateServerFnParams {
     /// Route path under which the server fn is exposed. Defaults to
     /// "/api/{snake_name}".
     pub path: Option<String>,
+    /// Axum-style request extractors declared on the route attribute and
+    /// threaded into the function signature. Each entry lands as
+    /// `name: ty` both inside the `#[get/post(...)]` attribute's argument
+    /// list AND in the fn signature, so a cookie-bearing handler is one DSL
+    /// entry instead of a hand-edit. Example:
+    /// `extractors: [{ name: cookies, type: "TypedHeader<Cookie>" }]`
+    /// emits `#[get("/api/board", cookies: TypedHeader<Cookie>)]` and
+    /// `pub async fn handler(cookies: TypedHeader<Cookie>, ...)`. The user
+    /// must already have `axum_extra` / `axum::headers` / etc. in scope.
+    #[serde(default)]
+    pub extractors: Vec<ArgSpec>,
     /// Absolute path to the Dioxus project root. Required when the MCP server was not
     /// started in the target project directory.
     pub project_root: Option<String>,

@@ -67,10 +67,7 @@ pub async fn runtime_events(
     let mut scanned: Vec<PathBuf> = Vec::new();
 
     if !live_path.exists() {
-        notes.push(format!(
-            "log file not found at {} — install dioxus-mcp-probe in your app and run it at least once",
-            live_path.display()
-        ));
+        notes.push(probe_missing_note(&live_path));
         return Ok(RuntimeEventsReport {
             events: Vec::new(),
             truncated: false,
@@ -132,6 +129,16 @@ pub async fn runtime_events(
         log_files_scanned: scanned,
         notes,
     })
+}
+
+pub(crate) fn probe_missing_note(log_path: &Path) -> String {
+    format!(
+        "log file not found at {} — install the probe: \
+         `cargo add dioxus-mcp-probe`, then call `dioxus_mcp_probe::install()` \
+         once in `main()` (the probe no-ops unless the server feature is active), \
+         and run the app at least once to populate the log.",
+        log_path.display()
+    )
 }
 
 fn resolve_log_path(crate_root: &Path, override_path: Option<&str>) -> PathBuf {

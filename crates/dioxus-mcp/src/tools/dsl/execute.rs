@@ -147,6 +147,12 @@ pub async fn execute_code(
     let mut result = ScaffoldResult::default();
     apply_removes(&doc, &crate_root, &mut result)?;
 
+    // Surface any lingering references to the dx-new demo (`Hero`, the
+    // `Home` component def, …) so the caller doesn't ship a project that
+    // fails `cargo check` immediately after the prune. Only fires when
+    // `prune_dx_new_starter: true` was set; otherwise a silent no-op.
+    surface_dx_new_orphans(&doc, &crate_root, &mut result);
+
     // Companion to ensure_default_on_client_crud_models, but for the case
     // where the referenced model lives on disk (not in `doc.models`). The
     // generated client_crud screen body emits `..Default::default()`, so any
@@ -201,6 +207,19 @@ pub async fn execute_code(
     }
     result.routable_file = detected_routable_file(&doc, &crate_root);
 
+    // Build a cross-import context once: every Model declared in this doc
+    // (snake-case stem) plus every ViewState that materializes an enum. The
+    // model generator uses this to auto-emit `use crate::model::{snake}::{Pascal};`
+    // when a field type references another sibling type.
+    let model_snakes: BTreeSet<String> =
+        doc.models.iter().map(|m| m.name.to_snake_case()).collect();
+    let view_state_enums: BTreeSet<(String, String)> = doc
+        .view_states
+        .iter()
+        .filter(|vs| !vs.enum_variants.is_empty())
+        .map(|vs| (vs.name.to_snake_case(), vs.ty.to_pascal_case()))
+        .collect();
+
     // Order matters: models first (so server fn return types and stores can
     // resolve them), then server fns (fail-fast on fullstack gating), then
     // leaf primitives, then screens (which call create_route serially).
@@ -212,7 +231,16 @@ pub async fn execute_code(
         ) {
             continue;
         }
-        let r = generate_model(&crate_root, m)?;
+        // Drop the model's own snake from the cross-import set — a self-
+        // reference should not emit a `use` line.
+        let self_snake = m.name.to_snake_case();
+        let mut models_for_lookup = model_snakes.clone();
+        models_for_lookup.remove(&self_snake);
+        let imports = crate::tools::dsl::generate::ModelImportCtx {
+            models: models_for_lookup,
+            view_state_enums: view_state_enums.clone(),
+        };
+        let r = generate_model(&crate_root, m, &imports)?;
         merge(&mut result, r);
     }
 
@@ -239,6 +267,14 @@ pub async fn execute_code(
                 return_type: sf.return_type.clone(),
                 method: sf.method.clone(),
                 path: sf.path.clone(),
+                extractors: sf
+                    .extractors
+                    .iter()
+                    .map(|a| ArgSpec {
+                        name: a.name.clone(),
+                        ty: a.ty.clone(),
+                    })
+                    .collect(),
                 project_root: p.project_root.clone(),
             },
         )
@@ -772,14 +808,12 @@ fn surface_feature_gap_hints(
     if !info.is_dioxus_project {
         return;
     }
-    let active = &info.dioxus_features;
-    let fullstack_capable = active.iter().any(|f| f == "fullstack")
-        || (active.iter().any(|f| f == "server") && active.iter().any(|f| f == "web"));
-    if fullstack_capable {
+    if info.fullstack_capable() {
         return;
     }
+    let active = &info.dioxus_features;
     result.next_steps.push(format!(
-        "audit hint: this run added server fn(s) but the `dioxus` dep's features ({:?}) don't include `fullstack` (or `server`+`web`) — call `audit_feature_flags` for the recommended patch, or add `features = [\"fullstack\"]` to the `dioxus` dep so the server-side code compiles",
+        "audit hint: this run added server fn(s) but the `dioxus` dep's features ({:?}) don't include `fullstack` (or `server`+`web`, or an opt-in `server = [\"dioxus/server\"]` sibling feature) — call `audit_feature_flags` for the recommended patch, or add `features = [\"fullstack\"]` to the `dioxus` dep so the server-side code compiles",
         active
     ));
 }
@@ -1154,24 +1188,12 @@ async fn install_dx_components(doc: &DslDoc, crate_root: &Path, result: &mut Sca
 
     if !installed.is_empty() {
         // The newly-installed component dir lands under src/components/{name}/.
-        // We don't enumerate the files `dx` wrote (it owns the layout) — the
-        // dir path is enough for the caller to inspect.
+        // Enumerate every file `dx` wrote into the dir so the structured
+        // result names them explicitly — no `ls` round-trip and no
+        // verify_install bounce to know mod.rs / component.rs / docs.md
+        // landed.
         for name in &installed {
-            let dir = crate_root.join("src/components").join(name);
-            // Post-install touch-up: prepend `#[allow(dead_code)]` to each
-            // `pub enum …` in the installed component.rs so a freshly
-            // scaffolded project is warning-clean on `cargo check`. The
-            // upstream template ships every variant (e.g. `ButtonSize::Xs`
-            // through `IconLg`); most projects use only a couple of them and
-            // rustc warns on the rest. Touching only the catalog's component
-            // file is safe — we don't reach into the user's own code.
-            let comp = dir.join("component.rs");
-            if let Some(true) = suppress_dead_code_on_enums(&comp) {
-                result.files_modified.push(comp);
-            }
-            if dir.exists() {
-                result.files_created.push(dir);
-            }
+            record_dx_component_files(crate_root, name, result);
         }
         result.next_steps.push(format!(
             "dx_components: installed via `dx components add` → {}",
@@ -1197,6 +1219,45 @@ async fn install_dx_components(doc: &DslDoc, crate_root: &Path, result: &mut Sca
          `asset!(\"/assets/dx-components-theme.css\")` mounted in your App body".into(),
     );
     push_import_hint(&valid, result);
+}
+
+/// Walk `src/components/{name}/` after a successful `dx components add`
+/// invocation and record every file it wrote into `result.files_created`,
+/// keeping the per-file detail callers asked for instead of just pointing at
+/// the dir. The post-install dead-code touch-up lives here too: when we
+/// modify `component.rs` to suppress upstream's unused-variant warnings,
+/// that file moves to `files_modified` so the "what dx wrote" vs "what we
+/// patched on top" split stays honest.
+///
+/// If the dir can't be read (permissions / a non-standard layout) the
+/// helper falls back to recording the dir path itself, so the response
+/// always points at the install location.
+pub(super) fn record_dx_component_files(
+    crate_root: &Path,
+    name: &str,
+    result: &mut ScaffoldResult,
+) {
+    let dir = crate_root.join("src/components").join(name);
+    let comp = dir.join("component.rs");
+    let comp_touched = suppress_dead_code_on_enums(&comp) == Some(true);
+
+    if let Ok(read) = std::fs::read_dir(&dir) {
+        let mut entries: Vec<std::path::PathBuf> = read
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if comp_touched && path == comp {
+                result.files_modified.push(path);
+            } else {
+                result.files_created.push(path);
+            }
+        }
+    } else if dir.exists() {
+        result.files_created.push(dir);
+    }
 }
 
 /// Prepend `#[allow(dead_code)]` to each `pub enum …` in `path` (typically

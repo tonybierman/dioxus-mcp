@@ -314,6 +314,9 @@ pub fn {{ pascal }}(children: Element) -> Element {
 "#;
 
 pub(super) const MODEL_TPL: &str = r#"use serde::{Deserialize, Serialize};
+{%- for u in cross_imports %}
+{{ u }}
+{%- endfor %}
 
 #[derive({{ derives }})]
 pub struct {{ pascal }} {
