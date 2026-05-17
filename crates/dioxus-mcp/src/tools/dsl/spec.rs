@@ -92,6 +92,13 @@ pub async fn get_dsl_spec(
         ("signal", "realtime", REALTIME_SIGNAL),
         ("socket", "realtime", REALTIME_SOCKET),
         ("feed", "realtime", REALTIME_FEED),
+        (
+            "browser_persistence",
+            "realtime",
+            REALTIME_BROWSER_PERSISTENCE,
+        ),
+        ("streaming", "realtime", REALTIME_STREAMING),
+        ("patterns", "realtime", REALTIME_PATTERNS),
         ("session_state", "auth", AUTH_SESSION),
         ("login_screen", "auth", AUTH_LOGIN),
         ("protected_route", "auth", AUTH_PROTECTED),

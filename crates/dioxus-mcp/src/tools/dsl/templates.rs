@@ -169,6 +169,146 @@ pub fn use_{{ snake }}() -> Signal<{{ ty }}> {
 }
 "#;
 
+/// Browser-only persistence wrapper. Three backends — local_storage,
+/// session_storage, cookie — share the same `read` / `write` / `clear`
+/// surface so calling code stays backend-agnostic. The wasm32 cfg gate
+/// keeps the SSR / host-target build a pure no-op (so server fns and unit
+/// tests don't need their own stubs).
+///
+/// Template inputs:
+///   - snake, pascal, upper: name forms
+///   - backend: "local_storage" | "session_storage" | "cookie"
+///   - key: storage key (or cookie name)
+///   - value_type: Rust type — when `String`, raw passthrough; otherwise
+///     serde_json round-trip
+///   - is_string: bool, drives the serialize / deserialize branches
+///   - cookie_attributes: string used on writes when backend == "cookie"
+///   - value_type_path: snake_case import path emitted by the doc when the
+///     value type is a model declared in the same doc (so the file picks up
+///     `use crate::model::{Pascal};` for free).
+pub(super) const BROWSER_PERSISTENCE_TPL: &str = r#"//! {{ pascal }} — browser-side persistence wrapper.
+//!
+//! Backend: {{ backend }}; storage key: "{{ key }}".
+//! Value type: {{ value_type }}.
+//!
+//! Build matrix:
+//!   - wasm32:        calls into web_sys ({{ backend }}).
+//!   - other targets: every fn is a no-op stub. SSR can call these without
+//!                    feature-gating; reads return None, writes do nothing.
+{%- if value_type_import %}
+
+{{ value_type_import }}
+{%- endif %}
+{%- if backend == "cookie" %}
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+{%- endif %}
+
+pub const STORAGE_KEY: &str = "{{ key }}";
+{%- if backend == "cookie" %}
+pub const COOKIE_ATTRIBUTES: &str = "{{ cookie_attributes }}";
+{%- endif %}
+
+/// Read the stored value. Returns `None` when the slot is empty, malformed,
+/// or the runtime is non-wasm.
+#[cfg(target_arch = "wasm32")]
+pub fn read() -> Option<{{ value_type }}> {
+    let win = web_sys::window()?;
+{%- if backend == "local_storage" %}
+    let storage = win.local_storage().ok()??;
+    let raw = storage.get_item(STORAGE_KEY).ok()??;
+{%- elif backend == "session_storage" %}
+    let storage = win.session_storage().ok()??;
+    let raw = storage.get_item(STORAGE_KEY).ok()??;
+{%- elif backend == "cookie" %}
+    let doc = win.document()?;
+    let html_doc = doc.dyn_into::<web_sys::HtmlDocument>().ok()?;
+    let cookie_string = html_doc.cookie().ok()?;
+    let raw = parse_cookie(&cookie_string, STORAGE_KEY)?;
+{%- endif %}
+{%- if is_string %}
+    Some(raw)
+{%- else %}
+    serde_json::from_str::<{{ value_type }}>(&raw).ok()
+{%- endif %}
+}
+
+/// Persist `value` to the backing storage. No-op on non-wasm targets.
+#[cfg(target_arch = "wasm32")]
+pub fn write(value: &{{ value_type }}) {
+{%- if is_string %}
+    let serialized: &str = value.as_str();
+{%- else %}
+    let serialized = match serde_json::to_string(value) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let serialized = serialized.as_str();
+{%- endif %}
+    let Some(win) = web_sys::window() else { return };
+{%- if backend == "local_storage" %}
+    let Ok(Some(storage)) = win.local_storage() else { return };
+    let _ = storage.set_item(STORAGE_KEY, serialized);
+{%- elif backend == "session_storage" %}
+    let Ok(Some(storage)) = win.session_storage() else { return };
+    let _ = storage.set_item(STORAGE_KEY, serialized);
+{%- elif backend == "cookie" %}
+    let Some(doc) = win.document() else { return };
+    let Ok(html_doc) = doc.dyn_into::<web_sys::HtmlDocument>() else { return };
+    let cookie = format!("{}={}; {}", STORAGE_KEY, serialized, COOKIE_ATTRIBUTES);
+    let _ = html_doc.set_cookie(&cookie);
+{%- endif %}
+}
+
+/// Drop the stored value. No-op on non-wasm targets.
+#[cfg(target_arch = "wasm32")]
+pub fn clear() {
+    let Some(win) = web_sys::window() else { return };
+{%- if backend == "local_storage" %}
+    let Ok(Some(storage)) = win.local_storage() else { return };
+    let _ = storage.remove_item(STORAGE_KEY);
+{%- elif backend == "session_storage" %}
+    let Ok(Some(storage)) = win.session_storage() else { return };
+    let _ = storage.remove_item(STORAGE_KEY);
+{%- elif backend == "cookie" %}
+    let Some(doc) = win.document() else { return };
+    let Ok(html_doc) = doc.dyn_into::<web_sys::HtmlDocument>() else { return };
+    // Expire the cookie by setting Max-Age=0 with the same attributes.
+    let cookie = format!("{}=; Max-Age=0; {}", STORAGE_KEY, COOKIE_ATTRIBUTES);
+    let _ = html_doc.set_cookie(&cookie);
+{%- endif %}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read() -> Option<{{ value_type }}> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write(_value: &{{ value_type }}) {}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clear() {}
+{%- if backend == "cookie" %}
+
+/// Pull the value of cookie `name` out of a raw `document.cookie` string
+/// (`"a=1; b=2; c=3"`). Returns `None` when the cookie isn't present.
+#[cfg(target_arch = "wasm32")]
+fn parse_cookie(raw: &str, name: &str) -> Option<String> {
+    for part in raw.split(';') {
+        let part = part.trim();
+        if let Some(eq) = part.find('=') {
+            let (k, v) = part.split_at(eq);
+            if k == name {
+                return Some(v[1..].to_string());
+            }
+        }
+    }
+    None
+}
+{%- endif %}
+"#;
+
 pub(super) const SOCKET_TPL: &str = r#"// Generated WebSocket binding (web-sys).
 // Add to your Cargo.toml:
 //   web-sys = { version = "0.3", features = ["WebSocket", "MessageEvent", "BinaryType", "ErrorEvent"] }

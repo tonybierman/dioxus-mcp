@@ -165,6 +165,22 @@ fn preflight_inner(
             return Err(format!("duplicate session_state name: {}", s.name));
         }
     }
+    let mut bp_names: BTreeSet<String> = BTreeSet::new();
+    for bp in &doc.browser_persistence {
+        let snake = bp.name.to_snake_case();
+        if !bp_names.insert(snake) {
+            return Err(format!("duplicate browser_persistence name: {}", bp.name));
+        }
+        if !matches!(
+            bp.backend.trim(),
+            "local_storage" | "session_storage" | "cookie"
+        ) {
+            return Err(format!(
+                "browser_persistence {:?}: unknown backend {:?}; valid: local_storage, session_storage, cookie",
+                bp.name, bp.backend
+            ));
+        }
+    }
     for m in &doc.models {
         let snake = m.name.to_snake_case();
         if !model_names.insert(snake.clone()) {

@@ -5,6 +5,7 @@
 //! Small cross-cutting helpers (`field_initial`, `humanize`) live here
 //! because they're shared between several siblings.
 
+mod browser_persistence;
 mod feed;
 mod form;
 mod list;
@@ -20,6 +21,7 @@ mod store;
 mod table;
 mod view_state;
 
+pub(crate) use browser_persistence::*;
 pub(crate) use feed::*;
 pub(crate) use form::*;
 pub(crate) use list::*;

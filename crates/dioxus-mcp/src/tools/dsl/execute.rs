@@ -286,6 +286,8 @@ pub async fn execute_code(
                         ty: a.ty.clone(),
                     })
                     .collect(),
+                auth_required: sf.auth_required,
+                session_cookie: sf.session_cookie.clone(),
                 project_root: p.project_root.clone(),
             },
         )
@@ -406,6 +408,22 @@ pub async fn execute_code(
         }
         let r = generate_feed(&crate_root, f)?;
         merge(&mut result, r);
+    }
+
+    if !doc.browser_persistence.is_empty() {
+        let model_names: BTreeSet<String> =
+            doc.models.iter().map(|m| m.name.to_snake_case()).collect();
+        for bp in &doc.browser_persistence {
+            if skip_or_record(
+                &skip,
+                &mut result,
+                leaf_for(&crate_root, "src/storage", &bp.name),
+            ) {
+                continue;
+            }
+            let r = generate_browser_persistence(&crate_root, bp, &model_names)?;
+            merge(&mut result, r);
+        }
     }
 
     for c in &doc.components {

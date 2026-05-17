@@ -280,7 +280,7 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     }
 
     #[tool(
-        description = "Find official Dioxus examples on GitHub. Pass `concept` to rank by name match (e.g. 'router', 'fullstack', 'use_signal'); omit it for an alphabetically-sorted listing of every example (useful when you don't yet know the folder name). `limit` defaults to 3 with a concept, 100 without."
+        description = "Find Dioxus examples — official ones in DioxusLabs/dioxus on GitHub, merged with a small local registry of pattern examples that the upstream repo doesn't ship a folder for (e.g. `optimistic-with-reconcile`). Pass `concept` to rank by name + blurb match ('router', 'fullstack', 'use_signal'); omit it for an alphabetically-sorted listing of every example. Each hit carries `kind: \"upstream\"` (browsable via `url` / `raw_url`) or `kind: \"local\"` (inline `body:` field with paste-ready Rust source; no follow-up fetch needed). `limit` defaults to 3 with a concept, 100 without."
     )]
     async fn find_example(
         &self,
@@ -332,6 +332,19 @@ USE THIS when the user asks: \"What's the latency distribution for <fn>?\", \"Wh
         Parameters(p): Parameters<tools::server_fn_summary::ServerFnSummaryParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::server_fn_summary::server_fn_summary(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Run `cargo check` against the Dioxus project with a structured diagnostic shape — the closing-the-loop step after `execute_code`. Auto-picks a sensible feature combo (no extras when `fullstack` is already on the dep, `server` for the canonical 0.7 `default=[\"web\"]` + opt-in `server` sibling, `web,server` for older layouts) or accepts an explicit `features:` list. Set `target_wasm: true` to also catch client-only errors via `--target wasm32-unknown-unknown`. Parses `--message-format=json` and returns separate `errors` / `warnings` lists with file/line/column/code + cargo's pre-rendered diagnostic text; both lists are capped via `max_messages` (default 20), and `truncated: true` signals when caps fired. `status` is one of `passed | failed | timed_out | spawn_failed`. Default timeout 300s (override with `timeout_secs`). Does NOT shell out to `dx serve`; this is a static compile check, not an end-to-end serve probe."
+    )]
+    async fn build_and_smoke(
+        &self,
+        Parameters(p): Parameters<tools::build_and_smoke::BuildAndSmokeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::build_and_smoke::build_and_smoke(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }

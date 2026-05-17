@@ -22,6 +22,12 @@ pub struct DslDoc {
     pub sockets: Vec<DslSocket>,
     #[serde(default)]
     pub feeds: Vec<DslFeed>,
+    /// Browser-only persistence wrappers (cookie / localStorage / sessionStorage).
+    /// Each entry emits `src/storage/{snake}.rs` with `read` / `write` / `clear`
+    /// helpers gated on `#[cfg(target_arch = "wasm32")]` so SSR builds get a
+    /// no-op stub for free.
+    #[serde(default)]
+    pub browser_persistence: Vec<DslBrowserPersistence>,
     #[serde(default)]
     pub components: Vec<DslComponent>,
     #[serde(default)]
@@ -402,6 +408,21 @@ pub struct DslServerFn {
     /// `tower_cookies` / etc. to the project so the extractor type resolves.
     #[serde(default)]
     pub extractors: Vec<DslArgDef>,
+    /// When true, the scaffolder injects the canonical cookie-authed prologue:
+    /// auto-adds a `cookies: TypedHeader<Cookie>` extractor (when not already
+    /// present), pulls the session id out of the named cookie, and maps the
+    /// missing-cookie case to a `ServerFnError::ServerError("not logged in")`.
+    /// A trailing `// TODO touch_session(session_id).await?;` marker is left
+    /// in place so the caller can wire it to their session store. Pairs with
+    /// the existing `session_states:` primitive for the client-side surface.
+    ///
+    /// Default: false.
+    #[serde(default)]
+    pub auth_required: bool,
+    /// Cookie name read by the auth prologue. Only consulted when
+    /// `auth_required: true`. Default: `"session_id"`.
+    #[serde(default)]
+    pub session_cookie: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -545,6 +566,42 @@ pub struct DslFeed {
     pub socket: String,
     /// Item type appended to the feed (e.g. "String").
     pub item_type: String,
+}
+
+/// Browser-only persistence wrapper around a single storage slot. Emits
+/// `src/storage/{snake}.rs` with `read` / `write` / `clear` helpers that
+/// compile to a `web_sys` call on `wasm32` and a no-op stub everywhere else
+/// (SSR builds, host-target unit tests, …). Every fullstack 0.7 app
+/// hand-rolls this pair; this primitive collapses it to one DSL entry.
+///
+/// Backends:
+///   - `local_storage`: `window.localStorage`; persists across sessions.
+///   - `session_storage`: `window.sessionStorage`; cleared on tab close.
+///   - `cookie`: `document.cookie` get/set with the named key. Writes use
+///     `cookie_attributes:` (default `path=/`); reads parse the raw cookie
+///     string and return the first matching value.
+///
+/// `value_type` may be `String` (raw passthrough) or any serde-compatible
+/// Rust type — the wrapper round-trips through `serde_json` automatically.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslBrowserPersistence {
+    pub name: String,
+    /// One of: `local_storage`, `session_storage`, `cookie`.
+    pub backend: String,
+    /// Storage key (for local/session storage) or cookie name.
+    pub key: String,
+    /// Rust type of the stored value. `String` passes through; anything else
+    /// is serde-encoded via `serde_json`. The type must be already in scope
+    /// at the write site (declare it under `models:` in the same doc or
+    /// pre-import it).
+    #[serde(rename = "value_type")]
+    pub value_type: String,
+    /// Cookie-only: attributes appended to the Set-Cookie value when
+    /// `write()` runs. Default: `"path=/; SameSite=Lax"`. Ignored when
+    /// `backend:` is `local_storage` or `session_storage`.
+    #[serde(default)]
+    pub cookie_attributes: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

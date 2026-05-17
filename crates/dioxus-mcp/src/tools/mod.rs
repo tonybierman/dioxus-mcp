@@ -1,5 +1,6 @@
 pub mod asset_audit;
 pub mod audit_feature_flags;
+pub mod build_and_smoke;
 pub mod check_rsx;
 pub mod dead_components;
 pub mod dsl;

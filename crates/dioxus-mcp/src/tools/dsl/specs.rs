@@ -243,6 +243,8 @@ pub(super) const CORE_SERVER_FN: &str = r#"  ServerFn:
       - {name: method, type: "get|post (defaults: post if args else get)", required: false}
       - {name: path, type: "string (default: /api/{snake_name})", required: false}
       - {name: extractors, type: "ArgDef[] — Axum-style request extractors. Each {name, type} entry lands BOTH in the `#[get/post(...)]` attribute's argument list AND in the fn signature, so a cookie-bearing handler is one DSL entry instead of a hand-edit. Example: extractors: [{name: cookies, type: \"TypedHeader<Cookie>\"}] emits `#[get(\"/api/board\", cookies: TypedHeader<Cookie>)]` and `pub async fn handler(cookies: TypedHeader<Cookie>, ...)`. You're responsible for adding the relevant extractor crates (axum_extra, axum::headers, tower_cookies, …) to Cargo.toml so the type resolves.", required: false}
+      - {name: auth_required, type: "bool (default false). When true the scaffolder injects the canonical cookie-authed prologue: ensures a `cookies: TypedHeader<Cookie>` extractor is declared (auto-prepended when missing), pulls the session id out of the named cookie, and maps the missing-cookie case to `ServerFnError::ServerError(\"not logged in\")`. A `// TODO touch_session(session_id).await?` marker is left in the body so the caller can wire it to their own session store. You still need axum-extra (with the `typed-header` and `cookie` features) in Cargo.toml.", required: false}
+      - {name: session_cookie, type: "string (default \"session_id\"). Cookie name the auth prologue reads. Only consulted when auth_required: true.", required: false}
     example:
       server_fns:
         - name: fetch_users
@@ -260,6 +262,14 @@ pub(super) const CORE_SERVER_FN: &str = r#"  ServerFn:
           extractors:
             - {name: cookies, type: "TypedHeader<Cookie>"}
           return_type: "Board"
+        - name: fetch_inbox
+          # auth_required: true does the same wiring as the previous entry but
+          # also emits the session-id extract + missing-cookie error mapping
+          # at the top of the body, plus a TODO marker for touch_session.
+          method: get
+          path: /api/inbox
+          auth_required: true
+          return_type: "Vec<Message>"
 "#;
 
 pub(super) const CORE_STORE: &str = r#"  Store:
@@ -516,6 +526,31 @@ pub(super) const REALTIME_SOCKET: &str = r#"  Socket:
           url: wss://example.test/chat
 "#;
 
+pub(super) const REALTIME_BROWSER_PERSISTENCE: &str = r#"  BrowserPersistence:
+    description: "Browser-only persistence wrapper around a single storage slot. Generates `src/storage/{snake}.rs` with `read` / `write` / `clear` helpers gated on `#[cfg(target_arch = \"wasm32\")]` so SSR / host-target builds get a free no-op stub. Every fullstack 0.7 app hand-rolls this pair (so the same component can persist UI state without exploding on the server); this primitive collapses it to one DSL entry. The wasm32 build calls into `web_sys` for the chosen backend; non-wasm builds always return `None` on read and do nothing on write/clear. Add `web-sys = { version = \"0.3\", features = [\"Window\", \"Storage\"] }` to Cargo.toml for local/session storage (`\"Document\"` + `\"HtmlDocument\"` for cookie); `serde_json` is required only when `value_type` is not `String`. The generated module path is `crate::storage::{snake}` — call `crate::storage::{snake}::read()` / `write(&value)` / `clear()` from any component."
+    fields:
+      - {name: name, type: string, required: true}
+      - {name: backend, type: "local_storage | session_storage | cookie", required: true}
+      - {name: key, type: "string — storage key (or cookie name)", required: true}
+      - {name: value_type, type: "Rust type. `String` passes through; anything else round-trips through serde_json. When the type matches a Model declared in the same doc, the generated file auto-emits `use crate::model::{Pascal};`.", required: true}
+      - {name: cookie_attributes, type: "string (cookie backend only) — appended after `name=value` on writes. Default: `\"path=/; SameSite=Lax\"`. Ignored for other backends.", required: false}
+    example:
+      browser_persistence:
+        - name: PrefsStorage
+          backend: local_storage
+          key: "user.prefs"
+          value_type: "String"
+        - name: DraftStorage
+          backend: session_storage
+          key: "compose.draft"
+          value_type: "Draft"        # serde_json round-trip; declare `Draft` under `models:`.
+        - name: ConsentCookie
+          backend: cookie
+          key: "cookie_consent"
+          value_type: "String"
+          cookie_attributes: "path=/; max-age=31536000; SameSite=Lax"
+"#;
+
 pub(super) const REALTIME_FEED: &str = r#"  Feed:
     description: A live-updating list component subscribed to a Socket. Generates src/components/{snake}.rs with a Vec<T> signal and onmessage append.
     fields:
@@ -527,6 +562,64 @@ pub(super) const REALTIME_FEED: &str = r#"  Feed:
         - name: ChatFeed
           socket: chat
           item_type: String
+"#;
+
+pub(super) const REALTIME_STREAMING: &str = r#"  streaming:
+    description: |
+      Server-Sent Events (SSE) — the flagship 0.7 fullstack streaming shape.
+      The MCP doesn't auto-generate the endpoint (the upstream `#[server]`
+      macro is request/response only, so SSE always reaches past the DSL into
+      raw axum handlers) but documents the canonical shape so the agent
+      writes the same wiring every time. Pull the paste-ready, end-to-end
+      source via `find_example streaming-snapshot` — the hit returns the
+      full server handler + client subscriber inline under `body:`.
+    server_side:
+      shape: "An axum `get` route that returns `Sse<impl Stream<Item = Result<SseEvent, Infallible>>>`."
+      backing_channel: "`tokio::sync::broadcast::Sender<T>` shared via Axum `State<EventBus>`; a `RwLock<Vec<T>>` snapshot replays the last N events to a freshly-connected client."
+      keep_alive: "axum::response::sse::KeepAlive — default 15s; comment frames so intermediate proxies don't drop the connection."
+      register: "Add `.route(\"/api/events\", get(events_handler)).with_state(bus.clone())` to the axum Router after `.nest_service(\"/\", dioxus_router)`."
+    client_side:
+      shape: "`web_sys::EventSource` opened against the server route; forward each parsed JSON frame into a `futures::channel::mpsc` so a Dioxus `use_future` can drain it."
+      reconnect: "EventSource auto-reconnects on dropped connections; surface the retry via a `Signal<bool>` if the UI should flash a 'reconnecting…' indicator."
+    cargo_dependencies:
+      server:
+        - axum = { version = "0.8", features = ["json"] }
+        - tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
+        - tokio-stream = { version = "0.1", features = ["sync"] }
+        - futures = "0.3"
+      client:
+        - web-sys = { version = "0.3", features = ["EventSource", "MessageEvent"] }
+    pair_with:
+      - "BrowserPersistence — store the last-seen event id in localStorage so a tab refresh re-subscribes with a `Last-Event-ID` header that the server honors for a true tail."
+      - "patterns.optimistic_with_reconcile — when a client's own write should render before the SSE event arrives."
+    paste_ready: "find_example streaming-snapshot — returns the canonical server handler + client subscriber inline."
+"#;
+
+pub(super) const REALTIME_PATTERNS: &str = r#"  patterns:
+    description: |
+      Reference patterns that don't map to a single DSL primitive — they're
+      cross-cutting shapes a realtime app has to wire together. The DSL can
+      generate the parts (Socket, Feed, ServerFn) but assembling them into a
+      coherent flow is the caller's job. These entries document the shape.
+      Pull the runnable source via `find_example <name>` (the matching hits
+      come back with kind: "local" and an inline `body:` field — no follow-up
+      fetch needed).
+    optimistic_with_reconcile:
+      summary: |
+        Optimistic insert with a tentative negative id, fire-and-forget the
+        server fn, rely on the SSE / Socket stream to reconcile the canonical
+        positive id. De-dupe by content (author + body), not by id, because
+        the id is exactly what the optimistic row doesn't know yet. On server
+        failure flip a `failed: true` flag on the optimistic row instead of
+        removing it.
+      uses:
+        - "Chat / messaging UIs where the user expects their own write to render instantly."
+        - "Todo / collab apps with a shared SSE / Socket fan-out."
+      gotchas:
+        - "Reconcile by content, not by id — the SSE event for the user's own write may arrive AFTER the server fn returns, so a naive id-based replace double-inserts."
+        - "On re-subscribe the server replays the last N events; the reconcile must be idempotent — skip if the canonical id is already present."
+        - "Optimistic rows render as `pending` (e.g. dimmed) while id < 0; styling them the same as canonical rows hides every latency bug from the user."
+      paste_ready: "Call find_example optimistic-with-reconcile — the hit returns the canonical Rust source inline under `body:`."
 "#;
 
 pub(super) const AUTH_SESSION: &str = r#"  SessionState:

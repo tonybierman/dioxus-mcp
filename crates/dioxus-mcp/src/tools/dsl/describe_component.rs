@@ -118,6 +118,18 @@ pub struct DescribeComponentResult {
     /// empty, every documented HTML attribute is safe to set directly via
     /// `attr: value` syntax.
     pub ambiguous_attributes: Vec<String>,
+    /// Caller-facing usage notes. Surfaced when the catalog widget's prop
+    /// surface is wide enough to be confusing (e.g. the catalog `Input` ships
+    /// ~19 optional event handlers). Today this contains:
+    ///   - a reminder that every event handler is `Option<EventHandler<_>>`
+    ///     and only the ones you pass fire,
+    ///   - the extension recipe for adding a brand-new event handler to an
+    ///     installed catalog widget.
+    ///
+    /// Empty when the widget exposes few or no event handlers — there's
+    /// nothing surprising to say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_notes: Vec<String>,
 }
 
 pub async fn describe_component(
@@ -252,6 +264,8 @@ fn describe_from_dir(
     ambiguous_attributes.sort();
     ambiguous_attributes.dedup();
 
+    let usage_notes = build_usage_notes(name, &event_handlers);
+
     Ok(DescribeComponentResult {
         name: name.to_string(),
         description: description.to_string(),
@@ -269,7 +283,36 @@ fn describe_from_dir(
         uses: parsed.uses,
         referenced_enums,
         ambiguous_attributes,
+        usage_notes,
     })
+}
+
+/// Address the "catalog widget Input ships 19 event handlers" feedback by
+/// noting up-front that every handler is optional, plus the extension recipe
+/// for adding a brand-new handler. Empty when there's nothing surprising
+/// (≤ 4 event handlers means the surface is already small).
+fn build_usage_notes(name: &str, event_handlers: &[String]) -> Vec<String> {
+    if event_handlers.len() <= 4 {
+        return Vec::new();
+    }
+    let pascal = name.to_pascal_case();
+    let count = event_handlers.len();
+    vec![
+        format!(
+            "{pascal} exposes {count} optional event handlers (every one is \
+             `Option<EventHandler<_>>`). Wire only the handlers you actually \
+             use — unset handlers no-op. Don't `Option::none`-fill the others; \
+             unsupplied props are already None."
+        ),
+        format!(
+            "Extension recipe — adding a brand-new event handler to {pascal}: \
+             edit src/components/{name}/component.rs, append \
+             `pub on<event>: Option<EventHandler<<event-type>>>` to the props \
+             struct with `#[props(default)]`, then in the body wrap the call \
+             site with `if let Some(h) = props.on<event>.as_ref() {{ h.call(value); }}`. \
+             Re-run `verify_install` (and `cargo check`) after the edit."
+        ),
+    ]
 }
 
 fn build_referenced_enums(
@@ -1020,5 +1063,69 @@ pub fn Button(
             .expect("ButtonSize inlined into referenced_enums");
         assert!(bs.variants.contains(&"Sm".into()));
         assert!(bs.variants.contains(&"Lg".into()));
+    }
+
+    #[test]
+    fn usage_notes_silent_when_handler_surface_is_small() {
+        // Button-style widget: one handler — nothing surprising to surface.
+        let dir = tempdir().unwrap();
+        let src = r#"
+use dioxus::prelude::*;
+
+#[component]
+pub fn Button(
+    onclick: Option<EventHandler<MouseEvent>>,
+    children: Element,
+) -> Element { rsx! { button {} } }
+"#;
+        write_files(dir.path(), &[("component.rs", src)]);
+        let r =
+            describe_from_dir("button", "desc", dir.path(), "upstream", None).expect("describe ok");
+        assert!(
+            r.usage_notes.is_empty(),
+            "single-handler widget should not surface usage notes; got {:?}",
+            r.usage_notes
+        );
+    }
+
+    #[test]
+    fn usage_notes_surface_when_handler_surface_is_wide() {
+        // Input-style widget: 5+ optional handlers. Emit the "all handlers
+        // are optional" reminder + the extension recipe.
+        let dir = tempdir().unwrap();
+        let src = r#"
+use dioxus::prelude::*;
+
+#[component]
+pub fn Input(
+    onchange: Option<EventHandler<FormEvent>>,
+    oninput: Option<EventHandler<FormEvent>>,
+    onfocus: Option<EventHandler<FocusEvent>>,
+    onblur: Option<EventHandler<FocusEvent>>,
+    onkeydown: Option<EventHandler<KeyboardEvent>>,
+    onkeyup: Option<EventHandler<KeyboardEvent>>,
+    children: Element,
+) -> Element { rsx! { input {} } }
+"#;
+        write_files(dir.path(), &[("component.rs", src)]);
+        let r =
+            describe_from_dir("input", "desc", dir.path(), "upstream", None).expect("describe ok");
+        assert_eq!(
+            r.usage_notes.len(),
+            2,
+            "wide-handler widget should surface both reminder + extension recipe; got {:?}",
+            r.usage_notes
+        );
+        assert!(
+            r.usage_notes[0].contains("Option<EventHandler"),
+            "first note should remind caller that handlers are optional; got: {}",
+            r.usage_notes[0]
+        );
+        assert!(
+            r.usage_notes[1].contains("Extension recipe")
+                && r.usage_notes[1].contains("src/components/input/component.rs"),
+            "second note should be the extension recipe with the install path; got: {}",
+            r.usage_notes[1]
+        );
     }
 }

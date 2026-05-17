@@ -131,6 +131,18 @@ pub struct CreateServerFnParams {
     /// must already have `axum_extra` / `axum::headers` / etc. in scope.
     #[serde(default)]
     pub extractors: Vec<ArgSpec>,
+    /// When true, the scaffolder injects the canonical cookie-authed prologue:
+    /// it ensures a `cookies: TypedHeader<Cookie>` extractor is present, pulls
+    /// the session id out of `session_cookie` (default `"session_id"`), and
+    /// maps the missing-cookie case to `ServerFnError::ServerError("not
+    /// logged in")`. A trailing `// TODO touch_session(...)` marker is left
+    /// in place so callers can wire their session store.
+    #[serde(default)]
+    pub auth_required: bool,
+    /// Cookie name read by the auth prologue. Only consulted when
+    /// `auth_required: true`. Default: `"session_id"`.
+    #[serde(default)]
+    pub session_cookie: Option<String>,
     /// Absolute path to the Dioxus project root. Required when the MCP server was not
     /// started in the target project directory.
     pub project_root: Option<String>,

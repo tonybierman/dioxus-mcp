@@ -6,7 +6,7 @@ use minijinja::{Environment, context};
 use crate::state::State;
 
 use super::mod_tree::upsert_mod_entry;
-use super::types::{CreateServerFnParams, ModUpsert, ScaffoldResult};
+use super::types::{ArgSpec, CreateServerFnParams, ModUpsert, ScaffoldResult};
 
 const SERVER_FN_TPL: &str = r#"use dioxus::prelude::*;
 
@@ -21,6 +21,16 @@ pub async fn {{ snake }}(
     {{ a.name }}: {{ a.ty }},
 {%- endfor %}
 ) -> Result<{{ ret }}, ServerFnError> {
+{%- if auth_required %}
+    let session_id = cookies
+        .get("{{ session_cookie }}")
+        .ok_or_else(|| ServerFnError::ServerError("not logged in".into()))?
+        .to_string();
+    // TODO touch_session(&session_id).await?; — wire to your session store
+    // (extend, refresh, or invalidate). Returning ServerFnError::ServerError
+    // "session expired" is the canonical mapping when the lookup fails.
+    let _ = session_id;
+{%- endif %}
     Ok(Default::default())
 }
 "#;
@@ -132,6 +142,24 @@ pub async fn create_server_fn(
         return Err(format!("{} already exists", target.display()));
     }
 
+    // When auth_required is set, ensure a `cookies: TypedHeader<Cookie>`
+    // extractor is present so the prologue compiles. Idempotent — a caller-
+    // supplied `cookies` extractor wins (lets them swap in `CookieJar`).
+    let mut extractors = p.extractors.clone();
+    if p.auth_required && !extractors.iter().any(|e| e.name == "cookies") {
+        extractors.insert(
+            0,
+            ArgSpec {
+                name: "cookies".into(),
+                ty: "TypedHeader<Cookie>".into(),
+            },
+        );
+    }
+    let session_cookie = p
+        .session_cookie
+        .clone()
+        .unwrap_or_else(|| "session_id".into());
+
     let mut env = Environment::new();
     env.add_template("server_fn", SERVER_FN_TPL).unwrap();
     let tpl = env.get_template("server_fn").unwrap();
@@ -142,7 +170,9 @@ pub async fn create_server_fn(
             method => method,
             path => route_path,
             args => p.args.iter().map(|a| context!{ name => a.name.clone(), ty => a.ty.clone() }).collect::<Vec<_>>(),
-            extractors => p.extractors.iter().map(|a| context!{ name => a.name.clone(), ty => a.ty.clone() }).collect::<Vec<_>>(),
+            extractors => extractors.iter().map(|a| context!{ name => a.name.clone(), ty => a.ty.clone() }).collect::<Vec<_>>(),
+            auth_required => p.auth_required,
+            session_cookie => session_cookie,
         })
         .map_err(|e| e.to_string())?;
     std::fs::write(&target, rendered).map_err(|e| e.to_string())?;
