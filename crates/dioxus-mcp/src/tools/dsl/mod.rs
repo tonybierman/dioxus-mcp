@@ -30,11 +30,13 @@ mod render;
 mod resources;
 mod text_edit;
 mod util;
+mod verify_install;
 mod wire;
 
 pub use describe_component::*;
 pub use execute::*;
 pub use list_components::*;
+pub use verify_install::*;
 
 // Convenience flat re-exports for the test module — tests.rs uses `super::*`
 // and exercises items from every sub-module.

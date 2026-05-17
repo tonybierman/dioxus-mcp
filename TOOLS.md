@@ -151,6 +151,27 @@ tool is exercised against live in [TOOLS_REFERENCE](TOOLS_REFERENCE.md).
 
 ---
 
+### `list_components`
+**Purpose:** Browse the official Dioxus 0.7 component catalog (45 widgets installable via `dx components add <name>`). Returns each entry's snake_case name, one-line description, prop/event hint, and `use crate::components::...;` import path. Pass `query` to filter by substring.
+
+**Ask Claude:** "Show me every catalog widget that mentions 'date'."
+
+---
+
+### `describe_component`
+**Purpose:** Full prop/event surface for one catalog component. Returns the fn signature, every prop (name, type, optional flag, default expr, doc), every variant enum, aggregated `extends` and `event_handlers`, plus `ambiguous_attributes` (E0034 setters that need the literal-string form) and `referenced_enums` (variants for enum types referenced by props, e.g. `CheckboxState`). When the wrapper forwards `props: SomeProps`, the primitive's props are promoted to the top-level `props` list and `props_source: "primitive"` is set.
+
+**Ask Claude:** "Describe the checkbox catalog widget — I'm about to use it."
+
+---
+
+### `verify_install`
+**Purpose:** After `dx components add` runs, check that the one-time wiring landed: `mod components;` in src/main.rs or src/lib.rs, the catalog theme stylesheet mounted via `asset!`, and `src/components/` present. Returns per-step `ok` flags with the exact fix line and a paste location when something is missing.
+
+**Ask Claude:** "Did I finish wiring `dx components add` correctly?"
+
+---
+
 ## Runtime
 
 Runtime tools read events captured by the `dioxus-mcp-probe` crate while

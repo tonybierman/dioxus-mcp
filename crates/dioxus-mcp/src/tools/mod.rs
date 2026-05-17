@@ -35,6 +35,20 @@ pub(crate) fn tighten_type(s: &str) -> String {
         .replace(" :: ", "::")
 }
 
+/// Attribute names that trigger E0034 ambiguity on a given HTML element under
+/// Dioxus 0.7 — both `GlobalAttributesExtension` and the element-specific
+/// extension trait provide a setter with the same name, so writing the attr
+/// directly fails to compile. Disambiguate with the explicit attribute-literal
+/// syntax (`"autofocus": "true"`). Shared between `check_rsx` (which lints
+/// rsx! source) and `describe_component` (which surfaces the per-component
+/// list so callers know which attrs are dangerous before they write them).
+pub(crate) fn ambiguous_attrs_for_element(element: &str) -> &'static [&'static str] {
+    match element {
+        "input" | "button" | "textarea" | "select" => &["autofocus"],
+        _ => &[],
+    }
+}
+
 /// Resolve a file path argument against the project root. Absolute paths are
 /// returned as-is; relative paths are joined to `project_root` if provided,
 /// otherwise to the state's project manifest dir (or starting cwd).

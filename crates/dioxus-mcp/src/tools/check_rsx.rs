@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use syn::visit::Visit;
 
 use crate::state::State;
-use crate::tools::resolve_in_project;
+use crate::tools::{ambiguous_attrs_for_element, resolve_in_project};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct CheckRsxParams {
@@ -49,12 +49,24 @@ pub struct CheckRsxReport {
     pub file: PathBuf,
     /// Sum of rsx! blocks across all scanned files.
     pub rsx_block_count: usize,
+    /// Names of every lint that ran on the file(s). Lets a caller distinguish
+    /// "no issues found" from "no checks ran" — an empty `issues` list with a
+    /// non-empty `checks_run` is a real clean bill of health.
+    pub checks_run: &'static [&'static str],
     /// Flat list of issues. In batch mode each carries its `file`.
     pub issues: Vec<RsxIssue>,
     /// Per-file breakdown. Empty in single-file mode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub per_file: Vec<CheckRsxFileReport>,
 }
+
+/// Static catalogue of the checks `lint_rsx_tokens` performs. Keep aligned
+/// with `walk_lint` — adding a new lint there should add an entry here.
+pub const CHECKS_RUN: &[&str] = &[
+    "missing_key_in_for_loop",
+    "ambiguous_attribute_e0034",
+    "empty_event_handler_closure",
+];
 
 pub async fn check_rsx(state: &Arc<State>, p: CheckRsxParams) -> Result<CheckRsxReport, String> {
     let mut requested: Vec<String> = Vec::new();
@@ -111,6 +123,7 @@ pub async fn check_rsx(state: &Arc<State>, p: CheckRsxParams) -> Result<CheckRsx
     Ok(CheckRsxReport {
         file: first,
         rsx_block_count: total_blocks,
+        checks_run: CHECKS_RUN,
         issues,
         per_file: if batch_mode { per_file } else { Vec::new() },
     })
@@ -172,23 +185,6 @@ fn lint_rsx_tokens(m: &syn::Macro, _src: &str, issues: &mut Vec<RsxIssue>) {
     walk_lint(&tokens, false, true, None, issues);
 }
 
-/// Known-ambiguous attribute names per HTML element under Dioxus 0.7. Setting
-/// any of these directly (e.g. `autofocus: true`) trips E0034 because both
-/// `GlobalAttributesExtension` and the element-specific extension trait
-/// provide a method with the same name. Disambiguate with the explicit
-/// attribute-literal syntax (`"autofocus": "true"`) or fully-qualify the
-/// builder trait. Add entries here as new cases are documented — empty lists
-/// are fine.
-fn ambiguous_attrs_for(element: &str) -> &'static [&'static str] {
-    match element {
-        // `autofocus` is on GlobalAttributesExtension AND on each of these
-        // element-specific extensions. The agent that hit this set
-        // `autofocus: true` on Input and got E0034.
-        "input" | "button" | "textarea" | "select" => &["autofocus"],
-        _ => &[],
-    }
-}
-
 /// `parent_is_component` is true when the surrounding brace group is the body
 /// of a component invocation (e.g. `MyComp { ... }`). It gates lints that only
 /// make sense for HTML element attributes — most notably the `onXxx:` empty-
@@ -248,7 +244,7 @@ fn walk_lint(
     //     non-empty ambiguity list. The fix is to use the explicit attribute-
     //     literal syntax: `"autofocus": "true"`.
     if let Some(elem) = parent_element_name {
-        let bad = ambiguous_attrs_for(elem);
+        let bad = ambiguous_attrs_for_element(elem);
         if !bad.is_empty() {
             let mut j = 0;
             while j + 1 < tokens.len() {

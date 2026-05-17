@@ -38,7 +38,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Lint Rust file(s)' rsx! blocks for common 0.7 mistakes (missing keys on iterators, parameter-less event handlers, attribute writes that trigger E0034 ambiguity — e.g. `autofocus: true` on `input`/`button`/`textarea`/`select`). Pass `file` for a single file (single-file response shape: `file`, `rsx_block_count`, `issues`). Pass `files: [...]` for batch mode (adds `per_file: [...]`; top-level `issues` is the flat merge with each issue tagged by file)."
+        description = "Lint Rust file(s)' rsx! blocks for common 0.7 mistakes (missing keys on iterators, parameter-less event handlers, attribute writes that trigger E0034 ambiguity — e.g. `autofocus: true` on `input`/`button`/`textarea`/`select`). The response includes a `checks_run` list naming the lints that fired so a clean `issues: []` is distinguishable from an empty/skipped scan. Pass `file` for a single file (single-file response shape: `file`, `rsx_block_count`, `checks_run`, `issues`). Pass `files: [...]` for batch mode (adds `per_file: [...]`; top-level `issues` is the flat merge with each issue tagged by file)."
     )]
     async fn check_rsx(
         &self,
@@ -226,7 +226,20 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Full prop / event surface for a Dioxus 0.7 catalog component (the data needed to author rsx! against it). Returns the component fn signature, every prop (name, type, optional?, has_default, default expression, extends targets, doc comment), every variant enum (e.g. ButtonVariant + its #[default]), aggregated `extends` and `event_handlers` lists, and — when the wrapper forwards a `*Props` from `dioxus_primitives` — the upstream primitive's full prop list too. Reads from the upstream cargo git checkout (~/.cargo/git/checkouts/components-*) when available, otherwise falls back to the project-local install at `src/components/<name>/component.rs`. Call this BEFORE writing rsx! that uses a catalog widget — saves 5+ file reads per widget."
+        description = "Verify a project's `dx components add` wiring. Reports which one-time setup steps are still missing (`mod components;` in src/main.rs or src/lib.rs, `asset!(\"/assets/dx-components-theme.css\")` mounted in the App, `src/components/` directory present). Returns `fully_wired: bool`, a `missing: [step_id]` summary, and a `steps: [...]` list with each step's `ok`, the paths it looked at (`looked_in`), and the exact fix line + paste location when `ok: false`. Use this after `dx components add` (or after the user reports compile errors about an unresolved `crate::components` path) to finish wiring without re-running the CLI."
+    )]
+    async fn verify_install(
+        &self,
+        Parameters(p): Parameters<tools::dsl::VerifyInstallParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::verify_install(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Full prop / event surface for a Dioxus 0.7 catalog component (the data needed to author rsx! against it). Returns the component fn signature, every prop (name, type, optional?, has_default, default expression, extends targets, doc comment), every variant enum (e.g. ButtonVariant + its #[default]), aggregated `extends` and `event_handlers` lists, plus `ambiguous_attributes` (E0034 setters that need the literal-string form) and `referenced_enums` (variants for enum types referenced inside any prop type, e.g. `CheckboxState`). When the wrapper just forwards `props: SomeProps` the primitive's props are promoted to the top-level `props` list and `props_source: \"primitive\"` is set so the first read isn't misleadingly empty. Reads from the upstream cargo git checkout (~/.cargo/git/checkouts/components-*) when available, otherwise falls back to the project-local install at `src/components/<name>/component.rs`. Call this BEFORE writing rsx! that uses a catalog widget — saves 5+ file reads per widget."
     )]
     async fn describe_component(
         &self,

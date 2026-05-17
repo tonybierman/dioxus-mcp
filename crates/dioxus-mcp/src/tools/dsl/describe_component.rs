@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::execute::DX_COMPONENT_CATALOG_ENTRIES;
 use crate::state::State;
-use crate::tools::{resolve_in_project, tighten_type};
+use crate::tools::{ambiguous_attrs_for_element, resolve_in_project, tighten_type};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DescribeComponentParams {
@@ -67,6 +67,12 @@ pub struct PrimitiveRef {
     /// Resolved file in the upstream primitives crate (best-effort).
     pub source: Option<PathBuf>,
     pub props: Vec<PropEntry>,
+    /// Every pub enum defined in the same primitive file. Used by the
+    /// top-level `referenced_enums` pass to inline variants of types like
+    /// `CheckboxState` that show up inside a prop type and would otherwise
+    /// force the caller to grep `~/.cargo/git/checkouts/components-*`.
+    #[serde(skip_serializing)]
+    pub same_file_enums: Vec<VariantEnum>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +86,12 @@ pub struct DescribeComponentResult {
     pub source: PathBuf,
     /// Pretty-printed component fn signature (attrs + sig, no body).
     pub signature: String,
+    /// `"inline"` = the wrapper fn lists each prop explicitly; `"primitive"`
+    /// = the wrapper just forwards `props: <SomeProps>` and these entries
+    /// were copied from that resolved primitive struct so a first read isn't
+    /// misleadingly empty. When `"primitive"`, `primitive.props` mirrors
+    /// this list one-for-one — kept for callers who want the type path too.
+    pub props_source: &'static str,
     pub props: Vec<PropEntry>,
     pub variants: Vec<VariantEnum>,
     /// Aggregated extends across every prop (deduped).
@@ -94,6 +106,18 @@ pub struct DescribeComponentResult {
     /// Verbatim `use` statements from the wrapper file (helps callers wire
     /// imports without guessing).
     pub uses: Vec<String>,
+    /// Enums whose name appears inside one of the prop types (e.g.
+    /// `CheckboxState` inside `ReadSignal<Option<CheckboxState>>`),
+    /// resolved from either the wrapper file or the upstream primitive file.
+    /// Saves callers a grep into `~/.cargo/git/checkouts/components-*`.
+    pub referenced_enums: Vec<VariantEnum>,
+    /// Attribute names that trip E0034 on this component because both
+    /// `GlobalAttributesExtension` and the element-specific extension trait
+    /// (looked up from `extends`) define them. Always use the explicit
+    /// attribute-literal syntax for these (`"autofocus": "true"`). When
+    /// empty, every documented HTML attribute is safe to set directly via
+    /// `attr: value` syntax.
+    pub ambiguous_attributes: Vec<String>,
 }
 
 pub async fn describe_component(
@@ -163,12 +187,15 @@ fn describe_from_dir(
     //      it up in the upstream primitives/src/ tree.
     let primitive = parsed.primitive_type.as_ref().and_then(|type_path| {
         let last = type_path.rsplit("::").next().unwrap_or(type_path.as_str());
-        // First: same-file struct (combobox-style wrappers).
+        // First: same-file struct (combobox-style wrappers). The wrapper's own
+        // pub enums are already in `parsed.variants`; we attach them here too
+        // so the `referenced_enums` pass below sees a single source of truth.
         if let Some(props) = parsed.extra_props_structs.get(last) {
             return Some(PrimitiveRef {
                 path: type_path.clone(),
                 source: Some(comp_path.clone()),
                 props: props.clone(),
+                same_file_enums: parsed.variants.clone(),
             });
         }
         // Fallback: upstream primitives crate.
@@ -181,19 +208,49 @@ fn describe_from_dir(
 
     let import = format!("use crate::components::{name}::{};", name.to_pascal_case());
 
-    let mut extends: Vec<String> = parsed
-        .props
-        .iter()
-        .flat_map(|p| p.extends.clone())
-        .collect();
+    // Flatten wrapper-prop forwarding: when the wrapper just takes `props:
+    // SomeProps` and nothing else, the parsed inline props is empty and all
+    // the real prop data is hiding under `primitive.props`. Callers reading
+    // `props: []` would think the widget has no props. Promote the
+    // primitive's props to the top level and mark the source.
+    let (props, props_source): (Vec<PropEntry>, &'static str) = if parsed.props.is_empty()
+        && let Some(prim) = primitive.as_ref()
+        && !prim.props.is_empty()
+    {
+        (prim.props.clone(), "primitive")
+    } else {
+        (parsed.props, "inline")
+    };
+
+    let mut extends: Vec<String> = props.iter().flat_map(|p| p.extends.clone()).collect();
     extends.sort();
     extends.dedup();
-    let event_handlers: Vec<String> = parsed
-        .props
+    let event_handlers: Vec<String> = props
         .iter()
         .filter(|p| p.event_handler)
         .map(|p| p.name.clone())
         .collect();
+
+    // Inline-resolve enums that appear inside any prop type. Candidates come
+    // from the wrapper's own pub enums + any enums in the resolved primitive
+    // file. Filtered to names that actually appear in a prop type string so
+    // we don't dump every enum the primitive file happens to export.
+    let referenced_enums = build_referenced_enums(&props, &primitive, &parsed.variants);
+
+    // The `extends` list carries every element-specific extension trait the
+    // wrapper opts into (e.g. `["GlobalAttributes", "button"]`). Surface the
+    // E0034-ambiguous setters for each so callers don't have to guess which
+    // attrs need the literal-string syntax.
+    let mut ambiguous_attributes: Vec<String> = extends
+        .iter()
+        .flat_map(|e| {
+            ambiguous_attrs_for_element(e)
+                .iter()
+                .map(|a| (*a).to_string())
+        })
+        .collect();
+    ambiguous_attributes.sort();
+    ambiguous_attributes.dedup();
 
     Ok(DescribeComponentResult {
         name: name.to_string(),
@@ -202,14 +259,56 @@ fn describe_from_dir(
         source_kind,
         source: source.to_path_buf(),
         signature: parsed.signature,
-        props: parsed.props,
+        props_source,
+        props,
         variants: parsed.variants,
         extends,
         event_handlers,
         primitive,
         docs,
         uses: parsed.uses,
+        referenced_enums,
+        ambiguous_attributes,
     })
+}
+
+fn build_referenced_enums(
+    props: &[PropEntry],
+    primitive: &Option<PrimitiveRef>,
+    wrapper_variants: &[VariantEnum],
+) -> Vec<VariantEnum> {
+    let mut referenced: Vec<String> = Vec::new();
+    for p in props {
+        for ident in extract_type_idents(&p.ty) {
+            if !referenced.contains(&ident) {
+                referenced.push(ident);
+            }
+        }
+    }
+    if let Some(prim) = primitive {
+        for p in &prim.props {
+            for ident in extract_type_idents(&p.ty) {
+                if !referenced.contains(&ident) {
+                    referenced.push(ident);
+                }
+            }
+        }
+    }
+    let mut pool: Vec<&VariantEnum> = Vec::new();
+    pool.extend(wrapper_variants.iter());
+    if let Some(prim) = primitive {
+        pool.extend(prim.same_file_enums.iter());
+    }
+    let mut out: Vec<VariantEnum> = Vec::new();
+    for name in &referenced {
+        if let Some(v) = pool.iter().find(|v| v.name == *name) {
+            // Dedup by name in case the wrapper and primitive both define it.
+            if !out.iter().any(|x| x.name == v.name) {
+                out.push((*v).clone());
+            }
+        }
+    }
+    out
 }
 
 struct ParsedComponent {
@@ -440,10 +539,12 @@ fn resolve_primitive(primitives_root: &Path, type_path: &str) -> Option<Primitiv
             continue;
         };
         if let Some(props) = parse_primitive_props(&src, last) {
+            let same_file_enums = parse_primitive_enums(&src);
             return Some(PrimitiveRef {
                 path: type_path.to_string(),
                 source: Some(path),
                 props,
+                same_file_enums,
             });
         }
     }
@@ -476,6 +577,84 @@ fn parse_primitive_props(src: &str, type_name: &str) -> Option<Vec<PropEntry>> {
         return struct_to_props(s);
     }
     None
+}
+
+fn parse_primitive_enums(src: &str) -> Vec<VariantEnum> {
+    let Ok(file) = syn::parse_file(src) else {
+        return Vec::new();
+    };
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(e) if matches!(e.vis, syn::Visibility::Public(_)) => {
+                Some(extract_enum(e))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Pick PascalCase identifiers out of a type string. Filters out the common
+/// container types (`Option`, `Vec`, `ReadSignal`, `Callback`, …) so the
+/// caller only sees enum-shaped candidates worth resolving.
+fn extract_type_idents(ty: &str) -> Vec<String> {
+    const SKIP: &[&str] = &[
+        "Option",
+        "Vec",
+        "Box",
+        "Rc",
+        "Arc",
+        "Cell",
+        "RefCell",
+        "Cow",
+        "HashMap",
+        "HashSet",
+        "BTreeMap",
+        "BTreeSet",
+        "ReadSignal",
+        "Signal",
+        "WriteSignal",
+        "Memo",
+        "Resource",
+        "Element",
+        "Event",
+        "EventHandler",
+        "Callback",
+        "Attribute",
+        "Children",
+        "String",
+        "PathBuf",
+        "Result",
+        "GlobalAttributes",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in ty.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else {
+            if !current.is_empty() {
+                push_if_enum_candidate(&mut out, &current, SKIP);
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        push_if_enum_candidate(&mut out, &current, SKIP);
+    }
+    out
+}
+
+fn push_if_enum_candidate(out: &mut Vec<String>, ident: &str, skip: &[&str]) {
+    if !ident.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return;
+    }
+    if skip.contains(&ident) {
+        return;
+    }
+    if !out.iter().any(|x| x == ident) {
+        out.push(ident.to_string());
+    }
 }
 
 fn locate_upstream_component(name: &str) -> Option<PathBuf> {
@@ -579,6 +758,7 @@ pub fn Button(
         let r =
             describe_from_dir("button", "desc", dir.path(), "upstream", None).expect("describe ok");
         assert_eq!(r.name, "button");
+        assert_eq!(r.props_source, "inline");
         // Inline props: variant, attributes, onclick, children — `attributes`
         // is included because `extends` is meta-info, not a skip signal.
         let names: Vec<&str> = r.props.iter().map(|p| p.name.as_str()).collect();
@@ -631,9 +811,17 @@ pub fn Combobox(props: ComboboxProps) -> Element {
         write_files(dir.path(), &[("component.rs", src)]);
         let r = describe_from_dir("combobox", "desc", dir.path(), "upstream", None)
             .expect("describe ok");
-        // No inline props (the fn just takes `props: ComboboxProps`).
-        assert!(r.props.is_empty());
-        // Primitive ref resolved from the same file.
+        // Wrapper forwards `props: ComboboxProps` — the inline `props` list is
+        // empty in source, so the primitive's props are promoted to the top
+        // level for callers' first read.
+        assert_eq!(r.props_source, "primitive");
+        let names: Vec<&str> = r.props.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"value"));
+        assert!(names.contains(&"on_value_change"));
+        // `event_handlers` and `extends` are aggregated from the promoted props.
+        assert!(r.event_handlers.contains(&"on_value_change".into()));
+        assert!(r.extends.iter().any(|e| e == "GlobalAttributes"));
+        // Primitive ref still surfaces the type path (and resolved location).
         let prim = r.primitive.expect("primitive resolved");
         assert_eq!(prim.path, "ComboboxProps");
         let pnames: Vec<&str> = prim.props.iter().map(|p| p.name.as_str()).collect();
@@ -687,9 +875,150 @@ pub struct CheckboxProps {
         std::fs::write(primitives.join("checkbox.rs"), primitive).unwrap();
         let r = describe_from_dir("checkbox", "desc", &dir, "upstream", Some(&dir))
             .expect("describe ok");
+        // Top-level props were promoted from the upstream primitive struct.
+        assert_eq!(r.props_source, "primitive");
+        let top: Vec<&str> = r.props.iter().map(|p| p.name.as_str()).collect();
+        assert!(top.contains(&"checked"));
+        assert!(top.contains(&"on_checked_change"));
         let prim = r.primitive.expect("primitive resolved");
         let names: Vec<&str> = prim.props.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"checked"));
         assert!(names.contains(&"on_checked_change"));
+    }
+
+    #[test]
+    fn inlines_referenced_enum_from_primitive_file() {
+        // Real case from todo_mvc: the agent saw `checked: ReadSignal<Option<CheckboxState>>`
+        // but had to grep the primitive to find CheckboxState's variants. The
+        // resolver should pick up the same-file enum automatically.
+        let root = tempdir().unwrap();
+        let dir = root.path().join("preview/src/components/checkbox");
+        let primitives = root.path().join("primitives/src");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&primitives).unwrap();
+        let wrapper = r#"
+use dioxus::prelude::*;
+use dioxus_primitives::checkbox::CheckboxProps;
+
+#[component]
+pub fn Checkbox(props: CheckboxProps) -> Element {
+    rsx! { input {} }
+}
+"#;
+        let primitive = r#"
+use dioxus::prelude::*;
+
+#[derive(Copy, Clone, PartialEq, Default)]
+pub enum CheckboxState {
+    #[default]
+    Unchecked,
+    Checked,
+    Indeterminate,
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub struct CheckboxProps {
+    #[props(default)]
+    pub checked: ReadSignal<Option<CheckboxState>>,
+    #[props(default)]
+    pub on_checked_change: Callback<CheckboxState>,
+}
+"#;
+        std::fs::write(dir.join("component.rs"), wrapper).unwrap();
+        std::fs::write(primitives.join("checkbox.rs"), primitive).unwrap();
+        let r = describe_from_dir("checkbox", "desc", &dir, "upstream", Some(&dir))
+            .expect("describe ok");
+        let cs = r
+            .referenced_enums
+            .iter()
+            .find(|v| v.name == "CheckboxState")
+            .expect("CheckboxState inlined into referenced_enums");
+        assert_eq!(cs.default.as_deref(), Some("Unchecked"));
+        assert!(cs.variants.contains(&"Checked".into()));
+        assert!(cs.variants.contains(&"Indeterminate".into()));
+    }
+
+    #[test]
+    fn surfaces_ambiguous_attributes_for_button_input() {
+        // The Button template extends `button`, so `autofocus` is E0034-ambiguous
+        // — callers must use the string-key form `"autofocus": "true"`.
+        let dir = tempdir().unwrap();
+        let src = r#"
+use dioxus::prelude::*;
+
+#[component]
+pub fn Button(
+    #[props(extends=GlobalAttributes)]
+    #[props(extends=button)]
+    attributes: Vec<Attribute>,
+    children: Element,
+) -> Element {
+    rsx! { button {} }
+}
+"#;
+        write_files(dir.path(), &[("component.rs", src)]);
+        let r =
+            describe_from_dir("button", "desc", dir.path(), "upstream", None).expect("describe ok");
+        assert!(r.extends.iter().any(|e| e == "button"));
+        assert_eq!(r.ambiguous_attributes, vec!["autofocus".to_string()]);
+    }
+
+    #[test]
+    fn no_ambiguous_attributes_when_no_element_extension() {
+        // A component that only extends GlobalAttributes (no element-specific
+        // trait) has no ambiguous attrs — every documented attr is safe.
+        let dir = tempdir().unwrap();
+        let src = r#"
+use dioxus::prelude::*;
+
+#[component]
+pub fn Card(
+    #[props(extends=GlobalAttributes)]
+    attributes: Vec<Attribute>,
+    children: Element,
+) -> Element {
+    rsx! { div {} }
+}
+"#;
+        write_files(dir.path(), &[("component.rs", src)]);
+        let r =
+            describe_from_dir("card", "desc", dir.path(), "upstream", None).expect("describe ok");
+        assert!(r.ambiguous_attributes.is_empty());
+    }
+
+    #[test]
+    fn inlines_referenced_enum_from_wrapper_file() {
+        // Same-file (combobox-style) wrappers: the enum lives next to the
+        // props struct. Confirm the resolver picks that up too.
+        let dir = tempdir().unwrap();
+        let src = r#"
+use dioxus::prelude::*;
+
+#[derive(Copy, Clone, PartialEq, Default)]
+pub enum ButtonSize {
+    #[default]
+    Md,
+    Sm,
+    Lg,
+}
+
+#[component]
+pub fn Button(
+    #[props(default)] size: ButtonSize,
+    children: Element,
+) -> Element {
+    rsx! { button {} }
+}
+"#;
+        write_files(dir.path(), &[("component.rs", src)]);
+        let r =
+            describe_from_dir("button", "desc", dir.path(), "upstream", None).expect("describe ok");
+        let bs = r
+            .referenced_enums
+            .iter()
+            .find(|v| v.name == "ButtonSize")
+            .expect("ButtonSize inlined into referenced_enums");
+        assert!(bs.variants.contains(&"Sm".into()));
+        assert!(bs.variants.contains(&"Lg".into()));
     }
 }
