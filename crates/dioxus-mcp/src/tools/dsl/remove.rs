@@ -75,6 +75,58 @@ pub(super) fn synthesize_replace_route_removes(doc: &mut DslDoc, crate_root: &Pa
     }
 }
 
+/// Expand `prune_dx_new_starter: true` into explicit `remove:` entries for
+/// the well-known boilerplate `dx new` ships: the `Hero` component file at
+/// `src/components/hero.rs` and the `Home` variant in the project's
+/// Routable enum. Each is only synthesized when the target exists on disk
+/// (so the doc.remove list stays honest and dry-run plans match real runs).
+/// Idempotent: duplicates already declared by the user are skipped.
+pub(super) fn synthesize_dx_new_starter_removes(doc: &mut DslDoc, crate_root: &Path) {
+    if !doc.prune_dx_new_starter {
+        return;
+    }
+    let mut already_components: BTreeSet<String> = doc
+        .remove
+        .iter()
+        .filter_map(|r| match r {
+            DslRemove::RemoveComponent { component } => Some(component.to_pascal_case()),
+            _ => None,
+        })
+        .collect();
+    let mut already_routes: BTreeSet<String> = doc
+        .remove
+        .iter()
+        .filter_map(|r| match r {
+            DslRemove::RemoveRoute { variant } => Some(variant.to_pascal_case()),
+            _ => None,
+        })
+        .collect();
+
+    // Hero component file. `dx new` puts the demo widget under this exact
+    // path; if the user already moved or removed it, the leaf check below
+    // silently skips the synthesis.
+    let hero_path = crate_root.join("src/components/hero.rs");
+    if hero_path.exists() && already_components.insert("Hero".to_string()) {
+        doc.remove.push(DslRemove::RemoveComponent {
+            component: "Hero".into(),
+        });
+    }
+
+    // Home variant. `dx new` maps `/` to a `Home` route variant that renders
+    // the Hero. Detect it by parsing the on-disk Routable file.
+    if let Some(router_path) = scaffold::find_routable(crate_root)
+        && let Ok(src) = std::fs::read_to_string(&router_path)
+    {
+        let existing = scaffold::existing_route_paths(&src);
+        let has_home = existing.iter().any(|(v, _)| v == "Home");
+        if has_home && already_routes.insert("Home".to_string()) {
+            doc.remove.push(DslRemove::RemoveRoute {
+                variant: "Home".into(),
+            });
+        }
+    }
+}
+
 /// Return the leaf-file paths a `remove:` block would delete. Routes don't
 /// have leaf files — they're slotted out of the Routable enum source — so
 /// `remove_route` contributes nothing here. Used by preflight to suppress the

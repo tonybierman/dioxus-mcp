@@ -151,6 +151,9 @@ pub(super) fn skip_set(
     for cs in &doc.client_stores {
         maybe_add("src/state", &cs.name);
     }
+    for vs in &doc.view_states {
+        maybe_add("src/state", &vs.name);
+    }
     for sf in synth_server_fns {
         maybe_add("src/server", &sf.name);
     }

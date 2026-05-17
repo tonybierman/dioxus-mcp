@@ -657,6 +657,21 @@ impl Store<{{ pascal }}> {
     fn clear_{{ checkbox_field }}(&mut self) {
         self.items().write().retain(|x| !x.{{ checkbox_field }});
     }
+
+    /// Count of items whose `{{ checkbox_field }}` is false — the "remaining"
+    /// readout in canonical TodoMVC-shaped UIs. Read inside `rsx!` as
+    /// `store.remaining()` — Dioxus reactivity tracks the underlying
+    /// `items()` signal.
+    fn remaining(&self) -> usize {
+        self.items().read().iter().filter(|x| !x.{{ checkbox_field }}).count()
+    }
+
+    /// True when at least one item has `{{ checkbox_field }}` set. Lets call
+    /// sites gate a "Clear completed" button without re-running `iter().any`
+    /// at every render site.
+    fn any_{{ checkbox_field }}(&self) -> bool {
+        self.items().read().iter().any(|x| x.{{ checkbox_field }})
+    }
 {%- endif %}
 }
 
@@ -677,6 +692,12 @@ pub fn use_{{ snake }}() -> Store<{{ pascal }}> {
 /// Screen template that wires an "add input + list with delete (and optional
 /// checkbox)" UI to a ClientStore. No server fn round-trip — all state lives
 /// in the `Store<T>`-backed context store.
+///
+/// When `checkbox_field` is set, a sibling `{{ pascal }}Row` component is
+/// emitted below the screen so the per-row body (with its closure captures)
+/// is one prop boundary away from the screen — easier to restyle, easier to
+/// add per-row hooks (drag handles, editing-in-place, …) without rewriting
+/// the parent.
 pub(super) const CLIENT_CRUD_SCREEN_TPL: &str = r#"use dioxus::prelude::*;
 {%- if wrap_pascal %}
 use crate::components::{{ wrap_pascal }};
@@ -710,6 +731,10 @@ pub fn {{ pascal }}() -> Element {
 {%- endif %}
     }
 }
+{%- if row_component %}
+
+{{ row_component }}
+{%- endif %}
 "#;
 
 /// Resource-synthesized list screen with a real table: column headers from the

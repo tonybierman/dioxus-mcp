@@ -7,4 +7,5 @@ mod client_crud;
 mod plain;
 mod resource_crud;
 
+pub(crate) use client_crud::vanilla_css_starter_for;
 pub(crate) use plain::*;

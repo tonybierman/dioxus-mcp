@@ -195,11 +195,15 @@ pub(super) struct WireApp {
 /// back to surfacing a next_steps hint so the user wires it manually.
 pub(super) fn wire_app_if_needed(doc: &DslDoc, crate_root: &Path) -> Result<WireApp, String> {
     let needs_router = !doc.screens.is_empty() || !doc.login_screens.is_empty();
-    let store_snakes: Vec<String> = doc
+    // ClientStores + ViewStates both expose a `provide_{snake}()` under
+    // `crate::state::{snake}` and need the same App-body splice. Merge both
+    // lists so the wiring loop below stays a single pass.
+    let mut store_snakes: Vec<String> = doc
         .client_stores
         .iter()
         .map(|cs| cs.name.to_snake_case())
         .collect();
+    store_snakes.extend(doc.view_states.iter().map(|vs| vs.name.to_snake_case()));
     if !needs_router && store_snakes.is_empty() {
         return Ok(WireApp::default());
     }

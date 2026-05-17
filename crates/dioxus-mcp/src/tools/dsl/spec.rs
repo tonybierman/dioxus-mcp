@@ -78,6 +78,7 @@ pub async fn get_dsl_spec(
         ("model", "core", CORE_MODEL),
         ("store", "core", CORE_STORE),
         ("client_store", "core", CORE_CLIENT_STORE),
+        ("view_state", "core", CORE_VIEW_STATE),
         ("resource", "core", CORE_RESOURCE),
         ("components", "core", CORE_COMPONENTS),
         ("component", "core", CORE_COMPONENT),
@@ -107,6 +108,7 @@ pub async fn get_dsl_spec(
         }
     }
 
+    // Validate `sections:` (`view_state` is in the SECTIONS table above).
     // Resolve `sections:` to canonical names. Empty => no filter.
     let section_filter: Option<BTreeSet<String>> = if p.sections.is_empty() {
         None

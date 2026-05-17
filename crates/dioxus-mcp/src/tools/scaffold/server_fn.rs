@@ -140,7 +140,7 @@ pub async fn create_server_fn(
 
     // ensure src/server/mod.rs declares it
     let mod_rs = server_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake, None, true)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),

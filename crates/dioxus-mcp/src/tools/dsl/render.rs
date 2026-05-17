@@ -55,13 +55,7 @@ pub(super) fn write_module_file_with_cfg(
     }
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
     let mod_rs = dir.join("mod.rs");
-    // Components are referenced by name (`use crate::components::Foo;`), so
-    // the wildcard re-export is always "used" — no need to shield with
-    // `#![allow(unused_imports)]`. Server fns / state stores may have
-    // alongside-the-fact items (delete_*, etc.) that aren't called yet, so
-    // those keep the shield.
-    let allow_unused = subdir != "src/components";
-    let upsert = upsert_mod_entry(&mod_rs, snake, cfg_attr, allow_unused)?;
+    let upsert = upsert_mod_entry(&mod_rs, snake, cfg_attr)?;
     let (created, modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),

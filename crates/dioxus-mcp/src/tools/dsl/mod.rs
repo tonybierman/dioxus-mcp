@@ -20,6 +20,7 @@ pub use spec::*;
 mod cargo_patch;
 mod execute;
 mod generate;
+mod list_components;
 mod modify;
 mod plan;
 mod preflight;
@@ -31,6 +32,7 @@ mod util;
 mod wire;
 
 pub use execute::*;
+pub use list_components::*;
 
 // Convenience flat re-exports for the test module — tests.rs uses `super::*`
 // and exercises items from every sub-module.

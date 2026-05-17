@@ -13,6 +13,8 @@ pub struct DslDoc {
     #[serde(default)]
     pub client_stores: Vec<DslClientStore>,
     #[serde(default)]
+    pub view_states: Vec<DslViewState>,
+    #[serde(default)]
     pub server_fns: Vec<DslServerFn>,
     #[serde(default)]
     pub signals: Vec<DslSignal>,
@@ -66,6 +68,15 @@ pub struct DslDoc {
     /// to `next_steps`.
     #[serde(default)]
     pub dx_components: Vec<String>,
+    /// When true, the well-known `dx new` starter boilerplate (the `Hero`
+    /// component, the demo `Home` Routable variant, and the matching
+    /// `src/components/hero.rs` file) is auto-pruned before the rest of the
+    /// scaffold runs — so you can scaffold straight into a fresh `dx new`
+    /// project without writing per-target `remove:` entries by hand. Targets
+    /// that aren't present are silent no-ops. Doesn't touch any other
+    /// existing code. Default: false.
+    #[serde(default)]
+    pub prune_dx_new_starter: bool,
 }
 
 /// Top-level remove kinds. Each entry idempotently deletes the named on-disk
@@ -186,6 +197,38 @@ pub struct DslClientStore {
     pub auto_id: Option<bool>,
 }
 
+/// In-screen view state (filter enum, sort key, search string, …) exposed
+/// via context as a `Signal<T>`. Generates `src/state/{snake}.rs` with a
+/// typed `provide_{snake}()` and `use_{snake}()` pair, plus (when
+/// `enum_variants:` is set) the matching enum declaration. The `provide_*`
+/// call is auto-spliced into your `fn App()` body alongside any
+/// `client_stores:` entries.
+///
+/// Use this for local-but-shared state (the rsx body and a sibling clear-
+/// completed button both reading/writing the same filter). For state that's
+/// only touched in one component, just call `use_signal(|| ...)` inline —
+/// this primitive is the discoverable, typed wrapper for the "needs to be
+/// in context" case.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslViewState {
+    pub name: String,
+    /// Rust type the signal carries. When `enum_variants:` is set, this is
+    /// the name the generated enum will take; otherwise it must already
+    /// exist (a Model, a built-in scalar, or an imported type).
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// Rust expression for the initial signal value (e.g. `Filter::All`,
+    /// `String::new()`, `0i32`).
+    pub initial: String,
+    /// Optional list of unit-variant names to auto-generate as `pub enum
+    /// {type} { Variant1, Variant2, ... }`. Triggered by the presence of
+    /// `enum_variants:` (empty list rejects). Derives Clone, Copy, PartialEq,
+    /// Eq, Debug — all unit-variant only, no data carried per variant.
+    #[serde(default)]
+    pub enum_variants: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DslResource {
@@ -277,6 +320,17 @@ pub struct DslScreenTemplate {
     /// committing to a specific theme.
     #[serde(default)]
     pub styled: Option<String>,
+    /// `client_crud` only: shape of the "add" form's submit affordance.
+    ///   - `"submit_button"` (default): emit an explicit `button { r#type:
+    ///     "submit", "Add" }` so the action is visible.
+    ///   - `"enter_only"`: omit the button. Submitting the form via Enter
+    ///     still fires `onsubmit` (which the template wires up). Pick this
+    ///     when the rest of the UI signals "type and press Enter" without a
+    ///     button (e.g. TodoMVC-shaped apps).
+    ///
+    /// Other template kinds reject the field.
+    #[serde(default)]
+    pub compose_style: Option<String>,
     /// Internal: rich-CRUD context populated by `expand_resources` so the list
     /// and form templates can emit a real table (with edit/delete actions) or
     /// an edit-by-id form. Not part of the user-facing spec.

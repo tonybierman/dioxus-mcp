@@ -87,15 +87,28 @@ pub(super) fn plan_dsl(
     for cs in &doc.client_stores {
         leaf(&mut out, &mut mods_touched, "src/state", &cs.name);
     }
+    for vs in &doc.view_states {
+        leaf(&mut out, &mut mods_touched, "src/state", &vs.name);
+    }
     for sf in synth_server_fns {
         leaf(&mut out, &mut mods_touched, "src/server", &sf.name);
     }
 
-    // Router file: modified when there are routed primitives (screens or login_screens).
-    if (!doc.screens.is_empty() || !doc.login_screens.is_empty())
-        && let Some(router) = scaffold::find_routable(crate_root)
-    {
-        out.would_modify.push(router);
+    // Router file: modified when there's an existing Routable enum, or auto-
+    // created (alongside the crate-root mod insert) when there isn't and the
+    // doc declares routed primitives. Mirrors bootstrap_router_if_needed so the
+    // dry-run plan matches what the real execute will do.
+    if !doc.screens.is_empty() || !doc.login_screens.is_empty() {
+        if let Some(router) = scaffold::find_routable(crate_root) {
+            out.would_modify.push(router);
+        } else {
+            out.would_create.push(crate_root.join("src/router.rs"));
+            out.next_steps.push(
+                "no Routable enum found — will auto-create `src/router.rs` and add `pub mod router;` \
+                 to the crate root. Mount it in your App body as `Router::<crate::router::Route> {}`."
+                    .into(),
+            );
+        }
     }
 
     // `modify:` entries — classify each target as would_modify (file present)

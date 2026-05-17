@@ -847,7 +847,7 @@ fn dx_components_catalog_matches_spec_block() {
     // missing from the spec catalog would be a UX bug the next time someone
     // reads the catalog. This test parses the spec block and asserts the
     // two sources have the same set of names.
-    use super::execute::DX_COMPONENT_CATALOG;
+    use super::execute::DX_COMPONENT_CATALOG_ENTRIES;
     let raw = CORE_COMPONENTS;
     let v: serde_yml::Value = serde_yml::from_str(raw).expect("CORE_COMPONENTS must be valid YAML");
     let components = v
@@ -855,15 +855,19 @@ fn dx_components_catalog_matches_spec_block() {
         .and_then(|m| m.get("catalog"))
         .and_then(|m| m.as_mapping())
         .expect("Components.catalog must be a mapping");
-    let spec_names: std::collections::BTreeSet<String> = components
-        .keys()
-        .filter_map(|k| k.as_str().map(|s| s.to_string()))
+    let spec_pairs: std::collections::BTreeMap<String, String> = components
+        .iter()
+        .filter_map(|(k, v)| {
+            Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
+        })
         .collect();
-    let code_names: std::collections::BTreeSet<String> =
-        DX_COMPONENT_CATALOG.iter().map(|s| s.to_string()).collect();
+    let code_pairs: std::collections::BTreeMap<String, String> = DX_COMPONENT_CATALOG_ENTRIES
+        .iter()
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .collect();
     assert_eq!(
-        spec_names, code_names,
-        "spec catalog and DX_COMPONENT_CATALOG must match; refresh both when the upstream registry changes"
+        spec_pairs, code_pairs,
+        "spec catalog and DX_COMPONENT_CATALOG_ENTRIES must match; refresh both when the upstream registry changes"
     );
 }
 
@@ -2680,20 +2684,35 @@ screens:
         body.contains("title: value,"),
         "missing label_field assignment:\n{body}"
     );
-    // Copy id (i64) → no `let id = item.id.clone()` shim; the handler reads
+    // With `checkbox_field` set, the row body lives in a sibling
+    // `TodoScreenRow` component (decomposed for a clean `todo: Todo` prop
+    // boundary). The parent's `for` loop just renders that component.
+    assert!(
+        body.contains("#[component]\nfn TodoScreenRow(todo: Todo) -> Element {"),
+        "missing sibling row component:\n{body}"
+    );
+    assert!(
+        body.contains("TodoScreenRow { key: \"{item.id}\", todo: item.clone() }"),
+        "parent loop must delegate to the sibling row component:\n{body}"
+    );
+    // Copy id (i64) → no `let id = todo.id.clone()` shim; the handler reads
     // the field directly. Non-Copy ids still get the clone dance (covered by
     // `client_crud_non_copy_id_keeps_clone_shim`).
     assert!(
-        body.contains("store.remove_by_id(item.id)"),
+        body.contains("store.remove_by_id(todo.id)"),
         "missing direct-field delete handler:\n{body}"
     );
     assert!(
-        body.contains("store.update_by_id(item.id, |t| t.done = !t.done)"),
+        body.contains("store.update_by_id(todo.id, |t| t.done = !t.done)"),
         "missing direct-field checkbox toggle:\n{body}"
     );
-    assert!(
-        !body.contains(".clone()"),
-        "Copy id (i64) must not emit any .clone() in handler bodies:\n{body}"
+    // The single `item.clone()` at the call site is expected — the prop
+    // takes ownership of the row's item. No other `.clone()` should land
+    // inside the handler bodies for a Copy id.
+    let clone_count = body.matches(".clone()").count();
+    assert_eq!(
+        clone_count, 1,
+        "Copy id (i64) row component should only carry the call-site item.clone(); body has {clone_count} clones:\n{body}"
     );
     // TODO13: checkbox uses `onchange` (semantically correct for toggle
     // controls), not `oninput` which over-fires on some browsers.
@@ -2710,15 +2729,21 @@ screens:
         "client_crud must iterate via the Store field accessor:\n{body}"
     );
     // Boolean attributes must bind the bool field directly, not a
-    // stringified `"{item.done}"` form (which rsx would parse as a
+    // stringified `"{todo.done}"` form (which rsx would parse as a
     // non-empty string and render checked=true always).
     assert!(
-        body.contains("checked: item.done,"),
+        body.contains("checked: todo.done,"),
         "checked must be a bare bool, not a string literal:\n{body}"
     );
     assert!(
-        !body.contains("checked: \"{item.done}\""),
+        !body.contains("checked: \"{todo.done}\""),
         "checked must not be emitted as a stringified attribute:\n{body}"
+    );
+    // The row component re-acquires the store from context — cheap, and
+    // avoids plumbing the store through a prop.
+    assert!(
+        body.contains("    let store = use_todo_store();"),
+        "row component must call use_todo_store():\n{body}"
     );
     // Sanity: it must compile structurally — input/onsubmit/button all
     // emitted under the rsx! block.
@@ -2726,6 +2751,22 @@ screens:
     assert!(
         body.contains("button { r#type: \"submit\""),
         "missing add button:\n{body}"
+    );
+    // Accessibility defaults: per-row delete button uses a × glyph plus an
+    // aria_label tied to the row's label_field so AT users hear
+    // "Delete {title}" instead of just "Delete". Checkbox also carries a
+    // matching aria_label so the toggle isn't announced as "checkbox" alone.
+    assert!(
+        body.contains("aria_label: \"Delete {todo.title}\""),
+        "missing aria_label on delete button:\n{body}"
+    );
+    assert!(
+        body.contains("\"\u{00D7}\""),
+        "delete button text must be the × glyph (aria_label carries meaning):\n{body}"
+    );
+    assert!(
+        body.contains("aria_label: \"Toggle {todo.title}\""),
+        "missing aria_label on checkbox:\n{body}"
     );
 
     // route variant inserted in main.rs
@@ -3673,6 +3714,7 @@ fn client_crud_styled_tailwind_emits_utility_classes() {
         class: None,
         body: None,
         styled: Some("tailwind".into()),
+        compose_style: None,
         crud: None,
     };
     let body = render_screen_template(
@@ -3703,9 +3745,11 @@ fn client_crud_styled_tailwind_emits_utility_classes() {
         body.contains("text-red-600"),
         "tailwind preset should emit the Tailwind delete class:\n{body}"
     );
-    // Checkbox stays boolean-bound (no regression of TODO #4).
+    // Checkbox stays boolean-bound (no regression of TODO #4). With
+    // checkbox_field set the row body lives in TodoScreenRow, so the prop
+    // binding is `todo`, not `item`.
     assert!(
-        body.contains("checked: item.done,"),
+        body.contains("checked: todo.done,"),
         "checked must remain a bare bool:\n{body}"
     );
 }
@@ -3736,6 +3780,7 @@ fn client_crud_non_copy_id_keeps_clone_shim() {
         class: None,
         body: None,
         styled: None,
+        compose_style: None,
         crud: None,
     };
     let body = render_screen_template(
@@ -3747,8 +3792,11 @@ fn client_crud_non_copy_id_keeps_clone_shim() {
         &t,
     )
     .unwrap();
+    // With `checkbox_field` set the row body lives in the sibling
+    // `TodoScreenRow` component; the clone shim now binds against the
+    // `todo` prop instead of the `item` loop binding.
     assert!(
-        body.contains("let id = item.id.clone();"),
+        body.contains("let id = todo.id.clone();"),
         "non-Copy id must still capture via let-clone shim:\n{body}"
     );
     assert!(
@@ -3763,6 +3811,151 @@ fn client_crud_non_copy_id_keeps_clone_shim() {
     assert!(
         body.contains("onchange:"),
         "checkbox onchange must be emitted regardless of id type:\n{body}"
+    );
+}
+
+#[test]
+fn client_crud_styled_vanilla_css_emits_semantic_classes() {
+    // `styled: vanilla-css` should swap the default unstyled class names
+    // for semantic ones (`compose`, `list`, `field`, `toggle`, `delete`, …)
+    // matched to the starter stylesheet the screen will reference.
+    let cs = DslClientStore {
+        name: "TodoStore".into(),
+        item_type: "Todo".into(),
+        initial: None,
+        id_field: Some("id".into()),
+        id_type: Some("i64".into()),
+        auto_id: Some(true),
+    };
+    let t = DslScreenTemplate {
+        kind: "client_crud".into(),
+        endpoint: None,
+        item_type: Some("Todo".into()),
+        on_submit: None,
+        redirect_to: None,
+        fields: vec![],
+        store: Some("TodoStore".into()),
+        label_field: Some("title".into()),
+        checkbox_field: Some("done".into()),
+        class: None,
+        body: None,
+        styled: Some("vanilla-css".into()),
+        compose_style: None,
+        crud: None,
+    };
+    let body = render_screen_template(
+        std::env::temp_dir().as_path(),
+        "TodoScreen",
+        "todo_screen",
+        None,
+        &[cs],
+        &t,
+    )
+    .unwrap();
+    // Compose form uses `.compose` not `.add`.
+    assert!(
+        body.contains("class: \"compose\""),
+        "vanilla-css preset should emit `.compose` for the form:\n{body}"
+    );
+    assert!(
+        !body.contains("class: \"add\""),
+        "vanilla-css preset should drop the bare `add` class:\n{body}"
+    );
+    // List uses `.list` not `{snake}-items`.
+    assert!(
+        body.contains("class: \"list\""),
+        "vanilla-css preset should emit `.list`:\n{body}"
+    );
+    // Field, toggle, delete.
+    assert!(body.contains("class: \"field\""), "missing .field:\n{body}");
+    assert!(body.contains("class: \"toggle\""), "missing .toggle:\n{body}");
+    assert!(
+        body.contains("class: \"delete\""),
+        "missing .delete:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn client_crud_styled_vanilla_css_emits_starter_stylesheet() {
+    use crate::tools::dsl::execute_code;
+    use crate::tools::dsl::ExecuteCodeParams;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("vanilla_css_starter_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "use dioxus::prelude::*;\n\nfn main() {}\n",
+    )
+    .unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let r = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+      - {name: done, type: bool}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+    auto_id: true
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+      checkbox_field: done
+      styled: vanilla-css
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("vanilla-css scaffold should succeed");
+
+    let css = root.join("assets/todo_screen.css");
+    assert!(
+        css.exists(),
+        "starter stylesheet must be written to assets/{{snake}}.css"
+    );
+    assert!(
+        r.files_created.iter().any(|p| p == &css),
+        "files_created must include the starter CSS path: {:?}",
+        r.files_created
+    );
+    let body = std::fs::read_to_string(&css).unwrap();
+    // Spot-check the contract: the sheet keys off `.screen.{snake}` and
+    // styles each of the semantic class names the rsx! emits.
+    assert!(body.contains(".screen.todo_screen"), "missing root selector:\n{body}");
+    assert!(body.contains(".compose"), "missing .compose:\n{body}");
+    assert!(body.contains(".row"), "missing .row:\n{body}");
+    assert!(body.contains(".delete"), "missing .delete:\n{body}");
+    // Mount-hint should surface in next_steps so the agent knows to wire
+    // the stylesheet into App.
+    assert!(
+        r.next_steps.iter().any(|s| s.contains("todo_screen.css")),
+        "missing stylesheet mount hint in next_steps: {:?}",
+        r.next_steps
     );
 }
 
@@ -3789,6 +3982,7 @@ fn client_crud_styled_rejects_unknown_value() {
         class: None,
         body: None,
         styled: Some("bootstrap".into()),
+        compose_style: None,
         crud: None,
     };
     let err = render_screen_template(
@@ -3802,6 +3996,408 @@ fn client_crud_styled_rejects_unknown_value() {
     .unwrap_err();
     assert!(err.contains("\"tailwind\""), "got: {err}");
     assert!(err.contains("\"bootstrap\""), "got: {err}");
+}
+
+#[test]
+fn client_crud_compose_style_enter_only_drops_submit_button() {
+    let cs = DslClientStore {
+        name: "TodoStore".into(),
+        item_type: "Todo".into(),
+        initial: None,
+        id_field: Some("id".into()),
+        id_type: Some("i64".into()),
+        auto_id: Some(true),
+    };
+    let t = DslScreenTemplate {
+        kind: "client_crud".into(),
+        endpoint: None,
+        item_type: Some("Todo".into()),
+        on_submit: None,
+        redirect_to: None,
+        fields: vec![],
+        store: Some("TodoStore".into()),
+        label_field: Some("title".into()),
+        checkbox_field: None,
+        class: None,
+        body: None,
+        styled: None,
+        compose_style: Some("enter_only".into()),
+        crud: None,
+    };
+    let body = render_screen_template(
+        std::env::temp_dir().as_path(),
+        "TodoScreen",
+        "todo_screen",
+        None,
+        &[cs],
+        &t,
+    )
+    .unwrap();
+    // onsubmit still wired up (Enter fires the form), but the button is gone.
+    assert!(body.contains("onsubmit:"), "must keep onsubmit:\n{body}");
+    assert!(
+        !body.contains("r#type: \"submit\""),
+        "must omit the submit button:\n{body}"
+    );
+}
+
+#[test]
+fn client_crud_compose_style_default_keeps_submit_button() {
+    let cs = DslClientStore {
+        name: "TodoStore".into(),
+        item_type: "Todo".into(),
+        initial: None,
+        id_field: Some("id".into()),
+        id_type: Some("i64".into()),
+        auto_id: Some(true),
+    };
+    let t = DslScreenTemplate {
+        kind: "client_crud".into(),
+        endpoint: None,
+        item_type: Some("Todo".into()),
+        on_submit: None,
+        redirect_to: None,
+        fields: vec![],
+        store: Some("TodoStore".into()),
+        label_field: Some("title".into()),
+        checkbox_field: None,
+        class: None,
+        body: None,
+        styled: None,
+        compose_style: None,
+        crud: None,
+    };
+    let body = render_screen_template(
+        std::env::temp_dir().as_path(),
+        "TodoScreen",
+        "todo_screen",
+        None,
+        &[cs],
+        &t,
+    )
+    .unwrap();
+    assert!(
+        body.contains("r#type: \"submit\""),
+        "default must keep submit button:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn view_state_with_enum_variants_generates_enum_and_wires_app() {
+    use crate::tools::dsl::execute_code;
+    use crate::tools::dsl::ExecuteCodeParams;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("view_state_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        r#"use dioxus::prelude::*;
+
+fn main() {}
+
+#[component]
+fn App() -> Element {
+    rsx! { div { "placeholder" } }
+}
+"#,
+    )
+    .unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let _ = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+view_states:
+  - name: TodoFilter
+    type: TodoFilter
+    initial: "TodoFilter::All"
+    enum_variants: [All, Active, Done]
+  - name: SearchQuery
+    type: String
+    initial: "String::new()"
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("view_state scaffold should succeed");
+
+    let body = std::fs::read_to_string(root.join("src/state/todo_filter.rs")).unwrap();
+    assert!(body.contains("pub enum TodoFilter {"));
+    assert!(body.contains("pub fn provide_todo_filter()"));
+    assert!(body.contains("pub fn use_todo_filter()"));
+
+    let search = std::fs::read_to_string(root.join("src/state/search_query.rs")).unwrap();
+    assert!(
+        !search.contains("pub enum"),
+        "no enum should be emitted when enum_variants is absent:\n{search}"
+    );
+
+    // Both provide_* hooks should be spliced into App.
+    let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(
+        main_rs.contains("crate::state::todo_filter::provide_todo_filter();"),
+        "App body should call provide_todo_filter:\n{main_rs}"
+    );
+    assert!(
+        main_rs.contains("crate::state::search_query::provide_search_query();"),
+        "App body should call provide_search_query:\n{main_rs}"
+    );
+}
+
+#[tokio::test]
+async fn prune_dx_new_starter_removes_hero_and_home_when_present() {
+    use crate::tools::dsl::execute_code;
+    use crate::tools::dsl::ExecuteCodeParams;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("prune_dx_new_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src/components")).unwrap();
+    // Simulate `dx new`'s starter shape: Routable with `Home` + Hero
+    // component file + matching mod.rs entry.
+    std::fs::write(
+        root.join("src/main.rs"),
+        r#"use dioxus::prelude::*;
+mod components;
+
+#[derive(Routable, Clone, PartialEq)]
+enum Route {
+    #[route("/")]
+    Home {},
+}
+
+fn main() {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/components/hero.rs"),
+        "use dioxus::prelude::*;\n#[component]\npub fn Hero() -> Element { rsx! { div { \"Welcome\" } } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/components/mod.rs"),
+        "pub mod hero;\npub use hero::*;\n",
+    )
+    .unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let r = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+prune_dx_new_starter: true
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+    auto_id: true
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("prune scaffold should succeed");
+
+    // Hero file gone.
+    assert!(
+        !root.join("src/components/hero.rs").exists(),
+        "Hero component file should be pruned"
+    );
+    // Routable enum no longer carries `Home`; the new `TodoScreen` variant
+    // landed in its place.
+    let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(
+        !main_rs.contains("Home {}"),
+        "Home variant should be pruned: {main_rs}"
+    );
+    assert!(
+        main_rs.contains("TodoScreen"),
+        "TodoScreen should be inserted: {main_rs}"
+    );
+    // The synthesized removes show up in files_modified (the Routable file).
+    let _ = r;
+}
+
+#[tokio::test]
+async fn prune_dx_new_starter_is_silent_noop_when_targets_absent() {
+    use crate::tools::dsl::execute_code;
+    use crate::tools::dsl::ExecuteCodeParams;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("prune_noop_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // Pristine project — no Hero file, no Routable yet.
+    std::fs::write(root.join("src/main.rs"), "use dioxus::prelude::*;\nfn main() {}\n").unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let r = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+prune_dx_new_starter: true
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+client_stores:
+  - name: TodoStore
+    item_type: Todo
+    id_field: id
+    id_type: i64
+    auto_id: true
+screens:
+  - name: TodoScreen
+    route: /
+    template:
+      kind: client_crud
+      store: TodoStore
+      item_type: Todo
+      label_field: title
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("prune on pristine project should succeed");
+    let _ = r;
+}
+
+#[test]
+fn client_crud_without_checkbox_field_keeps_row_inline() {
+    // The Row split is gated on `checkbox_field` — without it the row body
+    // is trivial (just label + delete button) and stays inside the parent's
+    // `for` loop.
+    let cs = DslClientStore {
+        name: "DraftStore".into(),
+        item_type: "Draft".into(),
+        initial: None,
+        id_field: Some("id".into()),
+        id_type: Some("i64".into()),
+        auto_id: Some(true),
+    };
+    let t = DslScreenTemplate {
+        kind: "client_crud".into(),
+        endpoint: None,
+        item_type: Some("Draft".into()),
+        on_submit: None,
+        redirect_to: None,
+        fields: vec![],
+        store: Some("DraftStore".into()),
+        label_field: Some("title".into()),
+        checkbox_field: None,
+        class: None,
+        body: None,
+        styled: None,
+        compose_style: None,
+        crud: None,
+    };
+    let body = render_screen_template(
+        std::env::temp_dir().as_path(),
+        "DraftScreen",
+        "draft_screen",
+        None,
+        &[cs],
+        &t,
+    )
+    .unwrap();
+    assert!(
+        !body.contains("DraftScreenRow"),
+        "row split should not fire without checkbox_field:\n{body}"
+    );
+    assert!(
+        body.contains("for item in store.items().read().iter()"),
+        "loop must stay over `item`:\n{body}"
+    );
+    assert!(
+        body.contains("li { key: \"{item.id}\""),
+        "row body must remain inline as an `li`:\n{body}"
+    );
+}
+
+#[test]
+fn client_crud_compose_style_rejects_unknown_value() {
+    let cs = DslClientStore {
+        name: "TodoStore".into(),
+        item_type: "Todo".into(),
+        initial: None,
+        id_field: Some("id".into()),
+        id_type: Some("i64".into()),
+        auto_id: Some(true),
+    };
+    let t = DslScreenTemplate {
+        kind: "client_crud".into(),
+        endpoint: None,
+        item_type: Some("Todo".into()),
+        on_submit: None,
+        redirect_to: None,
+        fields: vec![],
+        store: Some("TodoStore".into()),
+        label_field: Some("title".into()),
+        checkbox_field: None,
+        class: None,
+        body: None,
+        styled: None,
+        compose_style: Some("inline".into()),
+        crud: None,
+    };
+    let err = render_screen_template(
+        std::env::temp_dir().as_path(),
+        "TodoScreen",
+        "todo_screen",
+        None,
+        &[cs],
+        &t,
+    )
+    .unwrap_err();
+    assert!(err.contains("compose_style"), "got: {err}");
+    assert!(err.contains("\"inline\""), "got: {err}");
 }
 
 #[test]

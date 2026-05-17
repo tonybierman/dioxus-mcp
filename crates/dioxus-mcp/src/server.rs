@@ -193,44 +193,11 @@ impl DioxusMcp {
         }
     }
 
-    #[tool(
-        description = "Generate a new Dioxus component file with optional typed Props, register it in the components mod tree."
-    )]
-    async fn create_component(
-        &self,
-        Parameters(p): Parameters<tools::scaffold::CreateComponentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match tools::scaffold::create_component(&self.state, p).await {
-            Ok(r) => ok_json(&r),
-            Err(e) => Err(err(e)),
-        }
-    }
-
-    #[tool(
-        description = "Insert a new variant into the project's #[derive(Routable)] enum, wiring a path to a component."
-    )]
-    async fn create_route(
-        &self,
-        Parameters(p): Parameters<tools::scaffold::CreateRouteParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match tools::scaffold::create_route(&self.state, p).await {
-            Ok(r) => ok_json(&r),
-            Err(e) => Err(err(e)),
-        }
-    }
-
-    #[tool(
-        description = "Generate a Dioxus 0.7 server function (Axum-backed) with the right feature gating. Refuses if the project isn't fullstack-capable."
-    )]
-    async fn create_server_fn(
-        &self,
-        Parameters(p): Parameters<tools::scaffold::CreateServerFnParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match tools::scaffold::create_server_fn(&self.state, p).await {
-            Ok(r) => ok_json(&r),
-            Err(e) => Err(err(e)),
-        }
-    }
+    // create_component / create_route / create_server_fn used to be exposed
+    // as MCP tools but were almost always the wrong call — `get_dsl_spec` +
+    // `execute_code` are the supported scaffold path. Removed from the tool
+    // surface; the underlying `tools::scaffold::*` functions are still used
+    // by `execute_code` internally to materialize each DSL primitive.
 
     #[tool(
         description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, ClientStore, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for server-backed features. ClientStore + Screen `kind: client_crud` covers client-only in-memory state with no server fn round-trip."
@@ -240,6 +207,19 @@ impl DioxusMcp {
         Parameters(p): Parameters<tools::dsl::GetDslSpecParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::dsl::get_dsl_spec(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "List the official Dioxus 0.7 component catalog (45 widgets installable via `dx components add <name>`). Returns each entry's snake_case name, one-line description, and `use crate::components::...;` import path. Pass `query` to filter by case-insensitive substring match against name OR description (e.g. `query: \"date\"` returns calendar + date_picker). Cheaper than calling `get_dsl_spec { sections: [components] }` when you just want to pick a widget; the spec section wraps the same catalog in authoring guidance you don't need here."
+    )]
+    async fn list_components(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ListComponentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::list_components(p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -338,49 +318,29 @@ impl ServerHandler for DioxusMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "Dioxus project assistant for Dioxus 0.7 codebases. \
-             \
-             Routing rule: when the user's question maps onto one of these tools, \
-             CALL THE TOOL instead of asking them to paste output or stack traces. \
-             That is what these tools are for. \
-             \
-             SCAFFOLDING ANY NEW CODE — models, components, server fns, routes, screens, \
-             stores, or full CRUD slices — ALWAYS start with `get_dsl_spec` then \
-             `execute_code`. This applies to every prompt shaped like \"build X\", \
-             \"add X\", \"scaffold X\", \"create a new model / screen / server fn\", \
-             \"wire up CRUD for X\", \"make a feature for X\", or \"build me an app\". \
-             The DSL covers both server-fn-backed CRUD (Resource, Store, ServerFn) and \
-             client-only state (ClientStore + Screen template `kind: client_crud` — \
-             use this for drafts, in-memory selections, or any ephemeral state; no \
-             server fn required). There is no \"too small\" case — single primitives \
-             work too. The `Resource` primitive emits a complete \
-             model+store+server-fn+screens slice in one entry — prefer it for any new \
-             server-backed resource. Per-primitive tools (`create_component`, \
-             `create_route`, `create_server_fn`) exist for narrow agent workflows and \
-             are NOT the default — prefer the DSL. \
-             \
-             Other routing: \
-             - Runtime / behavior questions (panics, crashes, renders, signal writes, \
-               navigations, \"what just happened\", \"was there a panic\") -> runtime_events. \
-             - Server-fn latency, error rates, in-flight calls -> server_fn_summary. \
-             - \"What routes / components / server fns exist\" -> route_map, project_index, \
-               server_fn_call_graph, project_tour. \
-             - Static code analysis (dead code, prop drilling, signal/props lints, \
-               asset audit, feature flags, OpenAPI spec) -> dead_components, prop_drill, \
-               signal_lint, props_lint, asset_audit, audit_feature_flags, openapi_spec, \
-               explain_signal_graph. Whole-project lint pass -> lint_project. \
-             - Reading Dioxus 0.7 docs / canonical examples -> search_docs, find_example. \
-             - RSX correctness check -> check_rsx. \
-             - UI primitive asks (\"add a button\", \"build a dialog\", \"a date \
-               picker\", \"a sidebar\", etc.): call `get_dsl_spec { sections: \
-               [components] }` to see the 45-entry official Dioxus component \
-               catalog and prefer `dx components add <name>` over scaffolding a \
-               custom `Component:` for widgets that already exist. \
-             \
-             Probe note: runtime_events and server_fn_summary read the JSONL log written \
-             by the dioxus-mcp-probe crate. If the cwd isn't the Dioxus app, pass \
-             `project_root`. If the user references \"the last run\" or a specific log, \
-             pass `log_path` and widen `since` (default cutoff is 5 min)."
+                "Dioxus 0.7 project assistant. When a question maps to a tool, call it.\n\
+                 \n\
+                 Routing:\n\
+                 - Scaffold anything (model / component / screen / server fn / CRUD slice / \
+                   whole app): `get_dsl_spec` then `execute_code`. Use `Resource` for a full \
+                   server-backed slice; `ClientStore` + `kind: client_crud` for in-memory \
+                   state. UI primitive widgets: `list_components` to scan the catalog, then \
+                   `dx components add <name>` from the project root.\n\
+                 - Runtime behavior (panics, renders, signal writes, navigations) -> \
+                   runtime_events. Server-fn latency / errors -> server_fn_summary.\n\
+                 - Project structure (what routes / components / server fns exist) -> \
+                   route_map, project_index, project_tour, server_fn_call_graph.\n\
+                 - Static analysis (dead code, prop drilling, signal/props lints, asset \
+                   audit, feature flags, OpenAPI) -> dead_components, prop_drill, \
+                   signal_lint, props_lint, asset_audit, audit_feature_flags, openapi_spec, \
+                   explain_signal_graph, lint_project.\n\
+                 - Docs / canonical examples -> search_docs, find_example. RSX check -> \
+                   check_rsx. UI widgets (button / dialog / date-picker / etc.) -> \
+                   `get_dsl_spec { sections: [components] }`, then `dx components add`.\n\
+                 \n\
+                 Probe note: runtime_events + server_fn_summary read a JSONL log written \
+                 by the dioxus-mcp-probe crate. Pass `project_root` when cwd isn't the app; \
+                 widen `since` (default 5 min) for older runs."
                     .to_string(),
             )
     }

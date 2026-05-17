@@ -90,6 +90,11 @@ pub async fn execute_code(
     // the rest of the pipeline (preflight, dry_run plan, apply_removes) sees
     // the same shape it would if the user had written the removes themselves.
     synthesize_replace_route_removes(&mut doc, &crate_root);
+    // `prune_dx_new_starter: true` synthesizes removes for `dx new`'s
+    // baseline demo (Hero component + Home variant). Same shape as
+    // synthesize_replace_route_removes — keeps doc.remove the single source
+    // of truth feeding preflight / dry_run / apply_removes.
+    synthesize_dx_new_starter_removes(&mut doc, &crate_root);
 
     // Pre-compute the set of leaf files `remove:` will delete. Preflight
     // collision checks skip these so a single doc can "remove demo Hero;
@@ -291,6 +296,18 @@ pub async fn execute_code(
         }
         let cb = checkbox_field_for_store(&cs.name);
         let r = generate_client_store(&crate_root, cs, &model_names_for_imports, cb.as_deref())?;
+        merge(&mut result, r);
+    }
+
+    for vs in &doc.view_states {
+        if skip_or_record(
+            &skip,
+            &mut result,
+            leaf_for(&crate_root, "src/state", &vs.name),
+        ) {
+            continue;
+        }
+        let r = generate_view_state(&crate_root, vs)?;
         merge(&mut result, r);
     }
 
@@ -767,56 +784,65 @@ fn surface_feature_gap_hints(
     ));
 }
 
-/// Names in the official Dioxus 0.7 component catalog (`dx components add
-/// <name>`). Kept in sync with the catalog block in `specs.rs` —
-/// `spec_components_catalog_matches_install_set` (in tests.rs) wires the
-/// two sources together so this list can't silently drift.
-pub(super) const DX_COMPONENT_CATALOG: &[&str] = &[
-    "accordion",
-    "alert_dialog",
-    "aspect_ratio",
-    "avatar",
-    "badge",
-    "button",
-    "calendar",
-    "card",
-    "checkbox",
-    "collapsible",
-    "color_picker",
-    "combobox",
-    "context_menu",
-    "date_picker",
-    "dialog",
-    "drag_and_drop_list",
-    "dropdown_menu",
-    "form",
-    "hover_card",
-    "input",
-    "item",
-    "label",
-    "menubar",
-    "navbar",
-    "pagination",
-    "popover",
-    "progress",
-    "radio_group",
-    "scroll_area",
-    "select",
-    "separator",
-    "sheet",
-    "sidebar",
-    "skeleton",
-    "slider",
-    "switch",
-    "tabs",
-    "textarea",
-    "toast",
-    "toggle",
-    "toggle_group",
-    "toolbar",
-    "tooltip",
-    "virtual_list",
+/// Names + one-line descriptions for the official Dioxus 0.7 component
+/// catalog (`dx components add <name>`). Kept in sync with the catalog block
+/// in `specs.rs` — `dx_components_catalog_matches_spec_block` (in tests.rs)
+/// wires the two sources together so they can't silently drift. The
+/// `list_components` tool returns these entries as a dedicated, smaller
+/// payload so agents can pull just the catalog without the rest of the spec.
+pub const DX_COMPONENT_CATALOG_ENTRIES: &[(&str, &str)] = &[
+    ("accordion", "An accordion component for displaying collapsible content sections."),
+    ("alert_dialog", "An alert dialog component for displaying important messages and requiring user confirmation."),
+    ("aspect_ratio", "An aspect ratio component for maintaining a consistent width-to-height ratio of an element."),
+    ("avatar", "An avatar component for displaying user profile images or initials."),
+    ("badge", "A small label to display status or categorization."),
+    ("button", "A button component for triggering actions or events when clicked."),
+    ("calendar", "A calendar grid component for selecting dates."),
+    ("card", "A simple card component."),
+    ("checkbox", "A togglable checkbox component."),
+    ("collapsible", "A collapsible component for showing and hiding content sections."),
+    ("color_picker", "Allows selecting a color using a variety of input methods."),
+    ("combobox", "An autocomplete input + popover for picking a value from a filterable list of options."),
+    ("context_menu", "A context menu component for displaying a list of actions or options after right-clicking an area."),
+    ("date_picker", "A date picker component for selecting or inputting dates."),
+    ("dialog", "A dialog component for displaying modal content."),
+    ("drag_and_drop_list", "A vertically sortable list supporting drag-and-drop, touch, or keyboard input."),
+    ("dropdown_menu", "A dropdown menu component for selecting options from a list."),
+    ("form", "A form component for collecting user input."),
+    ("hover_card", "A hover card component for displaying additional information on hover."),
+    ("input", "An input field component for user text entry."),
+    ("item", "A component for displaying content."),
+    ("label", "An accessible label component for form elements."),
+    ("menubar", "A menubar component for a collection of menu items."),
+    ("navbar", "A navbar component for navigation between pages."),
+    ("pagination", "Navigation controls for paged content."),
+    ("popover", "A popover component for collapsible content."),
+    ("progress", "An accessible progress-bar indicator."),
+    ("radio_group", "A group of radio buttons for selecting one option from a set."),
+    ("scroll_area", "A scrollable area component."),
+    ("select", "A select dropdown component with typeahead support."),
+    ("separator", "A visual separator between different sections of the page."),
+    ("sheet", "A sheet component as an edge panel that complements the main content."),
+    ("sidebar", "A sidebar component as a vertical panel fixed to the screen edge for quick access to different sections."),
+    ("skeleton", "A placeholder component for all loading elements."),
+    ("slider", "An accessible slider component."),
+    ("switch", "A togglable switch component."),
+    ("tabs", "A tabbed interface component."),
+    ("textarea", "A textarea component for multi-line text input."),
+    ("toast", "A toast notification component."),
+    ("toggle", "A simple toggle button component."),
+    ("toggle_group", "A group of toggle buttons for selecting one or more options from a set."),
+    ("toolbar", "A toolbar component for grouping related inputs."),
+    ("tooltip", "A tooltip component for additional information on hover or focus."),
+    ("virtual_list", "A virtualized list component for large datasets."),
 ];
+
+/// Names-only projection of [`DX_COMPONENT_CATALOG_ENTRIES`]. Used by
+/// validation paths that only care whether a `dx_components:` entry is
+/// catalog-known.
+pub(super) fn dx_component_names() -> impl Iterator<Item = &'static str> {
+    DX_COMPONENT_CATALOG_ENTRIES.iter().map(|(n, _)| *n)
+}
 
 /// Validate `doc.dx_components` against the catalog. Returns the deduped
 /// snake-case-normalized list of valid names; typos and unknown entries are
@@ -825,7 +851,7 @@ fn validate_dx_components(doc: &DslDoc, result: &mut ScaffoldResult) -> Vec<Stri
     if doc.dx_components.is_empty() {
         return Vec::new();
     }
-    let catalog: BTreeSet<&str> = DX_COMPONENT_CATALOG.iter().copied().collect();
+    let catalog: BTreeSet<&str> = dx_component_names().collect();
     let mut valid: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for raw in &doc.dx_components {

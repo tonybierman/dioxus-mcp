@@ -11,7 +11,7 @@ use super::super::render::*;
 use super::super::templates::*;
 use super::super::types::*;
 use super::super::util::merge;
-use super::screen_templates::render_screen_template;
+use super::screen_templates::{render_screen_template, vanilla_css_starter_for};
 
 /// Render a screen's source body without writing. Shared between
 /// `generate_screen` (which writes) and `plan_dsl` (which populates dry-run
@@ -73,6 +73,26 @@ pub(crate) async fn generate_screen(
     if let Some(w) = &wrap_pascal {
         r.next_steps.push(format!(
             "ensure `{w}` is exported from `crate::components` (e.g. emitted by a `protected_routes` entry or a hand-written component)"
+        ));
+    }
+    // `styled: vanilla-css` ships a starter CSS file alongside the screen so
+    // the agent isn't staring at a blank `main.css` after scaffolding. The
+    // class names in the sheet match the rsx! the template emits. Skipped
+    // silently if the target already exists — we never overwrite.
+    if let Some(t) = sc.template.as_ref()
+        && let Some(css_body) = vanilla_css_starter_for(t, &snake)
+    {
+        let css_dir = crate_root.join("assets");
+        let css_path = css_dir.join(format!("{snake}.css"));
+        if !css_path.exists() {
+            std::fs::create_dir_all(&css_dir).map_err(|e| e.to_string())?;
+            std::fs::write(&css_path, css_body).map_err(|e| e.to_string())?;
+            r.files_created.push(css_path.clone());
+        }
+        r.next_steps.push(format!(
+            "mount the starter stylesheet in your App body: \
+             `document::Stylesheet {{ href: asset!(\"/assets/{snake}.css\") }}` \
+             (file at `assets/{snake}.css`)"
         ));
     }
     let route = scaffold::create_route(

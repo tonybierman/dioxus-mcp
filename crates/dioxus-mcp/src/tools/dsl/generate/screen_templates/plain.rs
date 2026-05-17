@@ -196,6 +196,7 @@ mod tests {
             class: Some("page-todo".into()),
             body: None,
             styled: None,
+            compose_style: None,
             crud: None,
         };
         let body = render_screen_template(
@@ -240,6 +241,7 @@ mod tests {
             class: None,
             body: None,
             styled: None,
+            compose_style: None,
             crud: None,
         };
         let err = render_screen_template(
@@ -277,6 +279,7 @@ mod tests {
             class: None,
             body: Some("empty".into()),
             styled: None,
+            compose_style: None,
             crud: None,
         };
         let body = render_screen_template(
@@ -340,6 +343,7 @@ mod tests {
             class: None,
             body: Some("nope".into()),
             styled: None,
+            compose_style: None,
             crud: None,
         };
         let err = render_screen_template(

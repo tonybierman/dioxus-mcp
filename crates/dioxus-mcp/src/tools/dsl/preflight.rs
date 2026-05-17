@@ -145,6 +145,21 @@ fn preflight_inner(
             ));
         }
     }
+    // ViewState shares src/state/{snake}.rs with Store + ClientStore.
+    // Duplicate names across any of them silently overwrite, so reject early.
+    let mut view_state_names: BTreeSet<String> = BTreeSet::new();
+    for vs in &doc.view_states {
+        let snake = vs.name.to_snake_case();
+        if !view_state_names.insert(snake.clone()) {
+            return Err(format!("duplicate view_state name: {}", vs.name));
+        }
+        if store_names.contains(&snake) || client_store_names.contains(&snake) {
+            return Err(format!(
+                "view_state {:?} collides with an existing store / client_store of the same name — all three write to src/state/{snake}.rs; rename one",
+                vs.name
+            ));
+        }
+    }
     for s in &doc.session_states {
         if !sess_names.insert(s.name.to_snake_case()) {
             return Err(format!("duplicate session_state name: {}", s.name));

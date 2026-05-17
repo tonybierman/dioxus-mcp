@@ -46,6 +46,27 @@ pub(super) const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #       To opt out, omit `client_stores:` and call `provide_{snake}()`
 #       yourself, or strip the inserted line after the run.
 #
+# Pruning `dx new` starter boilerplate:
+#   Pass top-level `prune_dx_new_starter: true` (sibling of `screens:`, etc.)
+#   to auto-remove the demo Hero component + Home route that ship with `dx
+#   new`. Targets that aren't present are silent no-ops, so the flag is safe
+#   to leave on across iterative re-runs. Equivalent to writing:
+#     remove:
+#       - {kind: remove_component, component: Hero}
+#       - {kind: remove_route, variant: Home}
+#   …but without forcing you to hand-author the entries when the doc's
+#   intent is just "start clean from the dx new template."
+#
+# Auto-router bootstrap:
+#   If the doc declares any `screens:` / `login_screens:` entry and no
+#   `#[derive(Routable)]` enum exists anywhere under src/, execute_code
+#   auto-creates `src/router.rs` (seeded with every declared route) and adds
+#   `pub mod router;` to the crate root. This makes `dx new` → execute_code
+#   work in one call — DO NOT pre-write a Routable enum or hand-roll a
+#   `router.rs` file. The bootstrap also surfaces a `next_step` reminding you
+#   to mount it (`Router::<crate::router::Route> {}` in your App body), and
+#   leaves the existing enum untouched on re-runs.
+#
 # Picking the right tool for CRUD-like UIs:
 #   - Client-only / in-memory apps (todo lists, drafts, ephemeral selections):
 #     use a `client_stores:` entry + a `screens:` entry with
@@ -143,7 +164,7 @@ pub(super) const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 "#;
 
 pub(super) const CORE_MODEL: &str = r#"  Model:
-    description: A shared data type with serde derives. Generates src/model/{snake}.rs and exposes the struct as crate::model::{Pascal}. Server fns can name it in their return_type (e.g. `Vec<Product>`); forthcoming `store:` and `resource:` primitives will consume it directly. Project must depend on `serde = { version = "1", features = ["derive"] }`.
+    description: "A shared data type with serde derives. Generates src/model/{snake}.rs and exposes the struct as crate::model::{Pascal}. Server fns can name it in their return_type (e.g. `Vec<Product>`); forthcoming `store:` and `resource:` primitives will consume it directly. Project must depend on `serde = { version = \"1\", features = [\"derive\"] }`. AUTO-DEFAULT: when a `client_crud` Screen references this model (directly or via its `client_stores:` entry), `Default` is auto-added to `derives:` before scaffolding — the `client_crud` body uses `..Default::default()` on the push call. The patch covers both in-doc models and existing on-disk model files at `src/model/{snake}.rs`. You don't need to add `Default` yourself."
     fields:
       - {name: name, type: string, required: true}
       - {name: fields, type: "ModelField[] — each {name, type, optional?}", required: true}
@@ -189,7 +210,9 @@ pub(super) const CORE_SCREEN: &str = r#"  Screen:
       - {name: item_type, type: "Rust item type (Model in this doc or a built-in like String)", required: true}
       - {name: label_field, type: "Field on the item the add input writes / the row label reads", required: true}
       - {name: checkbox_field, type: "Optional bool field rendered as a per-row checkbox", required: false}
-      - {name: styled, type: "Optional design-system preset. `tailwind` emits Tailwind-classed defaults (form, input, list, buttons, checkbox). Omit for the historical unstyled class names.", required: false}
+      - {name: styled, type: "Optional design-system preset. `tailwind` emits Tailwind-classed defaults (form, input, list, buttons, checkbox). `vanilla-css` emits semantic class names (`.compose`, `.list`, `.row`, `.field`, `.toggle`, `.delete`, `.title`, `.label`) AND writes a starter `assets/{snake}.css` stylesheet so you don't start from a blank file — mount it via `document::Stylesheet { href: asset!(\"/assets/{snake}.css\") }` in App. Omit for the historical unstyled class names.", required: false}
+      - {name: compose_style, type: "Shape of the add-form's submit affordance. `submit_button` (default) keeps the visible `Add` button. `enter_only` drops the button so the form is submitted only by pressing Enter — pick this for TodoMVC-shaped apps where the row UX is type-and-press-Enter.", required: false}
+    client_crud_auto_default: "When this Screen kind is used, `Default` is auto-added to the referenced Model's `derives:` (whether the Model is declared in this doc or already on disk under `src/model/{snake}.rs`) — the generated push uses `..Default::default()`. Don't pre-emptively add `Default` yourself."
     example:
       screens:
         - name: HomeScreen
@@ -253,7 +276,7 @@ pub(super) const CORE_STORE: &str = r#"  Store:
 "#;
 
 pub(super) const CORE_CLIENT_STORE: &str = r#"  ClientStore:
-    description: "A typed client-side reactive list. Generates `src/state/{snake}.rs` (no server feature gate) exposing a `Store<{Pascal}>`-backed store via context using Dioxus 0.7's canonical `#[derive(Store)]` + `#[store]` extension methods for path-isolated reactivity — call `provide_{snake}()` once in your root component and `use_{snake}()` from any descendant to get a `Store<{Pascal}>`. Emits `push`, `clear`, and (when `id_field` is set) `remove_by_id` and `update_by_id` helpers via the `#[store] impl` extension trait. With `auto_id: true` the store also owns a monotonic id allocator and exposes `push_new(item)` that assigns the next id before pushing — call sites can drop the id field from the struct literal. When a companion `client_crud` Screen sets `checkbox_field`, the store also gains a `clear_{checkbox_field}` helper that drops every item with that bool set — so call sites can implement \"Clear completed\" without poking at `items().write().retain(...)`. Pair with a Screen template `kind: client_crud` for one-call todo-style apps. NO server fn round-trip — ideal for in-memory state, todo lists, drafts, ephemeral UI selections."
+    description: "A typed client-side reactive list. Generates `src/state/{snake}.rs` (no server feature gate) exposing a `Store<{Pascal}>`-backed store via context using Dioxus 0.7's canonical `#[derive(Store)]` + `#[store]` extension methods for path-isolated reactivity — call `provide_{snake}()` once in your root component and `use_{snake}()` from any descendant to get a `Store<{Pascal}>`. Emits `push`, `clear`, and (when `id_field` is set) `remove_by_id` and `update_by_id` helpers via the `#[store] impl` extension trait. With `auto_id: true` the store also owns a monotonic id allocator and exposes `push_new(item)` that assigns the next id before pushing — call sites can drop the id field from the struct literal. When a companion `client_crud` Screen sets `checkbox_field`, the store also gains three derived helpers keyed off that field: `clear_{field}(&mut self)` (drops every item where the bool is set — the canonical \"Clear completed\" action), `remaining(&self) -> usize` (count of items where the bool is false), and `any_{field}(&self) -> bool` (CTA gating helper). Call them straight from `rsx!` (`store.remaining()`, `if store.any_done() { ... }`) — Dioxus tracks the underlying `items()` signal automatically. Pair with a Screen template `kind: client_crud` for one-call todo-style apps. NO server fn round-trip — ideal for in-memory state, todo lists, drafts, ephemeral UI selections."
     fields:
       - {name: name, type: string, required: true}
       - {name: item_type, type: "Rust type (Model in this doc OR a built-in like String / i32). When it matches a Model name, the file emits `use crate::model::{ItemType};`.", required: true}
@@ -261,6 +284,15 @@ pub(super) const CORE_CLIENT_STORE: &str = r#"  ClientStore:
       - {name: id_field, type: "Field name to use for remove_by_id / update_by_id helpers (e.g. `id`). Omit for primitive item types.", required: false}
       - {name: id_type, type: "Rust type of the id field (default `i64`)", required: false}
       - {name: auto_id, type: "bool (default false) — when true the store owns the id allocator and exposes `push_new(item)`. Requires `id_field` and a primitive-integer `id_type`. The companion client_crud screen template detects this and stops emitting its local `next_id` signal.", required: false}
+    iteration_patterns: |
+      Stock iteration (use this — no clones, no temporaries):
+        for item in store.items().read().iter() { ... }
+      Inline-filter iteration (read the signal once, filter on the borrow):
+        for item in store.items().read().iter().filter(|t| !t.done) { ... }
+      DO NOT write `store.items().read().clone()` + `.into_iter()` or
+      `.cloned().collect::<Vec<_>>()` to filter — that double-clones every
+      item every render. `.iter().filter(...)` on the read guard is what
+      you want.
     example:
       models:
         - name: Todo
@@ -274,6 +306,24 @@ pub(super) const CORE_CLIENT_STORE: &str = r#"  ClientStore:
           id_field: id
           id_type: i64
           auto_id: true
+"#;
+
+pub(super) const CORE_VIEW_STATE: &str = r#"  ViewState:
+    description: "Local-but-shared view state — a filter enum, sort key, or search string — exposed as a `Signal<T>` via context. Generates `src/state/{snake}.rs` with `provide_{snake}()` (auto-spliced into your `fn App()` body) and `use_{snake}()`. When `enum_variants:` is set, the file also declares `pub enum {type} { Variant1, Variant2, ... }` with `#[derive(Clone, Copy, PartialEq, Eq, Debug)]` — variants are unit-only, so the signal hands them back by value. Use this for filter / sort / mode-style state that the rsx body AND a sibling button both touch; for state only one component reads, write `let mut foo = use_signal(|| ...);` inline. Contrast: `ClientStore` is a `Vec<T>`-shaped Store with push/remove/update helpers; `ViewState` is a single value in a Signal."
+    fields:
+      - {name: name, type: string, required: true}
+      - {name: type, type: "Rust type name. When `enum_variants:` is set, this is the auto-generated enum's name; otherwise it must already resolve (Model, scalar, or imported type).", required: true}
+      - {name: initial, type: "Rust expression for the starting value (e.g. `Filter::All`, `String::new()`, `0i32`).", required: true}
+      - {name: enum_variants, type: "string[] — when present, generates `pub enum {type} { ... }` with these unit variants. Names are PascalCase-normalized.", required: false}
+    example:
+      view_states:
+        - name: TodoFilter
+          type: TodoFilter
+          initial: "TodoFilter::All"
+          enum_variants: [All, Active, Done]
+        - name: SearchQuery
+          type: String
+          initial: "String::new()"
 "#;
 
 pub(super) const CORE_RESOURCE: &str = r#"  Resource:

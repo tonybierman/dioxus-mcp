@@ -216,10 +216,11 @@ mod tests {
 
     #[test]
     fn client_store_with_checkbox_field_emits_clear_helper() {
-        // TODO14: when a companion client_crud Screen sets `checkbox_field`,
-        // the store's #[store(pub)] impl gains a `clear_{field}` helper so
-        // call sites can implement "Clear completed" without reaching into
-        // items().write().retain(...).
+        // When a companion client_crud Screen sets `checkbox_field`, the
+        // store's #[store(pub)] impl gains a `clear_{field}` helper plus the
+        // matching read-side derived helpers (`remaining`, `any_{field}`) so
+        // call sites can wire "Clear completed", remaining counts, and CTA
+        // gating without reaching into items().read().iter() at every render.
         let dir = tempfile::TempDir::new().unwrap();
         let cs = DslClientStore {
             name: "TodoStore".into(),
@@ -243,6 +244,22 @@ mod tests {
         assert!(
             body.contains("self.items().write().retain(|x| !x.done);"),
             "clear_done body must drop items where `done` is true, got:\n{body}"
+        );
+        assert!(
+            body.contains("fn remaining(&self) -> usize"),
+            "expected `fn remaining` read helper, got:\n{body}"
+        );
+        assert!(
+            body.contains("filter(|x| !x.done).count()"),
+            "remaining body must count items where `done` is false, got:\n{body}"
+        );
+        assert!(
+            body.contains("fn any_done(&self) -> bool"),
+            "expected `fn any_done` read helper, got:\n{body}"
+        );
+        assert!(
+            body.contains("iter().any(|x| x.done)"),
+            "any_done body must check at least one item with `done` set, got:\n{body}"
         );
     }
 

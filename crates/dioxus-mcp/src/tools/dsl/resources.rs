@@ -406,6 +406,7 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
                 class: None,
                 body: None,
                 styled: None,
+                compose_style: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -430,6 +431,7 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
                 class: None,
                 body: None,
                 styled: None,
+                compose_style: None,
                 crud: Some(crud.clone()),
             }),
             route_params: Vec::new(),
@@ -452,6 +454,7 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
                 class: None,
                 body: None,
                 styled: None,
+                compose_style: None,
                 crud: Some(crud),
             }),
             route_params: vec![("id".to_string(), id_type.clone())],
@@ -538,7 +541,7 @@ pub(super) async fn generate_synth_server_fn(
     )?;
     std::fs::write(&target, body).map_err(|e| e.to_string())?;
     let mod_rs = server_dir.join("mod.rs");
-    let upsert = upsert_mod_entry(&mod_rs, &snake, None, true)?;
+    let upsert = upsert_mod_entry(&mod_rs, &snake, None)?;
     let (files_created, files_modified) = match upsert {
         ModUpsert::Created => (vec![target, mod_rs], vec![]),
         ModUpsert::Modified => (vec![target], vec![mod_rs]),

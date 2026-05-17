@@ -18,6 +18,7 @@ mod signal;
 mod socket;
 mod store;
 mod table;
+mod view_state;
 
 pub(crate) use feed::*;
 pub(crate) use form::*;
@@ -33,6 +34,7 @@ pub(crate) use signal::*;
 pub(crate) use socket::*;
 pub(crate) use store::*;
 pub(crate) use table::*;
+pub(crate) use view_state::*;
 
 /// Default initial-value expression for a form field, keyed off the DSL `ty`
 /// keyword. Shared between `generate_form` and the `resource_form` template.
