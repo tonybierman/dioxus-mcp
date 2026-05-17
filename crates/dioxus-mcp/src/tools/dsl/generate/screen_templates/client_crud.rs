@@ -406,7 +406,9 @@ fn build_row_component(
         out.push_str(&format!(
             "                aria_label: \"Toggle {{{item_prop_snake}.{label_field}}}\",\n"
         ));
-        out.push_str(&format!("                checked: {item_prop_snake}.{cb},\n"));
+        out.push_str(&format!(
+            "                checked: {item_prop_snake}.{cb},\n"
+        ));
         if id_is_copy {
             out.push_str(&format!(
                 "                onchange: move |_| store.update_by_id({item_prop_snake}.{id_field}, |t| t.{cb} = !t.{cb}),\n"

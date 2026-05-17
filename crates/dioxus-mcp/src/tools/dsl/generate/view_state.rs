@@ -44,10 +44,7 @@ pub(crate) fn generate_view_state(
     let pascal = v.name.to_pascal_case();
     let ty = v.ty.trim().to_string();
     if ty.is_empty() {
-        return Err(format!(
-            "view_state {:?}: `type` is required",
-            v.name
-        ));
+        return Err(format!("view_state {:?}: `type` is required", v.name));
     }
     let emit_enum = !v.enum_variants.is_empty();
     if emit_enum {

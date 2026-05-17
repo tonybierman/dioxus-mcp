@@ -205,7 +205,8 @@ mod tests {
     fn cfg_attr_emitted_for_fresh_file() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("mod.rs");
-        let r = upsert_mod_entry(&p, "product_store", Some("#[cfg(feature = \"server\")]")).unwrap();
+        let r =
+            upsert_mod_entry(&p, "product_store", Some("#[cfg(feature = \"server\")]")).unwrap();
         assert_eq!(r, ModUpsert::Created);
         let body = std::fs::read_to_string(&p).unwrap();
         assert_eq!(

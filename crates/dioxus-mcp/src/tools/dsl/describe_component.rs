@@ -127,7 +127,13 @@ pub async fn describe_component(
         }
     };
 
-    describe_from_dir(name, &description, &source, source_kind, upstream.as_deref())
+    describe_from_dir(
+        name,
+        &description,
+        &source,
+        source_kind,
+        upstream.as_deref(),
+    )
 }
 
 /// Parse `<dir>/component.rs` and `<dir>/docs.md`, optionally resolving the
@@ -241,10 +247,10 @@ fn extract_component(file: &syn::File) -> Result<ParsedComponent, String> {
             }
             syn::Item::Struct(s) if matches!(s.vis, syn::Visibility::Public(_)) => {
                 let name = s.ident.to_string();
-                if name.ends_with("Props") {
-                    if let Some(props) = struct_to_props(s) {
-                        extra_props_structs.insert(name, props);
-                    }
+                if name.ends_with("Props")
+                    && let Some(props) = struct_to_props(s)
+                {
+                    extra_props_structs.insert(name, props);
                 }
             }
             syn::Item::Use(u) => {
@@ -253,7 +259,8 @@ fn extract_component(file: &syn::File) -> Result<ParsedComponent, String> {
             _ => {}
         }
     }
-    let component_fn = component_fn.ok_or_else(|| "no `#[component]` fn in this file".to_string())?;
+    let component_fn =
+        component_fn.ok_or_else(|| "no `#[component]` fn in this file".to_string())?;
     let signature = format_fn_sig(&component_fn);
     let (props, primitive_type) = extract_props(&component_fn);
 
@@ -584,7 +591,11 @@ pub fn Button(
         assert!(r.extends.iter().any(|e| e == "GlobalAttributes"));
         assert!(r.extends.iter().any(|e| e == "button"));
         // variants
-        let v = r.variants.iter().find(|v| v.name == "ButtonVariant").unwrap();
+        let v = r
+            .variants
+            .iter()
+            .find(|v| v.name == "ButtonVariant")
+            .unwrap();
         assert_eq!(v.default.as_deref(), Some("Primary"));
         assert!(v.variants.contains(&"Primary".into()));
         // doc string captured
@@ -629,10 +640,19 @@ pub fn Combobox(props: ComboboxProps) -> Element {
         assert!(pnames.contains(&"value"));
         assert!(pnames.contains(&"on_value_change"));
         // event handler detected via Callback<…>
-        let ovc = prim.props.iter().find(|p| p.name == "on_value_change").unwrap();
+        let ovc = prim
+            .props
+            .iter()
+            .find(|p| p.name == "on_value_change")
+            .unwrap();
         assert!(ovc.event_handler);
         // default expression captured verbatim
-        assert!(ovc.default.as_deref().unwrap_or("").contains("Callback::new"));
+        assert!(
+            ovc.default
+                .as_deref()
+                .unwrap_or("")
+                .contains("Callback::new")
+        );
     }
 
     #[test]

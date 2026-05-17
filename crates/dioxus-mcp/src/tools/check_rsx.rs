@@ -252,8 +252,7 @@ fn walk_lint(
         if !bad.is_empty() {
             let mut j = 0;
             while j + 1 < tokens.len() {
-                if let (TokenTree::Ident(id), TokenTree::Punct(p)) =
-                    (&tokens[j], &tokens[j + 1])
+                if let (TokenTree::Ident(id), TokenTree::Punct(p)) = (&tokens[j], &tokens[j + 1])
                     && p.as_char() == ':'
                 {
                     let name = id.to_string();

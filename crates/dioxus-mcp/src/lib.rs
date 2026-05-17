@@ -142,11 +142,7 @@ fn record_session_start(project_root: &std::path::Path, transport: &Transport) {
         "version": env!("CARGO_PKG_VERSION"),
     });
     let line = format!("{record}\n");
-    match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    match OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(line.as_bytes()) {
                 tracing::debug!(error=%e, path=%log_path.display(), "session log: write failed");

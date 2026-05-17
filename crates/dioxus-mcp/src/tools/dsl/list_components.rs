@@ -128,9 +128,18 @@ mod tests {
         .await
         .unwrap();
         let names: Vec<&str> = r.components.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"calendar"), "expected calendar (desc mentions dates), got: {names:?}");
-        assert!(names.contains(&"date_picker"), "expected date_picker (name match), got: {names:?}");
-        assert!(!names.contains(&"button"), "button should not match 'date': {names:?}");
+        assert!(
+            names.contains(&"calendar"),
+            "expected calendar (desc mentions dates), got: {names:?}"
+        );
+        assert!(
+            names.contains(&"date_picker"),
+            "expected date_picker (name match), got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"button"),
+            "button should not match 'date': {names:?}"
+        );
     }
 
     #[tokio::test]
@@ -145,6 +154,9 @@ mod tests {
             .iter()
             .find(|c| c.name == "dropdown_menu")
             .expect("dropdown_menu must be returned");
-        assert_eq!(entry.import, "use crate::components::dropdown_menu::DropdownMenu;");
+        assert_eq!(
+            entry.import,
+            "use crate::components::dropdown_menu::DropdownMenu;"
+        );
     }
 }

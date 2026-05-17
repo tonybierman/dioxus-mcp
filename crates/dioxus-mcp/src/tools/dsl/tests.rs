@@ -863,15 +863,11 @@ fn dx_components_catalog_matches_spec_block() {
         .expect("Components.prop_hints must be a mapping");
     let spec_descs: std::collections::BTreeMap<String, String> = components
         .iter()
-        .filter_map(|(k, v)| {
-            Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
-        })
+        .filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string())))
         .collect();
     let spec_hints: std::collections::BTreeMap<String, String> = hints
         .iter()
-        .filter_map(|(k, v)| {
-            Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
-        })
+        .filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string())))
         .collect();
     let code_descs: std::collections::BTreeMap<String, String> = DX_COMPONENT_CATALOG_ENTRIES
         .iter()
@@ -3888,7 +3884,10 @@ fn client_crud_styled_vanilla_css_emits_semantic_classes() {
     );
     // Field, toggle, delete.
     assert!(body.contains("class: \"field\""), "missing .field:\n{body}");
-    assert!(body.contains("class: \"toggle\""), "missing .toggle:\n{body}");
+    assert!(
+        body.contains("class: \"toggle\""),
+        "missing .toggle:\n{body}"
+    );
     assert!(
         body.contains("class: \"delete\""),
         "missing .delete:\n{body}"
@@ -3897,8 +3896,8 @@ fn client_crud_styled_vanilla_css_emits_semantic_classes() {
 
 #[tokio::test]
 async fn client_crud_styled_vanilla_css_emits_starter_stylesheet() {
-    use crate::tools::dsl::execute_code;
     use crate::tools::dsl::ExecuteCodeParams;
+    use crate::tools::dsl::execute_code;
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -3966,7 +3965,10 @@ screens:
     let body = std::fs::read_to_string(&css).unwrap();
     // Spot-check the contract: the sheet keys off `.screen.{snake}` and
     // styles each of the semantic class names the rsx! emits.
-    assert!(body.contains(".screen.todo_screen"), "missing root selector:\n{body}");
+    assert!(
+        body.contains(".screen.todo_screen"),
+        "missing root selector:\n{body}"
+    );
     assert!(body.contains(".compose"), "missing .compose:\n{body}");
     assert!(body.contains(".row"), "missing .row:\n{body}");
     assert!(body.contains(".delete"), "missing .delete:\n{body}");
@@ -4104,8 +4106,8 @@ fn client_crud_compose_style_default_keeps_submit_button() {
 
 #[tokio::test]
 async fn view_state_with_enum_variants_generates_enum_and_wires_app() {
-    use crate::tools::dsl::execute_code;
     use crate::tools::dsl::ExecuteCodeParams;
+    use crate::tools::dsl::execute_code;
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -4178,8 +4180,8 @@ view_states:
 
 #[tokio::test]
 async fn prune_dx_new_starter_removes_hero_and_home_when_present() {
-    use crate::tools::dsl::execute_code;
     use crate::tools::dsl::ExecuteCodeParams;
+    use crate::tools::dsl::execute_code;
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -4276,8 +4278,8 @@ screens:
 
 #[tokio::test]
 async fn prune_dx_new_starter_is_silent_noop_when_targets_absent() {
-    use crate::tools::dsl::execute_code;
     use crate::tools::dsl::ExecuteCodeParams;
+    use crate::tools::dsl::execute_code;
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -4287,7 +4289,11 @@ async fn prune_dx_new_starter_is_silent_noop_when_targets_absent() {
     .unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
     // Pristine project — no Hero file, no Routable yet.
-    std::fs::write(root.join("src/main.rs"), "use dioxus::prelude::*;\nfn main() {}\n").unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "use dioxus::prelude::*;\nfn main() {}\n",
+    )
+    .unwrap();
 
     let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
     let r = execute_code(
