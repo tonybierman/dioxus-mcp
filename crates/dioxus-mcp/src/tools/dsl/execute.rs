@@ -784,64 +784,69 @@ fn surface_feature_gap_hints(
     ));
 }
 
-/// Names + one-line descriptions for the official Dioxus 0.7 component
-/// catalog (`dx components add <name>`). Kept in sync with the catalog block
-/// in `specs.rs` — `dx_components_catalog_matches_spec_block` (in tests.rs)
-/// wires the two sources together so they can't silently drift. The
-/// `list_components` tool returns these entries as a dedicated, smaller
+/// Names + one-line descriptions + prop/event surface hints for the official
+/// Dioxus 0.7 component catalog (`dx components add <name>`). Kept in sync
+/// with the catalog block in `specs.rs` — `dx_components_catalog_matches_spec_block`
+/// (in tests.rs) wires the two sources together so they can't silently drift.
+/// The `list_components` tool returns these entries as a dedicated, smaller
 /// payload so agents can pull just the catalog without the rest of the spec.
-pub const DX_COMPONENT_CATALOG_ENTRIES: &[(&str, &str)] = &[
-    ("accordion", "An accordion component for displaying collapsible content sections."),
-    ("alert_dialog", "An alert dialog component for displaying important messages and requiring user confirmation."),
-    ("aspect_ratio", "An aspect ratio component for maintaining a consistent width-to-height ratio of an element."),
-    ("avatar", "An avatar component for displaying user profile images or initials."),
-    ("badge", "A small label to display status or categorization."),
-    ("button", "A button component for triggering actions or events when clicked."),
-    ("calendar", "A calendar grid component for selecting dates."),
-    ("card", "A simple card component."),
-    ("checkbox", "A togglable checkbox component."),
-    ("collapsible", "A collapsible component for showing and hiding content sections."),
-    ("color_picker", "Allows selecting a color using a variety of input methods."),
-    ("combobox", "An autocomplete input + popover for picking a value from a filterable list of options."),
-    ("context_menu", "A context menu component for displaying a list of actions or options after right-clicking an area."),
-    ("date_picker", "A date picker component for selecting or inputting dates."),
-    ("dialog", "A dialog component for displaying modal content."),
-    ("drag_and_drop_list", "A vertically sortable list supporting drag-and-drop, touch, or keyboard input."),
-    ("dropdown_menu", "A dropdown menu component for selecting options from a list."),
-    ("form", "A form component for collecting user input."),
-    ("hover_card", "A hover card component for displaying additional information on hover."),
-    ("input", "An input field component for user text entry."),
-    ("item", "A component for displaying content."),
-    ("label", "An accessible label component for form elements."),
-    ("menubar", "A menubar component for a collection of menu items."),
-    ("navbar", "A navbar component for navigation between pages."),
-    ("pagination", "Navigation controls for paged content."),
-    ("popover", "A popover component for collapsible content."),
-    ("progress", "An accessible progress-bar indicator."),
-    ("radio_group", "A group of radio buttons for selecting one option from a set."),
-    ("scroll_area", "A scrollable area component."),
-    ("select", "A select dropdown component with typeahead support."),
-    ("separator", "A visual separator between different sections of the page."),
-    ("sheet", "A sheet component as an edge panel that complements the main content."),
-    ("sidebar", "A sidebar component as a vertical panel fixed to the screen edge for quick access to different sections."),
-    ("skeleton", "A placeholder component for all loading elements."),
-    ("slider", "An accessible slider component."),
-    ("switch", "A togglable switch component."),
-    ("tabs", "A tabbed interface component."),
-    ("textarea", "A textarea component for multi-line text input."),
-    ("toast", "A toast notification component."),
-    ("toggle", "A simple toggle button component."),
-    ("toggle_group", "A group of toggle buttons for selecting one or more options from a set."),
-    ("toolbar", "A toolbar component for grouping related inputs."),
-    ("tooltip", "A tooltip component for additional information on hover or focus."),
-    ("virtual_list", "A virtualized list component for large datasets."),
+///
+/// The third tuple slot is the prop/event surface hint — a one-liner that
+/// captures how the widget is controlled (its main props and events), enough
+/// to avoid a `describe_component` round-trip for the obvious cases. Use
+/// `describe_component <name>` to get the full surface.
+pub const DX_COMPONENT_CATALOG_ENTRIES: &[(&str, &str, &str)] = &[
+    ("accordion", "An accordion component for displaying collapsible content sections.", "forwards AccordionProps; on_change + on_trigger_click events"),
+    ("alert_dialog", "An alert dialog component for displaying important messages and requiring user confirmation.", "forwards AlertDialogRootProps; on_open_change + on_click events; modal confirm dialog"),
+    ("aspect_ratio", "An aspect ratio component for maintaining a consistent width-to-height ratio of an element.", "forwards AspectRatioProps; layout-only wrapper, no events"),
+    ("avatar", "An avatar component for displaying user profile images or initials.", "forwards AvatarProps; on_load + on_error + on_state_change; extends GlobalAttributes"),
+    ("badge", "A small label to display status or categorization.", "forwards BadgeProps; presentational, no events; extends GlobalAttributes"),
+    ("button", "A button component for triggering actions or events when clicked.", "inline props (variant: ButtonVariant, size: ButtonSize); onclick + onmousedown/up + onkeydown; extends GlobalAttributes + button"),
+    ("calendar", "A calendar grid component for selecting dates.", "forwards CalendarProps; on_date_change + on_range_change + on_view_change; extends GlobalAttributes"),
+    ("card", "A simple card component.", "inline children-only wrapper; no events; extends GlobalAttributes"),
+    ("checkbox", "A togglable checkbox component.", "forwards CheckboxProps (checked: ReadSignal<Option<CheckboxState>>, default_checked, on_checked_change)"),
+    ("collapsible", "A collapsible component for showing and hiding content sections.", "forwards CollapsibleProps; on_open_change; extends GlobalAttributes"),
+    ("color_picker", "Allows selecting a color using a variety of input methods.", "forwards ColorPickerRootProps; on_color_change + on_value_change + on_open_change + oninput; extends GlobalAttributes"),
+    ("combobox", "An autocomplete input + popover for picking a value from a filterable list of options.", "wrapper defines its own ComboboxProps<T = String>; on_value_change + on_query_change + on_open_change; extends GlobalAttributes"),
+    ("context_menu", "A context menu component for displaying a list of actions or options after right-clicking an area.", "forwards ContextMenuProps; on_open_change + on_select"),
+    ("date_picker", "A date picker component for selecting or inputting dates.", "forwards DatePickerProps; on_value_change + on_range_change + on_format_* placeholders; extends GlobalAttributes"),
+    ("dialog", "A dialog component for displaying modal content.", "forwards DialogRootProps; on_open_change; pair with DialogTrigger + DialogContent children"),
+    ("drag_and_drop_list", "A vertically sortable list supporting drag-and-drop, touch, or keyboard input.", "forwards DragAndDropListProps; pointer/drag/keyboard handlers; extends GlobalAttributes"),
+    ("dropdown_menu", "A dropdown menu component for selecting options from a list.", "forwards DropdownMenuProps; on_open_change + on_select"),
+    ("form", "A form component for collecting user input.", "inline children-only wrapper; submit handler set by caller via ..attributes"),
+    ("hover_card", "A hover card component for displaying additional information on hover.", "forwards HoverCardProps; on_open_change"),
+    ("input", "An input field component for user text entry.", "inline props with 19 DOM events forwarded individually (oninput, onchange, onfocus, onkeydown, …); extends GlobalAttributes + input"),
+    ("item", "A component for displaying content.", "inline content wrapper; onclick + onkeydown; extends GlobalAttributes + div + p"),
+    ("label", "An accessible label component for form elements.", "forwards LabelProps; accessible label for form controls; no events"),
+    ("menubar", "A menubar component for a collection of menu items.", "forwards MenubarProps; on_select"),
+    ("navbar", "A navbar component for navigation between pages.", "forwards NavbarProps; onclick + onmounted + on_select"),
+    ("pagination", "Navigation controls for paged content.", "forwards PaginationLinkProps; onclick + onmousedown/up; extends GlobalAttributes + a"),
+    ("popover", "A popover component for collapsible content.", "forwards PopoverRootProps; on_open_change"),
+    ("progress", "An accessible progress-bar indicator.", "forwards ProgressProps; presentational; value prop drives the bar"),
+    ("radio_group", "A group of radio buttons for selecting one option from a set.", "forwards RadioGroupProps; on_value_change"),
+    ("scroll_area", "A scrollable area component.", "forwards ScrollAreaProps; presentational; no events"),
+    ("select", "A select dropdown component with typeahead support.", "forwards SelectGroupLabelProps; on_value_change + on_values_change + on_open_change"),
+    ("separator", "A visual separator between different sections of the page.", "forwards SeparatorProps; presentational; no events"),
+    ("sheet", "A sheet component as an edge panel that complements the main content.", "forwards DialogRootProps; on_open_change + onclick; extends GlobalAttributes"),
+    ("sidebar", "A sidebar component as a vertical panel fixed to the screen edge for quick access to different sections.", "inline props; onclick + on_open_change; extends GlobalAttributes + button"),
+    ("skeleton", "A placeholder component for all loading elements.", "presentational; no events; extends GlobalAttributes"),
+    ("slider", "An accessible slider component.", "forwards SliderProps; on_value_change"),
+    ("switch", "A togglable switch component.", "forwards SwitchProps; on_checked_change"),
+    ("tabs", "A tabbed interface component.", "forwards TabsProps; on_value_change; extends GlobalAttributes"),
+    ("textarea", "A textarea component for multi-line text input.", "inline props with 18 DOM events forwarded individually (oninput, onchange, onfocus, onkeydown, …); extends GlobalAttributes + textarea"),
+    ("toast", "A toast notification component.", "forwards ToastProps; on_close; extends GlobalAttributes"),
+    ("toggle", "A simple toggle button component.", "forwards ToggleProps; on_pressed_change + onfocus + onkeydown + onmounted"),
+    ("toggle_group", "A group of toggle buttons for selecting one or more options from a set.", "forwards ToggleGroupProps; on_pressed_change emits a HashSet<usize> of the pressed indices"),
+    ("toolbar", "A toolbar component for grouping related inputs.", "forwards ToolbarProps; on_click; extends GlobalAttributes + div"),
+    ("tooltip", "A tooltip component for additional information on hover or focus.", "forwards TooltipProps; on_open_change"),
+    ("virtual_list", "A virtualized list component for large datasets.", "forwards VirtualListProps; render-prop iterator pattern for large datasets"),
 ];
 
 /// Names-only projection of [`DX_COMPONENT_CATALOG_ENTRIES`]. Used by
 /// validation paths that only care whether a `dx_components:` entry is
 /// catalog-known.
 pub(super) fn dx_component_names() -> impl Iterator<Item = &'static str> {
-    DX_COMPONENT_CATALOG_ENTRIES.iter().map(|(n, _)| *n)
+    DX_COMPONENT_CATALOG_ENTRIES.iter().map(|(n, _, _)| *n)
 }
 
 /// Validate `doc.dx_components` against the catalog. Returns the deduped
@@ -977,6 +982,17 @@ async fn install_dx_components(doc: &DslDoc, crate_root: &Path, result: &mut Sca
         // dir path is enough for the caller to inspect.
         for name in &installed {
             let dir = crate_root.join("src/components").join(name);
+            // Post-install touch-up: prepend `#[allow(dead_code)]` to each
+            // `pub enum …` in the installed component.rs so a freshly
+            // scaffolded project is warning-clean on `cargo check`. The
+            // upstream template ships every variant (e.g. `ButtonSize::Xs`
+            // through `IconLg`); most projects use only a couple of them and
+            // rustc warns on the rest. Touching only the catalog's component
+            // file is safe — we don't reach into the user's own code.
+            let comp = dir.join("component.rs");
+            if let Some(true) = suppress_dead_code_on_enums(&comp) {
+                result.files_modified.push(comp);
+            }
             if dir.exists() {
                 result.files_created.push(dir);
             }
@@ -1005,6 +1021,59 @@ async fn install_dx_components(doc: &DslDoc, crate_root: &Path, result: &mut Sca
          `asset!(\"/assets/dx-components-theme.css\")` mounted in your App body".into(),
     );
     push_import_hint(&valid, result);
+}
+
+/// Prepend `#[allow(dead_code)]` to each `pub enum …` in `path` (typically
+/// the just-installed `src/components/<name>/component.rs`). Returns
+/// `Some(true)` when the file was edited, `Some(false)` when it already had
+/// the attribute on every pub enum (or had none), and `None` when the file
+/// can't be read. Idempotent: re-running on a touched file is a no-op.
+///
+/// We deliberately keep this string-based and conservative — only `pub enum`
+/// declarations at column 0 (no indentation) are matched, so an enum nested
+/// inside a fn body or impl is left alone. The upstream catalog templates put
+/// their enums at the top level so this catches every real case.
+pub(super) fn suppress_dead_code_on_enums(path: &Path) -> Option<bool> {
+    let src = std::fs::read_to_string(path).ok()?;
+    let mut out = String::with_capacity(src.len() + 64);
+    let mut modified = false;
+    let mut prev_blank_or_attr = true;
+    let mut pending_attrs = String::new();
+    for line in src.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        // Track preceding attribute lines so we don't insert a duplicate.
+        let is_attr = trimmed.starts_with("#[");
+        if is_attr {
+            pending_attrs.push_str(line);
+        }
+        if line.starts_with("pub enum ") {
+            // Skip if any preceding attribute line in this chunk already
+            // contains `allow(dead_code)` — leave caller-authored intent alone.
+            let already = pending_attrs.contains("dead_code");
+            if !already {
+                out.push_str("#[allow(dead_code)]\n");
+                modified = true;
+            }
+            out.push_str(line);
+            pending_attrs.clear();
+            prev_blank_or_attr = false;
+            continue;
+        }
+        // Reset the attr-buffer on any non-attr, non-blank line so attributes
+        // are only associated with the immediately-following item.
+        if !is_attr && !trimmed.is_empty() {
+            pending_attrs.clear();
+            prev_blank_or_attr = false;
+        } else if trimmed.is_empty() {
+            prev_blank_or_attr = true;
+        }
+        out.push_str(line);
+    }
+    let _ = prev_blank_or_attr;
+    if modified {
+        std::fs::write(path, out).ok()?;
+    }
+    Some(modified)
 }
 
 /// Run `cargo check --message-format=short` in `crate_root` with a generous

@@ -169,7 +169,24 @@ fn lint_rsx_tokens(m: &syn::Macro, _src: &str, issues: &mut Vec<RsxIssue>) {
     // dioxus-rsx crate (which is unstable across versions); this catches the
     // most common 0.7 mistakes without bringing in a full parser.
     let tokens: Vec<TokenTree> = m.tokens.clone().into_iter().collect();
-    walk_lint(&tokens, false, true, issues);
+    walk_lint(&tokens, false, true, None, issues);
+}
+
+/// Known-ambiguous attribute names per HTML element under Dioxus 0.7. Setting
+/// any of these directly (e.g. `autofocus: true`) trips E0034 because both
+/// `GlobalAttributesExtension` and the element-specific extension trait
+/// provide a method with the same name. Disambiguate with the explicit
+/// attribute-literal syntax (`"autofocus": "true"`) or fully-qualify the
+/// builder trait. Add entries here as new cases are documented — empty lists
+/// are fine.
+fn ambiguous_attrs_for(element: &str) -> &'static [&'static str] {
+    match element {
+        // `autofocus` is on GlobalAttributesExtension AND on each of these
+        // element-specific extensions. The agent that hit this set
+        // `autofocus: true` on Input and got E0034.
+        "input" | "button" | "textarea" | "select" => &["autofocus"],
+        _ => &[],
+    }
 }
 
 /// `parent_is_component` is true when the surrounding brace group is the body
@@ -183,10 +200,17 @@ fn lint_rsx_tokens(m: &syn::Macro, _src: &str, issues: &mut Vec<RsxIssue>) {
 /// component / `for` / `if` / match-arm. It is false inside attribute values
 /// and inside closure bodies (e.g. `onclick: move |evt| { ... }`), where a
 /// Rust `for` loop has no rsx semantics and must not be lint-checked.
+///
+/// `parent_element_name` is the lowercase HTML element ident when the
+/// surrounding brace group is an element body (e.g. `Some("input")` for
+/// `input { ... }`). Used to catch ambiguous-attribute writes (E0034) where
+/// the element-specific extension trait and `GlobalAttributesExtension` both
+/// define the same setter name.
 fn walk_lint(
     tokens: &[TokenTree],
     parent_is_component: bool,
     in_rsx_node_position: bool,
+    parent_element_name: Option<&str>,
     issues: &mut Vec<RsxIssue>,
 ) {
     // 1) `for ... { ... }` without a `key:` attribute somewhere in the body.
@@ -215,6 +239,38 @@ fn walk_lint(
                 }
             }
             i += 1;
+        }
+    }
+
+    // 1b) Attribute writes that hit E0034 because the element-specific
+    //     extension trait AND `GlobalAttributesExtension` both define the same
+    //     setter. Fires only inside an HTML element body whose name has a
+    //     non-empty ambiguity list. The fix is to use the explicit attribute-
+    //     literal syntax: `"autofocus": "true"`.
+    if let Some(elem) = parent_element_name {
+        let bad = ambiguous_attrs_for(elem);
+        if !bad.is_empty() {
+            let mut j = 0;
+            while j + 1 < tokens.len() {
+                if let (TokenTree::Ident(id), TokenTree::Punct(p)) =
+                    (&tokens[j], &tokens[j + 1])
+                    && p.as_char() == ':'
+                {
+                    let name = id.to_string();
+                    if bad.contains(&name.as_str()) {
+                        let s = id.span().start();
+                        issues.push(RsxIssue {
+                            line: s.line,
+                            column: s.column,
+                            message: format!(
+                                "`{name}` on `{elem}` is ambiguous: both `GlobalAttributesExtension` and `{elem}`'s extension trait define a setter named `{name}` (E0034). Use the explicit attribute syntax instead: `\"{name}\": \"...\"` (or `\"{name}\": true` for boolean attrs)."
+                            ),
+                            file: None,
+                        });
+                    }
+                }
+                j += 1;
+            }
         }
     }
 
@@ -286,8 +342,22 @@ fn walk_lint(
                 let is_component = last_ident
                     .map(|id| starts_uppercase(&id.to_string()))
                     .unwrap_or(false);
+                // The element name flows down only when entering an HTML
+                // element's body (lowercase ident + brace group at rsx
+                // position). Component bodies and non-rsx groups reset it.
+                let child_element_name: Option<String> = if group_in_rsx_position && !is_component {
+                    last_ident.map(|id| id.to_string())
+                } else {
+                    None
+                };
                 let inner: Vec<TokenTree> = g.stream().clone().into_iter().collect();
-                walk_lint(&inner, is_component, group_in_rsx_position, issues);
+                walk_lint(
+                    &inner,
+                    is_component,
+                    group_in_rsx_position,
+                    child_element_name.as_deref(),
+                    issues,
+                );
                 last_ident = None;
                 seen_open_pipe = false;
                 after_closure_args = false;
@@ -655,6 +725,110 @@ fn t() {
         assert!(
             issues.iter().any(|m| m.contains("missing a `key:")),
             "expected key warning on the rsx for-loop, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn flags_ambiguous_autofocus_on_input() {
+        // E0034: both `GlobalAttributesExtension` and `InputExtension` define
+        // `autofocus`. The agent that hit this set `autofocus: true` directly.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let _ = rsx! {
+        input { autofocus: true, value: "" }
+    };
+}
+"#,
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|m| m.contains("autofocus") && m.contains("E0034")),
+            "expected E0034 ambiguity warning on autofocus, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn flags_ambiguous_autofocus_on_button_textarea_select() {
+        // Same lint must fire on the other form elements that define autofocus.
+        for elem in ["button", "textarea", "select"] {
+            let src = format!(
+                r#"use dioxus::prelude::*;
+fn t() {{
+    let _ = rsx! {{
+        {elem} {{ autofocus: true }}
+    }};
+}}
+"#
+            );
+            let issues = lint(&src);
+            assert!(
+                issues
+                    .iter()
+                    .any(|m| m.contains("autofocus") && m.contains("E0034")),
+                "expected E0034 warning on {elem}.autofocus, got {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_flag_autofocus_on_non_form_element() {
+        // `div` doesn't have an InputExtension-style trait with `autofocus`,
+        // so it isn't ambiguous (the lint must not fire).
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let _ = rsx! {
+        div { autofocus: true, "x" }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("E0034")),
+            "did not expect ambiguity warning on div.autofocus, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_flag_autofocus_when_using_explicit_attribute_syntax() {
+        // The recommended fix — `"autofocus": "true"` (string-key form) — must
+        // not trigger the lint, because the literal key isn't a method call.
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+fn t() {
+    let _ = rsx! {
+        input { "autofocus": "true", value: "" }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("E0034")),
+            "did not expect ambiguity warning on string-key autofocus, got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_flag_autofocus_on_component_invocation() {
+        // A component named `Input` with an `autofocus: bool` prop is not
+        // ambiguous — the lint must be element-scoped (lowercase ident).
+        let issues = lint(
+            r#"use dioxus::prelude::*;
+#[derive(Clone, PartialEq, Props)]
+struct InputProps { autofocus: bool }
+fn Input(props: InputProps) -> Element { rsx! {} }
+fn t() {
+    let _ = rsx! {
+        Input { autofocus: true }
+    };
+}
+"#,
+        );
+        assert!(
+            issues.iter().all(|m| !m.contains("E0034")),
+            "did not expect ambiguity warning on a component invocation, got {issues:?}"
         );
     }
 }

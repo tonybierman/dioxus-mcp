@@ -38,7 +38,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Lint Rust file(s)' rsx! blocks for common 0.7 mistakes (missing keys on iterators, parameter-less event handlers). Pass `file` for a single file (single-file response shape: `file`, `rsx_block_count`, `issues`). Pass `files: [...]` for batch mode (adds `per_file: [...]`; top-level `issues` is the flat merge with each issue tagged by file)."
+        description = "Lint Rust file(s)' rsx! blocks for common 0.7 mistakes (missing keys on iterators, parameter-less event handlers, attribute writes that trigger E0034 ambiguity — e.g. `autofocus: true` on `input`/`button`/`textarea`/`select`). Pass `file` for a single file (single-file response shape: `file`, `rsx_block_count`, `issues`). Pass `files: [...]` for batch mode (adds `per_file: [...]`; top-level `issues` is the flat merge with each issue tagged by file)."
     )]
     async fn check_rsx(
         &self,
@@ -226,6 +226,19 @@ impl DioxusMcp {
     }
 
     #[tool(
+        description = "Full prop / event surface for a Dioxus 0.7 catalog component (the data needed to author rsx! against it). Returns the component fn signature, every prop (name, type, optional?, has_default, default expression, extends targets, doc comment), every variant enum (e.g. ButtonVariant + its #[default]), aggregated `extends` and `event_handlers` lists, and — when the wrapper forwards a `*Props` from `dioxus_primitives` — the upstream primitive's full prop list too. Reads from the upstream cargo git checkout (~/.cargo/git/checkouts/components-*) when available, otherwise falls back to the project-local install at `src/components/<name>/component.rs`. Call this BEFORE writing rsx! that uses a catalog widget — saves 5+ file reads per widget."
+    )]
+    async fn describe_component(
+        &self,
+        Parameters(p): Parameters<tools::dsl::DescribeComponentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::describe_component(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "Use this whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Materializes a file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, next_steps, and (when applicable) collisions. \
 \
 Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) without writing anything. Pass `if_missing: true` to skip primitives whose target leaf file already exists (reported in `collisions`) instead of erroring — makes re-runs during iteration safe."
@@ -321,11 +334,16 @@ impl ServerHandler for DioxusMcp {
                 "Dioxus 0.7 project assistant. When a question maps to a tool, call it.\n\
                  \n\
                  Routing:\n\
-                 - Scaffold anything (model / component / screen / server fn / CRUD slice / \
-                   whole app): `get_dsl_spec` then `execute_code`. Use `Resource` for a full \
-                   server-backed slice; `ClientStore` + `kind: client_crud` for in-memory \
-                   state. UI primitive widgets: `list_components` to scan the catalog, then \
-                   `dx components add <name>` from the project root.\n\
+                 - Scaffold STRUCTURED slices (model / store / server-fn-backed Resource / \
+                   client_crud / whole-app skeleton): `get_dsl_spec` then `execute_code`. \
+                   Use `Resource` for a full server-backed slice; `ClientStore` + \
+                   `kind: client_crud` for in-memory state. For one-off handwritten screens \
+                   or single-component edits, skip the DSL and write the file directly — \
+                   `execute_code` is for multi-file, cross-wired primitives, not ad-hoc UI.\n\
+                 - UI primitive widgets (button / dialog / date-picker / etc.): \
+                   `list_components` to scan the catalog, then `dx components add <name>` \
+                   from the project root. Call `describe_component` for the full prop / \
+                   event surface before authoring rsx! that uses it.\n\
                  - Runtime behavior (panics, renders, signal writes, navigations) -> \
                    runtime_events. Server-fn latency / errors -> server_fn_summary.\n\
                  - Project structure (what routes / components / server fns exist) -> \
@@ -335,8 +353,7 @@ impl ServerHandler for DioxusMcp {
                    signal_lint, props_lint, asset_audit, audit_feature_flags, openapi_spec, \
                    explain_signal_graph, lint_project.\n\
                  - Docs / canonical examples -> search_docs, find_example. RSX check -> \
-                   check_rsx. UI widgets (button / dialog / date-picker / etc.) -> \
-                   `get_dsl_spec { sections: [components] }`, then `dx components add`.\n\
+                   check_rsx. Catalog widget prop / event surface -> describe_component.\n\
                  \n\
                  Probe note: runtime_events + server_fn_summary read a JSONL log written \
                  by the dioxus-mcp-probe crate. Pass `project_root` when cwd isn't the app; \

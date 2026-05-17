@@ -28,6 +28,10 @@ pub struct ComponentEntry {
     pub name: String,
     /// One-line description from the upstream registry.
     pub description: String,
+    /// Prop/event surface hint — captures how the widget is controlled
+    /// (main props + events) so the caller can pick without calling
+    /// `describe_component`. For full prop typing call `describe_component`.
+    pub prop_hint: String,
     /// Post-install import path. Drop straight into `use ...;` then use the
     /// PascalCase identifier inside `rsx!`.
     pub import: String,
@@ -53,17 +57,19 @@ pub async fn list_components(p: ListComponentsParams) -> Result<ListComponentsRe
     let total = DX_COMPONENT_CATALOG_ENTRIES.len();
     let components: Vec<ComponentEntry> = DX_COMPONENT_CATALOG_ENTRIES
         .iter()
-        .filter(|(name, desc)| match &needle {
+        .filter(|(name, desc, hint)| match &needle {
             None => true,
             Some(q) if q.is_empty() => true,
             Some(q) => {
                 name.to_ascii_lowercase().contains(q)
                     || desc.to_ascii_lowercase().contains(q)
+                    || hint.to_ascii_lowercase().contains(q)
             }
         })
-        .map(|(name, desc)| ComponentEntry {
+        .map(|(name, desc, hint)| ComponentEntry {
             name: (*name).to_string(),
             description: (*desc).to_string(),
+            prop_hint: (*hint).to_string(),
             import: format!("use crate::components::{name}::{};", to_pascal(name)),
         })
         .collect();

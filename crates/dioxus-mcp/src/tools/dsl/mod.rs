@@ -18,6 +18,7 @@ mod spec;
 pub use spec::*;
 
 mod cargo_patch;
+mod describe_component;
 mod execute;
 mod generate;
 mod list_components;
@@ -31,6 +32,7 @@ mod text_edit;
 mod util;
 mod wire;
 
+pub use describe_component::*;
 pub use execute::*;
 pub use list_components::*;
 

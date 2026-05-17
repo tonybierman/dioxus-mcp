@@ -846,7 +846,8 @@ fn dx_components_catalog_matches_spec_block() {
     // a `dx_components: [foo]` entry that's "valid" by the Rust check but
     // missing from the spec catalog would be a UX bug the next time someone
     // reads the catalog. This test parses the spec block and asserts the
-    // two sources have the same set of names.
+    // two sources have the same set of names AND the same descriptions AND
+    // the same prop_hint strings.
     use super::execute::DX_COMPONENT_CATALOG_ENTRIES;
     let raw = CORE_COMPONENTS;
     let v: serde_yml::Value = serde_yml::from_str(raw).expect("CORE_COMPONENTS must be valid YAML");
@@ -855,19 +856,38 @@ fn dx_components_catalog_matches_spec_block() {
         .and_then(|m| m.get("catalog"))
         .and_then(|m| m.as_mapping())
         .expect("Components.catalog must be a mapping");
-    let spec_pairs: std::collections::BTreeMap<String, String> = components
+    let hints = v
+        .get("Components")
+        .and_then(|m| m.get("prop_hints"))
+        .and_then(|m| m.as_mapping())
+        .expect("Components.prop_hints must be a mapping");
+    let spec_descs: std::collections::BTreeMap<String, String> = components
         .iter()
         .filter_map(|(k, v)| {
             Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
         })
         .collect();
-    let code_pairs: std::collections::BTreeMap<String, String> = DX_COMPONENT_CATALOG_ENTRIES
+    let spec_hints: std::collections::BTreeMap<String, String> = hints
         .iter()
-        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .filter_map(|(k, v)| {
+            Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
+        })
+        .collect();
+    let code_descs: std::collections::BTreeMap<String, String> = DX_COMPONENT_CATALOG_ENTRIES
+        .iter()
+        .map(|(n, d, _)| (n.to_string(), d.to_string()))
+        .collect();
+    let code_hints: std::collections::BTreeMap<String, String> = DX_COMPONENT_CATALOG_ENTRIES
+        .iter()
+        .map(|(n, _, h)| (n.to_string(), h.to_string()))
         .collect();
     assert_eq!(
-        spec_pairs, code_pairs,
-        "spec catalog and DX_COMPONENT_CATALOG_ENTRIES must match; refresh both when the upstream registry changes"
+        spec_descs, code_descs,
+        "spec catalog descriptions and DX_COMPONENT_CATALOG_ENTRIES descriptions must match; refresh both when the upstream registry changes"
+    );
+    assert_eq!(
+        spec_hints, code_hints,
+        "spec prop_hints and DX_COMPONENT_CATALOG_ENTRIES hints must match; refresh both when the upstream registry changes"
     );
 }
 
@@ -4620,4 +4640,66 @@ models:
         field_lines >= 2,
         "struct fields should be one per line after rustfmt, got model:\n{model}"
     );
+}
+
+#[test]
+fn suppress_dead_code_prepends_attribute_on_pub_enums() {
+    // Mirrors the upstream button component.rs: two pub enums (`ButtonVariant`,
+    // `ButtonSize`) sit at the top level alongside the `pub fn Button`. The
+    // helper must prepend `#[allow(dead_code)]` to each enum without
+    // touching the fn.
+    use super::execute::suppress_dead_code_on_enums;
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("component.rs");
+    let original = r#"use dioxus::prelude::*;
+
+#[derive(Copy, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub enum ButtonVariant {
+    #[default]
+    Primary,
+    Secondary,
+}
+
+#[derive(Copy, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub enum ButtonSize {
+    Xs,
+    #[default]
+    Default,
+}
+
+#[component]
+pub fn Button() -> Element {
+    rsx! { button {} }
+}
+"#;
+    std::fs::write(&path, original).unwrap();
+    let r = suppress_dead_code_on_enums(&path);
+    assert_eq!(r, Some(true), "first run should modify the file");
+    let patched = std::fs::read_to_string(&path).unwrap();
+    // Both pub enums got an `#[allow(dead_code)]` prepended.
+    assert_eq!(
+        patched.matches("#[allow(dead_code)]\npub enum").count(),
+        2,
+        "both pub enums must carry #[allow(dead_code)], got:\n{patched}"
+    );
+    // The fn is untouched.
+    assert!(
+        !patched.contains("#[allow(dead_code)]\n#[component]"),
+        "must not annotate the component fn, got:\n{patched}"
+    );
+    // Existing attributes (`#[derive(…)]`, `#[non_exhaustive]`) are preserved.
+    assert!(patched.contains("#[derive(Copy, Clone, PartialEq, Default)]"));
+    assert!(patched.contains("#[non_exhaustive]"));
+
+    // Idempotent: re-running on the patched file should NOT modify it again.
+    let r2 = suppress_dead_code_on_enums(&path);
+    assert_eq!(
+        r2,
+        Some(false),
+        "second run should be a no-op when the attribute is already present"
+    );
+    let patched2 = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(patched, patched2, "second run must not change the file");
 }
