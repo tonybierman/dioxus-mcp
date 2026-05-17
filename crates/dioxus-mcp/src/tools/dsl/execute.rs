@@ -116,6 +116,17 @@ pub async fn execute_code(
         p.dry_run,
     )?;
 
+    // Fullstack gate: server-fn writes used to fail half-way through the
+    // primitive loop (after models / state / etc. had already been written
+    // to disk). Lift the check up here so the call is atomic — if the doc
+    // declares any server fn but the project's Cargo.toml doesn't enable
+    // fullstack, abort before touching the filesystem. Dry-runs are exempt
+    // (no writes happen anyway, and surfacing the issue as a `next_steps`
+    // hint via the existing audit path is more useful for plans).
+    if !p.dry_run {
+        preflight_fullstack(&doc, &synth_server_fns, &crate_root)?;
+    }
+
     if p.dry_run {
         // Removes are not applied in dry_run mode; the plan reports what
         // would be removed via the standard would_modify channel.
@@ -758,6 +769,51 @@ pub async fn execute_code(
     Ok(result)
 }
 
+/// Abort early when the doc declares server fns but the project isn't
+/// fullstack-capable. Without this, model / state / etc. files would already
+/// be on disk by the time `create_server_fn` hits its own fullstack gate,
+/// leaving the project in a half-written state. We re-check here even though
+/// the per-primitive scaffolder also gates — preflight gives the caller one
+/// error to fix and zero files to undo.
+fn preflight_fullstack(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+) -> Result<(), String> {
+    let added_server_fn = !doc.server_fns.is_empty() || !synth_server_fns.is_empty();
+    if !added_server_fn {
+        return Ok(());
+    }
+    let info = crate::project::ProjectInfo::detect(crate_root);
+    if !info.is_dioxus_project {
+        return Err(format!(
+            "preflight: this run declares server fn(s) but `{}` does not look like a Dioxus project \
+             (no `dioxus` dep in Cargo.toml). Pass `project_root` to a real Dioxus crate or call \
+             `audit_feature_flags` for guidance.",
+            crate_root.display()
+        ));
+    }
+    if info.fullstack_capable() {
+        return Ok(());
+    }
+    let active = &info.dioxus_features;
+    let names: Vec<String> = doc
+        .server_fns
+        .iter()
+        .map(|s| s.name.clone())
+        .chain(synth_server_fns.iter().map(|s| s.name.clone()))
+        .collect();
+    Err(format!(
+        "preflight: this run would write server fn(s) ({}) but the `dioxus` dep's features ({:?}) \
+         don't enable fullstack. Aborting before any files are written so the project is left untouched. \
+         Fix: add `features = [\"fullstack\"]` (or `web`+`server`, or an opt-in `server = [\"dioxus/server\"]` \
+         sibling feature) to the `dioxus` dep in Cargo.toml, then re-run. Call `audit_feature_flags` for the \
+         exact patch.",
+        names.join(", "),
+        active
+    ))
+}
+
 /// True when the doc scaffolds enough that compile-time errors are plausible
 /// and a `cargo check` is worth surfacing. Used to gate the `cargo_check: true`
 /// discoverability hint — we don't want to nag callers for trivial one-primitive
@@ -1055,7 +1111,7 @@ pub const DX_COMPONENT_CATALOG_ENTRIES: &[(&str, &str, &str)] = &[
 /// Names-only projection of [`DX_COMPONENT_CATALOG_ENTRIES`]. Used by
 /// validation paths that only care whether a `dx_components:` entry is
 /// catalog-known.
-pub(super) fn dx_component_names() -> impl Iterator<Item = &'static str> {
+pub(crate) fn dx_component_names() -> impl Iterator<Item = &'static str> {
     DX_COMPONENT_CATALOG_ENTRIES.iter().map(|(n, _, _)| *n)
 }
 

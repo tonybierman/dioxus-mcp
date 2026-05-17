@@ -4962,3 +4962,120 @@ fn record_dx_component_files_lists_each_file_individually() {
         "dir path should not be recorded when files are enumerated"
     );
 }
+
+/// TODO §4: execute_code must abort BEFORE any files are written when the
+/// doc declares a server fn but the project's Cargo.toml has no fullstack
+/// feature. Previously the per-primitive `create_server_fn` would fire its
+/// own gate but only after `create_model` had already landed files on disk —
+/// leaving the project in a half-scaffolded state on a guaranteed-fail run.
+#[tokio::test]
+async fn execute_code_aborts_before_writes_when_fullstack_missing() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    // dioxus dep present, but only the `web` feature — no fullstack and no
+    // opt-in `server` sibling feature, so server fns can't compile.
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "fullstack_preflight_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let err = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+server_fns:
+  - name: list_todos
+    return_type: Vec<Todo>
+"#
+            .into(),
+            project_root: Some(root.display().to_string()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect_err("preflight should reject server-fn scaffold without fullstack");
+
+    assert!(
+        err.contains("fullstack") && err.contains("list_todos"),
+        "error should name the offending server fn and the missing feature: {err}"
+    );
+    assert!(
+        err.contains("audit_feature_flags"),
+        "error should point at audit_feature_flags for the patch: {err}"
+    );
+    // The model file must NOT exist — preflight aborted before any writes.
+    assert!(
+        !root.join("src/model/todo.rs").exists(),
+        "model file landed on disk despite fullstack preflight failure — half-written state"
+    );
+    assert!(
+        !root.join("src/server").exists(),
+        "server dir was created even though preflight should have aborted"
+    );
+}
+
+/// Sanity-check the complement: when fullstack IS enabled, the same doc goes
+/// through preflight and writes the expected files. Guards against the
+/// preflight false-positiving on the canonical 0.7 layout.
+#[tokio::test]
+async fn execute_code_passes_fullstack_preflight_on_canonical_layout() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("fullstack_ok_preflight_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let r = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+models:
+  - name: Todo
+    derives: [Default]
+    fields:
+      - {name: id, type: i64}
+server_fns:
+  - name: list_todos
+    return_type: Vec<Todo>
+"#
+            .into(),
+            project_root: Some(root.display().to_string()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("fullstack layout should pass preflight");
+    assert!(
+        root.join("src/model/todo.rs").exists(),
+        "model should land when fullstack is enabled, got: {:?}",
+        r
+    );
+}

@@ -25,6 +25,17 @@ pub struct DeadComponent {
     pub name: String,
     pub file: PathBuf,
     pub line: usize,
+    /// "catalog_unused" when the component is a freshly-installed catalog
+    /// widget waiting to be wired into the app (`src/components/<name>/component.rs`
+    /// with a catalog-known name). "abandoned" for everything else — the
+    /// classic dead-component case where the file should probably be deleted
+    /// or imported somewhere.
+    pub kind: &'static str,
+    /// Paste-ready import line. Only set for `kind: "catalog_unused"` so the
+    /// caller can drop the widget into their rsx! without round-tripping
+    /// through `describe_component`. None for `abandoned`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,15 +109,22 @@ pub async fn dead_components(
     let mut roots_vec: Vec<String> = roots.iter().cloned().collect();
     roots_vec.sort();
 
+    let catalog_names: HashSet<&'static str> = crate::tools::dsl::dx_component_names().collect();
     let total_components = index.components.len();
     let mut dead: Vec<DeadComponent> = index
         .components
         .into_iter()
         .filter(|c| !used.contains(&c.name) && !roots.contains(&c.name))
-        .map(|c| DeadComponent {
-            name: c.name,
-            file: c.file,
-            line: c.line,
+        .map(|c| {
+            let (kind, suggestion) =
+                classify_dead_component(&c.name, &c.file, &crate_root, &catalog_names);
+            DeadComponent {
+                name: c.name,
+                file: c.file,
+                line: c.line,
+                kind,
+                suggestion,
+            }
         })
         .collect();
     dead.sort_by(|a, b| a.name.cmp(&b.name));
@@ -117,6 +135,43 @@ pub async fn dead_components(
         total_components,
         parse_errors: collect_parse_errors(&files),
     })
+}
+
+/// Pick the right label and (for catalog widgets) a paste-ready import
+/// line for a dead component. The catalog shape is
+/// `src/components/<snake_name>/component.rs` — that's what `dx components add`
+/// emits and what `verify_install` looks for. Hand-rolled dead components
+/// (top-level `src/components/foo.rs` or arbitrary other locations) are
+/// "abandoned" and get no suggestion — those are the ones the user actually
+/// wants to delete.
+fn classify_dead_component(
+    name: &str,
+    file: &std::path::Path,
+    crate_root: &std::path::Path,
+    catalog_names: &HashSet<&'static str>,
+) -> (&'static str, Option<String>) {
+    use heck::ToSnakeCase;
+    let snake = name.to_snake_case();
+    let expected = crate_root
+        .join("src")
+        .join("components")
+        .join(&snake)
+        .join("component.rs");
+    let is_catalog_shape = file == expected.as_path();
+    if !is_catalog_shape {
+        return ("abandoned", None);
+    }
+    // Catalog-shaped dir but the component name isn't in the canonical 0.7
+    // catalog — probably a hand-rolled component using the same layout, so
+    // we don't claim it's awaiting an import. Treat as abandoned so the
+    // caller knows it's safe to remove.
+    if !catalog_names.contains(snake.as_str()) {
+        return ("abandoned", None);
+    }
+    let suggestion = format!(
+        "freshly installed via `dx components add {snake}` but never imported. Drop into an rsx! body with `use crate::components::{snake}::{name};` then `{name} {{ /* props */ }}`."
+    );
+    ("catalog_unused", Some(suggestion))
 }
 
 struct RsxComponentVisitor<'a> {
@@ -161,5 +216,54 @@ fn scan_for_components(tokens: &[TokenTree], known: &HashSet<String>, used: &mut
             let inner: Vec<TokenTree> = g.stream().into_iter().collect();
             scan_for_components(&inner, known, used);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn catalog() -> HashSet<&'static str> {
+        crate::tools::dsl::dx_component_names().collect()
+    }
+
+    #[test]
+    fn classifies_catalog_install_layout_as_catalog_unused() {
+        let crate_root = Path::new("/tmp/proj");
+        let file = crate_root.join("src/components/button/component.rs");
+        let (kind, suggestion) = classify_dead_component("Button", &file, crate_root, &catalog());
+        assert_eq!(kind, "catalog_unused");
+        let msg = suggestion.expect("suggestion should be set for catalog widgets");
+        assert!(msg.contains("dx components add button"), "{msg}");
+        assert!(
+            msg.contains("use crate::components::button::Button"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn classifies_handrolled_top_level_component_as_abandoned() {
+        let crate_root = Path::new("/tmp/proj");
+        // Top-level src/components/<name>.rs is the hand-rolled / scaffolded
+        // shape — not the catalog dir. Should be flagged as abandoned and
+        // get no import hint.
+        let file = crate_root.join("src/components/widget.rs");
+        let (kind, suggestion) = classify_dead_component("Widget", &file, crate_root, &catalog());
+        assert_eq!(kind, "abandoned");
+        assert!(suggestion.is_none());
+    }
+
+    #[test]
+    fn classifies_catalog_shape_with_unknown_name_as_abandoned() {
+        // A hand-authored component that just happens to use the catalog
+        // directory layout but isn't in the canonical catalog list. Don't
+        // claim it's "awaiting install" — let the user clean it up.
+        let crate_root = Path::new("/tmp/proj");
+        let file = crate_root.join("src/components/custom_widget/component.rs");
+        let (kind, suggestion) =
+            classify_dead_component("CustomWidget", &file, crate_root, &catalog());
+        assert_eq!(kind, "abandoned");
+        assert!(suggestion.is_none());
     }
 }

@@ -53,6 +53,11 @@ pub struct VerifyInstallReport {
     pub project_root: PathBuf,
     /// `true` when every step is `ok` — the catalog is fully wired.
     pub fully_wired: bool,
+    /// Detected archetype based on what the source tree currently uses
+    /// (`basic`, `fullstack`, `fullstack-realtime`). Determines which
+    /// archetype-specific dep checks ran below. Empty when no Dioxus signal
+    /// is present.
+    pub archetype: &'static str,
     /// Per-step results in stable order.
     pub steps: Vec<VerifyInstallStep>,
     /// Convenience: short titles of every step where `ok: false`. Lets a
@@ -73,15 +78,315 @@ pub async fn verify_install(
     let theme_step = check_theme_asset(&src);
     let dir_step = check_components_dir(&src.join("components"));
 
-    let steps = vec![mod_step, theme_step, dir_step];
+    let signals = ArchetypeSignals::scan(&src);
+    let archetype = signals.archetype_label();
+    let manifest_text = std::fs::read_to_string(crate_root.join("Cargo.toml")).unwrap_or_default();
+    let manifest = parse_manifest(&manifest_text);
+
+    let mut steps = vec![mod_step, theme_step, dir_step];
+    extend_with_archetype_steps(&mut steps, &signals, &manifest, &crate_root);
+
     let missing: Vec<&'static str> = steps.iter().filter(|s| !s.ok).map(|s| s.id).collect();
     let fully_wired = missing.is_empty();
     Ok(VerifyInstallReport {
         project_root: crate_root,
         fully_wired,
+        archetype,
         steps,
         missing,
     })
+}
+
+/// Source-tree signals that pick out which archetype-specific dep checks run.
+///
+/// Each flag is detected by a cheap scan of `src/` — we look at directory
+/// presence (`src/server/`, `src/sockets/`) and a substring grep over `.rs`
+/// files for the canonical idiom (`TypedHeader<Cookie>`, the `Uuid` type, an
+/// `asset!(` macro). Doing it this way keeps the check honest against
+/// hand-authored code as well as scaffolder output.
+#[derive(Debug, Default, Clone)]
+struct ArchetypeSignals {
+    has_server: bool,
+    has_sockets: bool,
+    uses_cookies: bool,
+    uses_uuid: bool,
+    uses_assets: bool,
+}
+
+impl ArchetypeSignals {
+    fn scan(src_dir: &Path) -> Self {
+        let mut s = ArchetypeSignals {
+            has_server: src_dir.join("server").is_dir(),
+            has_sockets: src_dir.join("sockets").is_dir(),
+            ..Default::default()
+        };
+        let mut walked: Vec<PathBuf> = Vec::new();
+        walk_rs_files(src_dir, &mut walked, 6);
+        for path in &walked {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            // Cookie typed-header is the only stable way to spot the cookie-
+            // auth idiom across hand-rolled and scaffolded code. `axum_extra::TypedHeader`
+            // is the import line; either signal is enough.
+            if text.contains("TypedHeader<Cookie>") || text.contains("axum_extra::TypedHeader") {
+                s.uses_cookies = true;
+            }
+            // `Uuid` is conservative — any `Uuid` reference (Uuid::new_v4(),
+            // field type Uuid) triggers the dep check. False positives would
+            // be rare (the uuid crate is the only Uuid in common use).
+            if text.contains("Uuid") {
+                s.uses_uuid = true;
+            }
+            if text.contains("asset!(") {
+                s.uses_assets = true;
+            }
+        }
+        s
+    }
+
+    fn archetype_label(&self) -> &'static str {
+        if self.has_sockets {
+            "fullstack-realtime"
+        } else if self.has_server {
+            "fullstack"
+        } else {
+            "basic"
+        }
+    }
+}
+
+/// Minimal Cargo.toml dep view used by the archetype checks. We parse once at
+/// the top of verify_install and pass this around so the per-step checks
+/// don't each re-read the file. `features` is left lower-cased so callers can
+/// compare without normalizing on each lookup.
+#[derive(Debug, Default, Clone)]
+struct ManifestDeps {
+    deps: std::collections::BTreeMap<String, ManifestDep>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ManifestDep {
+    /// `true` when the dep is declared at all (in [dependencies] or any
+    /// target-cfg variant). Per-target wiring is fine for us — we just want
+    /// to know whether a `cargo add` is still needed.
+    present: bool,
+    features: Vec<String>,
+}
+
+fn parse_manifest(text: &str) -> ManifestDeps {
+    let mut out = ManifestDeps::default();
+    let Ok(parsed) = text.parse::<toml::Table>() else {
+        return out;
+    };
+    // Top-level [dependencies] plus every [target.<cfg>.dependencies] table.
+    // We don't distinguish between them — a wasm-only dep still counts as
+    // "the project declares this dep".
+    let mut dep_tables: Vec<&toml::Table> = Vec::new();
+    if let Some(t) = parsed.get("dependencies").and_then(|v| v.as_table()) {
+        dep_tables.push(t);
+    }
+    if let Some(targets) = parsed.get("target").and_then(|v| v.as_table()) {
+        for (_, cfg) in targets {
+            if let Some(cfg_table) = cfg.as_table()
+                && let Some(t) = cfg_table.get("dependencies").and_then(|v| v.as_table())
+            {
+                dep_tables.push(t);
+            }
+        }
+    }
+    for t in dep_tables {
+        for (name, value) in t {
+            let entry = out.deps.entry(name.clone()).or_default();
+            entry.present = true;
+            if let Some(table) = value.as_table()
+                && let Some(arr) = table.get("features").and_then(|v| v.as_array())
+            {
+                for f in arr {
+                    if let Some(s) = f.as_str() {
+                        entry.features.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+impl ManifestDeps {
+    fn has(&self, name: &str) -> bool {
+        self.deps.get(name).map(|d| d.present).unwrap_or(false)
+    }
+
+    /// Returns the subset of `required` that is NOT enabled on `name`. When
+    /// the dep itself is missing, every required feature is missing too.
+    fn missing_features(&self, name: &str, required: &[&str]) -> Vec<String> {
+        let Some(d) = self.deps.get(name) else {
+            return required.iter().map(|s| s.to_string()).collect();
+        };
+        required
+            .iter()
+            .filter(|f| !d.features.iter().any(|x| x == *f))
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
+
+/// Append per-archetype dep checks based on what the source tree uses.
+/// Each block is conditional on the matching signal so we don't badger
+/// callers about deps they have no use for. Keep this list short and
+/// archetype-driven — generic dep audits belong in `audit_feature_flags`.
+fn extend_with_archetype_steps(
+    steps: &mut Vec<VerifyInstallStep>,
+    signals: &ArchetypeSignals,
+    manifest: &ManifestDeps,
+    crate_root: &Path,
+) {
+    let cargo_toml = crate_root.join("Cargo.toml");
+
+    // Cookie typed-headers require `axum-extra` with the `typed-header`
+    // feature; `headers` is needed for the `Cookie` type itself.
+    if signals.uses_cookies {
+        let missing = manifest.missing_features("axum-extra", &["typed-header"]);
+        let headers_missing = !manifest.has("headers");
+        if missing.is_empty() && !headers_missing {
+            steps.push(VerifyInstallStep {
+                id: "axum_extra_cookies",
+                title: "`axum-extra` (with `typed-header`) + `headers` for TypedHeader<Cookie>",
+                ok: true,
+                looked_in: vec![cargo_toml.clone()],
+                fix: None,
+                fix_location: None,
+            });
+        } else {
+            let mut fix = String::new();
+            if !manifest.has("axum-extra") || !missing.is_empty() {
+                fix.push_str(
+                    "axum-extra = { version = \"0.10\", features = [\"typed-header\"] }\n",
+                );
+            }
+            if headers_missing {
+                fix.push_str("headers = \"0.4\"\n");
+            }
+            steps.push(VerifyInstallStep {
+                id: "axum_extra_cookies",
+                title: "`axum-extra` (with `typed-header`) + `headers` for TypedHeader<Cookie>",
+                ok: false,
+                looked_in: vec![cargo_toml.clone()],
+                fix: Some(fix.trim_end().to_string()),
+                fix_location: Some(
+                    "[dependencies] table in Cargo.toml — guard with `[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]` if you only need them server-side"
+                        .into(),
+                ),
+            });
+        }
+    }
+
+    // src/sockets/ ⇒ WebSocket realtime. The generated socket code uses
+    // web_sys::WebSocket on the wasm side and tokio::sync::broadcast on the
+    // server side. Both sets of deps are required.
+    if signals.has_sockets {
+        let websys_missing = manifest.missing_features(
+            "web-sys",
+            &["WebSocket", "MessageEvent", "BinaryType", "ErrorEvent"],
+        );
+        let has_wasm_bindgen = manifest.has("wasm-bindgen");
+        if websys_missing.is_empty() && has_wasm_bindgen {
+            steps.push(VerifyInstallStep {
+                id: "realtime_wasm_deps",
+                title: "`web-sys` (WebSocket features) + `wasm-bindgen` for socket clients",
+                ok: true,
+                looked_in: vec![cargo_toml.clone()],
+                fix: None,
+                fix_location: None,
+            });
+        } else {
+            let mut fix = String::new();
+            if !manifest.has("web-sys") || !websys_missing.is_empty() {
+                fix.push_str(
+                    "web-sys = { version = \"0.3\", features = [\"WebSocket\", \"MessageEvent\", \"BinaryType\", \"ErrorEvent\"] }\n",
+                );
+            }
+            if !has_wasm_bindgen {
+                fix.push_str("wasm-bindgen = \"0.2\"\n");
+            }
+            steps.push(VerifyInstallStep {
+                id: "realtime_wasm_deps",
+                title: "`web-sys` (WebSocket features) + `wasm-bindgen` for socket clients",
+                ok: false,
+                looked_in: vec![cargo_toml.clone()],
+                fix: Some(fix.trim_end().to_string()),
+                fix_location: Some(
+                    "wasm-only deps under `[target.'cfg(target_arch = \"wasm32\")'.dependencies]` keep the server build lean"
+                        .into(),
+                ),
+            });
+        }
+
+        // Server side of realtime: tokio sync + time features power the
+        // broadcast::Sender + reconnect-with-backoff loops.
+        let tokio_missing = manifest.missing_features("tokio", &["sync", "time"]);
+        if tokio_missing.is_empty() {
+            steps.push(VerifyInstallStep {
+                id: "realtime_tokio_deps",
+                title: "`tokio` with `sync` + `time` features for broadcast::Sender",
+                ok: true,
+                looked_in: vec![cargo_toml.clone()],
+                fix: None,
+                fix_location: None,
+            });
+        } else {
+            steps.push(VerifyInstallStep {
+                id: "realtime_tokio_deps",
+                title: "`tokio` with `sync` + `time` features for broadcast::Sender",
+                ok: false,
+                looked_in: vec![cargo_toml.clone()],
+                fix: Some(format!(
+                    "tokio = {{ version = \"1\", features = [\"sync\", \"time\"] }}  # add missing: {}",
+                    tokio_missing.join(", ")
+                )),
+                fix_location: Some(
+                    "`[dependencies]` for shared use, or `[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]` if only the server uses tokio"
+                        .into(),
+                ),
+            });
+        }
+    }
+
+    // Uuid in source ⇒ uuid crate with v4 + serde when the project also
+    // serializes models. We only require serde when uuid is used alongside
+    // serde-derived types (the common case in 0.7 fullstack apps).
+    if signals.uses_uuid {
+        let needs_serde = signals.has_server || manifest.has("serde") || manifest.has("serde_json");
+        let required: &[&str] = if needs_serde {
+            &["v4", "serde"]
+        } else {
+            &["v4"]
+        };
+        let missing = manifest.missing_features("uuid", required);
+        if missing.is_empty() {
+            steps.push(VerifyInstallStep {
+                id: "uuid_dep",
+                title: "`uuid` with required features",
+                ok: true,
+                looked_in: vec![cargo_toml.clone()],
+                fix: None,
+                fix_location: None,
+            });
+        } else {
+            steps.push(VerifyInstallStep {
+                id: "uuid_dep",
+                title: "`uuid` with required features",
+                ok: false,
+                looked_in: vec![cargo_toml.clone()],
+                fix: Some(format!(
+                    "uuid = {{ version = \"1\", features = {:?} }}",
+                    required
+                )),
+                fix_location: Some("[dependencies] table in Cargo.toml".into()),
+            });
+        }
+    }
 }
 
 async fn resolve_crate_root(
@@ -386,18 +691,189 @@ fn App() -> Element {
         let src = crate_root.join("src");
         let main_rs = src.join("main.rs");
         let lib_rs = src.join("lib.rs");
-        let steps = vec![
+        let mut steps = vec![
             check_mod_components(&main_rs, &lib_rs),
             check_theme_asset(&src),
             check_components_dir(&src.join("components")),
         ];
+        let signals = ArchetypeSignals::scan(&src);
+        let archetype = signals.archetype_label();
+        let manifest_text =
+            std::fs::read_to_string(crate_root.join("Cargo.toml")).unwrap_or_default();
+        let manifest = parse_manifest(&manifest_text);
+        extend_with_archetype_steps(&mut steps, &signals, &manifest, crate_root);
         let missing: Vec<&'static str> = steps.iter().filter(|s| !s.ok).map(|s| s.id).collect();
         let fully_wired = missing.is_empty();
         VerifyInstallReport {
             project_root: crate_root.to_path_buf(),
             fully_wired,
+            archetype,
             steps,
             missing,
         }
+    }
+
+    #[test]
+    fn basic_archetype_has_no_extra_dep_steps() {
+        let dir = tempdir().unwrap();
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        let r = run(dir.path());
+        assert_eq!(r.archetype, "basic");
+        let extra_ids: Vec<&str> = r
+            .steps
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !matches!(*id, "mod_components" | "theme_asset" | "components_dir"))
+            .collect();
+        assert!(
+            extra_ids.is_empty(),
+            "basic archetype should not gain archetype steps, got {extra_ids:?}"
+        );
+    }
+
+    #[test]
+    fn fullstack_archetype_flags_axum_extra_for_cookies() {
+        let dir = tempdir().unwrap();
+        // src/server/ triggers the fullstack signal, and a TypedHeader<Cookie>
+        // reference is what we look for to add the axum-extra dep step.
+        write(
+            &dir.path().join("src/server/auth.rs"),
+            r#"use axum_extra::TypedHeader;
+use headers::Cookie;
+pub async fn check(_c: TypedHeader<Cookie>) {}
+"#,
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+"#,
+        );
+        let r = run(dir.path());
+        assert_eq!(r.archetype, "fullstack");
+        let step = r
+            .steps
+            .iter()
+            .find(|s| s.id == "axum_extra_cookies")
+            .expect("axum_extra_cookies step should be present");
+        assert!(!step.ok, "axum-extra missing should be flagged");
+        let fix = step.fix.as_deref().unwrap_or("");
+        assert!(
+            fix.contains("axum-extra"),
+            "fix should add axum-extra: {fix}"
+        );
+        assert!(
+            fix.contains("typed-header"),
+            "fix should enable typed-header feature: {fix}"
+        );
+    }
+
+    #[test]
+    fn realtime_archetype_flags_websys_and_tokio_features() {
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/sockets/board.rs"),
+            "// generated socket file\n",
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        // Missing wasm bindings and tokio features.
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+tokio = "1"
+"#,
+        );
+        let r = run(dir.path());
+        assert_eq!(r.archetype, "fullstack-realtime");
+        let websys = r
+            .steps
+            .iter()
+            .find(|s| s.id == "realtime_wasm_deps")
+            .expect("realtime_wasm_deps step should be present");
+        assert!(!websys.ok);
+        assert!(websys.fix.as_deref().unwrap_or("").contains("web-sys"));
+        assert!(websys.fix.as_deref().unwrap_or("").contains("WebSocket"));
+        let tokio = r
+            .steps
+            .iter()
+            .find(|s| s.id == "realtime_tokio_deps")
+            .expect("realtime_tokio_deps step should be present");
+        assert!(!tokio.ok);
+        assert!(tokio.fix.as_deref().unwrap_or("").contains("sync"));
+        assert!(tokio.fix.as_deref().unwrap_or("").contains("time"));
+    }
+
+    #[test]
+    fn realtime_archetype_passes_when_deps_correctly_declared() {
+        let dir = tempdir().unwrap();
+        write(&dir.path().join("src/sockets/board.rs"), "// socket\n");
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+tokio = { version = "1", features = ["sync", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["WebSocket", "MessageEvent", "BinaryType", "ErrorEvent"] }
+wasm-bindgen = "0.2"
+"#,
+        );
+        let r = run(dir.path());
+        let websys = r
+            .steps
+            .iter()
+            .find(|s| s.id == "realtime_wasm_deps")
+            .unwrap();
+        assert!(websys.ok, "expected realtime_wasm_deps ok, got: {websys:?}");
+        let tokio = r
+            .steps
+            .iter()
+            .find(|s| s.id == "realtime_tokio_deps")
+            .unwrap();
+        assert!(tokio.ok, "expected realtime_tokio_deps ok, got: {tokio:?}");
+    }
+
+    #[test]
+    fn uuid_usage_triggers_uuid_dep_step() {
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/model/todo.rs"),
+            "pub struct Todo { pub id: Uuid }\n",
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+"#,
+        );
+        let r = run(dir.path());
+        let step = r.steps.iter().find(|s| s.id == "uuid_dep").unwrap();
+        assert!(!step.ok);
+        assert!(step.fix.as_deref().unwrap_or("").contains("uuid"));
+        assert!(step.fix.as_deref().unwrap_or("").contains("v4"));
     }
 }
