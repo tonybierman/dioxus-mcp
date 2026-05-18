@@ -120,9 +120,7 @@ impl DioxusMcp {
     )]
     async fn signal_drilled_2_levels(
         &self,
-        Parameters(p): Parameters<
-            tools::lints::signal_drilled_2_levels::SignalDrilledParams,
-        >,
+        Parameters(p): Parameters<tools::lints::signal_drilled_2_levels::SignalDrilledParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::lints::signal_drilled_2_levels::signal_drilled_2_levels(&self.state, p).await {
             Ok(r) => ok_json(&r),
@@ -204,11 +202,75 @@ impl DioxusMcp {
     )]
     async fn presence_map_unbounded(
         &self,
-        Parameters(p): Parameters<
-            tools::lints::presence_map_unbounded::PresenceMapUnboundedParams,
-        >,
+        Parameters(p): Parameters<tools::lints::presence_map_unbounded::PresenceMapUnboundedParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::lints::presence_map_unbounded::presence_map_unbounded(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Hint when client and server independently validate the same string-literal set — the canonical 'shared enum, please' shape generators hit when one side has `const COLUMNS: [(&str, …); 3] = [(\"todo\", …), …]` and the server `match column { \"todo\" | \"doing\" | \"done\" => … }` re-pattern-matches the same values. Severity `info`, confidence `low` — both sides currently agree, but adding a value to one half silently desyncs from the other. Fix suggestion is a shared `enum` under `src/model/` with serde + strum derives so the client `for`-loop and the server pattern match both drive off one source of truth."
+    )]
+    async fn shared_enum_validation(
+        &self,
+        Parameters(p): Parameters<tools::lints::shared_enum_validation::SharedEnumValidationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::shared_enum_validation::shared_enum_validation(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Hint when a model's `id` field encodes optimistic-placeholder state via a literal string prefix (`\"tmp-\"`, `\"pending-\"`, `\"local-\"`, …). Detects two complementary shapes: `<expr>.id.starts_with(\"tmp-\")` (read site — consumer branches on the magic prefix) and `format!(\"tmp-{…}\", …)` (write site — optimistic-create path forges an ID). Severity `info`, confidence `low` — the pattern works but is brittle, and a real ID that happens to start with `tmp-` would be silently mis-classified. Fix suggestion is a typed `pending: bool` field on the model or a sidecar `pending: HashSet<Id>` signal."
+    )]
+    async fn magic_id_prefix_for_optimistic(
+        &self,
+        Parameters(p): Parameters<tools::lints::magic_id_prefix::MagicIdPrefixParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::magic_id_prefix::magic_id_prefix_for_optimistic(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Hint when a `#[component] fn` takes an owned non-Signal arg type (`Vec<T>` or a user struct) that will be re-cloned on every parent render. Skips `Signal<…>` / `ReadOnlySignal<…>` / `EventHandler<…>` / `Memo<…>` / `Resource<…>` / `Callback<…>` (reactive handles, not value clones) and stdlib types we don't want to nag about (`String`, `Option`, `HashMap`, primitives, …). Emits one `info`-severity finding per qualifying arg with `confidence: medium` when a *reactive* parent caller is observed (its body has `.set()` / `.with_mut()` / `+=` writes), or `confidence: low` otherwise. `reactive_callers` lists the parents whose user-driven re-renders trigger the reclone. `fix` suggests `ReadOnlySignal<Vec<T>>` / `Rc<[T]>` for Vecs and `ReadOnlySignal<T>` / `Rc<T>` for owned structs."
+    )]
+    async fn vec_or_owned_prop_passthrough(
+        &self,
+        Parameters(p): Parameters<
+            tools::lints::vec_or_owned_prop_passthrough::VecOrOwnedPropParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::vec_or_owned_prop_passthrough::vec_or_owned_prop_passthrough(
+            &self.state,
+            p,
+        )
+        .await
+        {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Flag pure helper fns whose body is byte-identical across `src/components/` and `src/server/`. Generators copy-paste shared logic into both halves of the app instead of lifting it into `src/model/`; the two impls then drift when one side patches a bug and the other doesn't. Skips `async fn` (server fns themselves), `#[component]` fns, and bodies with fewer than 2 statements (wrappers that legitimately differ). Emits `warning`-severity findings with `sites: [{file, line, side}]` so the reviewer sees every duplicate at once, plus a paste-ready fix recommending `src/model/<name>.rs`. Use this on generated apps before they accumulate two-way drift."
+    )]
+    async fn duplicate_helper_client_server(
+        &self,
+        Parameters(p): Parameters<
+            tools::lints::duplicate_helper_client_server::DuplicateHelperParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::duplicate_helper_client_server::duplicate_helper_client_server(
+            &self.state,
+            p,
+        )
+        .await
+        {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -463,7 +525,7 @@ USE THIS when the user asks: \"What's the latency distribution for <fn>?\", \"Wh
     }
 
     #[tool(
-        description = "Run `cargo check` against the Dioxus project with a structured diagnostic shape — the closing-the-loop step after `execute_code`. Auto-picks a sensible feature combo (no extras when `fullstack` is already on the dep, `server` for the canonical 0.7 `default=[\"web\"]` + opt-in `server` sibling, `web,server` for older layouts) or accepts an explicit `features:` list. **Runs BOTH legs by default** (host check + `--target wasm32-unknown-unknown`) so `dx serve`-only wasm errors don't slip past a green host build; pass `target_wasm: false` to run only the host leg (faster, fine for pure-server changes) or `target_wasm: true` to run only the wasm leg. Per-leg detail lands in `legs[]`; `status` aggregates worst-of (host pass + wasm fail → `failed`). Parses `--message-format=json` and returns separate `errors` / `warnings` lists with file/line/column/code + cargo's pre-rendered diagnostic text; both lists are capped via `max_messages` (default 20), and `truncated: true` signals when caps fired. `status` is one of `passed | failed | timed_out | spawn_failed`. Default timeout 300s per leg (override with `timeout_secs`). Does NOT shell out to `dx serve`; this is a static compile check, not an end-to-end serve probe."
+        description = "Run `cargo check` against the Dioxus project with a structured diagnostic shape — the closing-the-loop step after `execute_code`. Auto-picks a sensible feature combo (no extras when `fullstack` is already on the dep, `server` for the canonical 0.7 `default=[\"web\"]` + opt-in `server` sibling, `web,server` for older layouts) or accepts an explicit `features:` list. **Runs BOTH legs by default** (host check + `--target wasm32-unknown-unknown`) so `dx serve`-only wasm errors don't slip past a green host build; pass `target_wasm: false` to run only the host leg (faster, fine for pure-server changes) or `target_wasm: true` to run only the wasm leg. **Quick mode** (`quick: true`) keeps both legs scheduled but short-circuits the wasm leg when the host leg fails — fast-fail without the caller having to remember to flip `target_wasm: false` on subsequent runs. Per-leg detail lands in `legs[]`; `status` aggregates worst-of (host pass + wasm fail → `failed`). Parses `--message-format=json` and returns separate `errors` / `warnings` lists with file/line/column/code + cargo's pre-rendered diagnostic text; both lists are capped via `max_messages` (default 20), and `truncated: true` signals when caps fired. `status` is one of `passed | failed | timed_out | spawn_failed`. Default timeout 300s per leg (override with `timeout_secs`). Does NOT shell out to `dx serve`; this is a static compile check, not an end-to-end serve probe."
     )]
     async fn build_and_smoke(
         &self,

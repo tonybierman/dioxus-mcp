@@ -59,6 +59,12 @@ pub struct OptimisticLockGateFinding {
     /// event handler) — still the same staleness gate, just less obviously.
     pub confidence: &'static str,
     pub message: String,
+    /// Paste-ready Store skeleton sized to the lock signal. Generators
+    /// hit this exact shape (snapshot + bump + compare around a server
+    /// fn call); the fix is always "lift the gate into a Store
+    /// generation method". Surfaced here so the caller doesn't have to
+    /// cross-reference `get_dsl_spec`.
+    pub fix: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,7 +211,7 @@ fn scan_component(
                 line: hit.snapshot_line,
                 component: component.clone(),
                 signal: signal.clone(),
-                snapshot: hit.snapshot_name,
+                snapshot: hit.snapshot_name.clone(),
                 confidence: "high",
                 message: format!(
                     "`{signal}` is hand-rolling the optimistic-lock staleness gate: \
@@ -218,6 +224,7 @@ fn scan_component(
                      place. See the `Store` primitive in `get_dsl_spec`.",
                     snap = snapshot_name,
                 ),
+                fix: lock_gate_store_skeleton(signal, &snapshot_name),
             });
         }
     }
@@ -266,7 +273,7 @@ fn scan_component(
             line: hit.snapshot_line,
             component: component.clone(),
             signal: signal.clone(),
-            snapshot: hit.snapshot_name,
+            snapshot: hit.snapshot_name.clone(),
             confidence: "medium",
             message: format!(
                 "`{signal}` looks like the optimistic-lock staleness gate split \
@@ -278,8 +285,31 @@ fn scan_component(
                  place. See the `Store` primitive in `get_dsl_spec`.",
                 snap = snapshot_name,
             ),
+            fix: lock_gate_store_skeleton(signal, &snapshot_name),
         });
     }
+}
+
+/// Paste-ready Store snippet showing how to lift an
+/// `optimistic_lock_gate` signal into a generation method. Tuned to the
+/// canonical shape: a `revision` counter the caller bumps before a
+/// reconciliation and snapshots while gating the apply.
+fn lock_gate_store_skeleton(signal: &str, snapshot: &str) -> String {
+    format!(
+        "// Lift `{signal}` into a Store generation method:\n\
+         pub struct BoardStore {{ revision: u32 /* renamed from {signal} */ }}\n\
+         impl BoardStore {{\n\
+         \x20\x20\x20\x20pub fn bump_revision(&mut self) -> u32 {{\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20self.revision = self.revision.wrapping_add(1);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20self.revision\n\
+         \x20\x20\x20\x20}}\n\
+         \x20\x20\x20\x20pub fn matches(&self, rev: u32) -> bool {{ self.revision == rev }}\n\
+         }}\n\
+         // Call site (replaces the snapshot + compare):\n\
+         //   let {snapshot} = store.read().revision;       // snapshot\n\
+         //   store.write().bump_revision();                // bump before optimistic write\n\
+         //   if store.read().matches({snapshot}) {{ /* apply server reconcile */ }}",
+    )
 }
 
 /// Like `detect_in_source` but skips the bump requirement — the bump is

@@ -1353,3 +1353,82 @@ components:
     let r = try_call_tool_at(tmp.path(), "execute_code", json!({"code": yaml}));
     assert!(r.is_err(), "should reject wrong version, got: {r:?}");
 }
+
+// ---------- iter03 baseline ----------
+
+/// Regression-pin the iter03 generator shapes against the full lint
+/// suite. The fixture under `tests/fixtures/iter03_baseline/` mirrors the
+/// canonical patterns the standup-board generator hits: presence/session
+/// `Lazy<Mutex<HashMap>>` statics, an optimistic-lock signal, owned
+/// `Vec<Card>` props through reactive parents, a magic-`"tmp-"` ID
+/// prefix, client/server enum sets, a bootstrap-gate signal, and a
+/// duplicated `normalize_positions` helper.
+///
+/// The test asserts that EACH targeted lint emits AT LEAST the expected
+/// count. We deliberately don't pin upper bounds — a future lint refinement
+/// that catches more should still pass — but a lint that silently goes
+/// silent (or whose finding code is renamed without updating the rollup)
+/// fails this test loudly.
+#[test]
+fn tool_lint_project_iter03_baseline() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/iter03_baseline");
+
+    let r = call_tool_at(&fixture, "lint_project", json!({}));
+
+    let counts: std::collections::HashMap<String, u64> = r["issues_by_lint"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["lint"].as_str().unwrap().to_string(),
+                c["issues"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+
+    // Each entry is a per-lint minimum: the iter03 fixture is built to
+    // exercise these shapes. Bumping the assertion upward should be a
+    // conscious decision, not a side effect.
+    let expected_min: &[(&str, u64)] = &[
+        ("presence_map_unbounded", 2),
+        ("optimistic_lock_gate", 1),
+        ("duplicate_helper_client_server", 1),
+        ("vec_or_owned_prop_passthrough", 1),
+        ("magic_id_prefix_for_optimistic", 2),
+        ("shared_enum_validation", 1),
+        ("signal_lint", 1),
+        ("insecure_set_cookie", 1),
+    ];
+    for (lint, min) in expected_min {
+        let actual = counts.get(*lint).copied().unwrap_or(0);
+        assert!(
+            actual >= *min,
+            "lint `{lint}` expected ≥ {min}, got {actual}. \
+             Full counts: {counts:?}"
+        );
+    }
+
+    // Headline rollup must surface specific finding codes so a future
+    // accidental code rename (`presence_map_narrow_eviction` →
+    // `narrow_remove_only` etc.) fails this test instead of silently
+    // dropping the code from the rollup.
+    let headline = r["headline"]
+        .as_array()
+        .expect("headline array")
+        .iter()
+        .filter_map(|h| h["code"].as_str().map(|s| s.to_string()))
+        .collect::<std::collections::HashSet<String>>();
+    let expected_codes = [
+        "presence_map_narrow_eviction",
+        "presence_map_unbounded",
+        "magic_id_prefix_for_optimistic",
+        "shared_enum_validation",
+    ];
+    for code in expected_codes {
+        assert!(
+            headline.contains(code),
+            "headline missing code `{code}`. Full headline codes: {headline:?}"
+        );
+    }
+}

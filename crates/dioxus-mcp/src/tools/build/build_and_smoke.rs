@@ -58,6 +58,13 @@ pub struct BuildAndSmokeParams {
     /// so callers know the report isn't exhaustive.
     #[serde(default)]
     pub max_messages: Option<usize>,
+    /// When true AND `target_wasm` is not set, run the host leg first and
+    /// only run the wasm leg if host passed. Keeps fast-fail behaviour
+    /// without forcing the caller to flip `target_wasm: false` (which
+    /// silently drops wasm coverage on the next run). Default: false —
+    /// both legs run unconditionally.
+    #[serde(default)]
+    pub quick: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +161,7 @@ pub async fn build_and_smoke(
     let timeout_secs = p.timeout_secs.unwrap_or(300);
     let max_messages = p.max_messages.unwrap_or(20);
     let no_default_features = p.no_default_features.unwrap_or(false);
+    let quick = p.quick.unwrap_or(false);
 
     // Default to running both legs: host check + wasm check. The host leg
     // catches `cargo build` errors fast (no `dx serve` round-trip) while the
@@ -173,8 +181,17 @@ pub async fn build_and_smoke(
     let mut aggregate_truncated = false;
     let mut first_fatal: Option<String> = None;
     let mut first_invocation: Option<String> = None;
+    let mut quick_skipped_wasm = false;
 
     for leg in &legs_to_run {
+        // Quick mode: when both legs are scheduled and the previous leg
+        // failed, skip the remaining ones. The whole point of `quick: true`
+        // is that the caller doesn't pay 30s of wasm compile to find out
+        // host already broke.
+        if quick && legs_to_run.len() > 1 && legs.iter().any(|l| l.status != "passed") {
+            quick_skipped_wasm = true;
+            break;
+        }
         let mut args: Vec<String> = vec![
             "check".into(),
             "--message-format=json".into(),
@@ -271,6 +288,14 @@ pub async fn build_and_smoke(
             "only the {only} leg ran (`target_wasm:` was passed explicitly); the {other} \
              leg may still have compile errors — omit `target_wasm` to run both"
         ));
+    }
+    if quick_skipped_wasm {
+        next_steps.push(
+            "host leg failed under `quick: true` — wasm leg skipped to fail fast. \
+             Fix the host errors and re-run; once host passes, the wasm leg will \
+             run automatically (no flag flip needed)."
+                .into(),
+        );
     }
 
     let total_ms = outer_start.elapsed().as_millis();
@@ -658,6 +683,57 @@ not-json garbage
         assert_eq!(
             resolve_features(&project, None),
             vec!["web".to_string(), "server".to_string()]
+        );
+    }
+
+    /// `quick: true` is a per-run knob; this test pins the helper that
+    /// decides whether to short-circuit. The check is: if any earlier leg
+    /// failed AND there are more legs to run AND quick is set, skip.
+    #[test]
+    fn quick_short_circuits_on_failed_first_leg() {
+        let legs = vec![BuildLegResult {
+            target: "host",
+            invocation: "cargo check".into(),
+            duration_ms: 1,
+            status: "failed",
+            errors_count: 1,
+            warnings_count: 0,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            truncated: false,
+            fatal: None,
+        }];
+        let quick = true;
+        let legs_remaining = 2;
+        let should_skip = quick && legs_remaining > 1 && legs.iter().any(|l| l.status != "passed");
+        assert!(
+            should_skip,
+            "quick + remaining legs + failed prior should short-circuit"
+        );
+    }
+
+    /// Quick mode is a no-op when only one leg is scheduled (the caller
+    /// already opted into a single-leg run via `target_wasm`).
+    #[test]
+    fn quick_does_not_apply_when_single_leg() {
+        let legs = vec![BuildLegResult {
+            target: "host",
+            invocation: "cargo check".into(),
+            duration_ms: 1,
+            status: "failed",
+            errors_count: 1,
+            warnings_count: 0,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            truncated: false,
+            fatal: None,
+        }];
+        let quick = true;
+        let legs_remaining = 1;
+        let should_skip = quick && legs_remaining > 1 && legs.iter().any(|l| l.status != "passed");
+        assert!(
+            !should_skip,
+            "single-leg run shouldn't trigger the short-circuit"
         );
     }
 

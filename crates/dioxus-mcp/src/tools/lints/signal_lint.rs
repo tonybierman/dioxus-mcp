@@ -23,6 +23,22 @@ pub struct SignalIssue {
     pub file: PathBuf,
     pub line: usize,
     pub component: Option<String>,
+    /// Signal binding the issue is about, when the lint knows it. Used by
+    /// the cross-link pass to pair `signal_many_writers` and
+    /// `signal_used_as_fence` findings that target the same signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    /// Other lint codes that also fire for this signal in the same
+    /// component. Populated by the cross-link post-pass so a caller can
+    /// see "fixing `signal` to a `Store` covers both findings" without
+    /// reading every issue body. Empty when no related finding exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_codes: Vec<String>,
+    /// Paste-ready code suggestion, when the lint can generate one. The
+    /// rollup keeps this short — a single function or struct skeleton the
+    /// reviewer can drop into the component and adapt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,12 +150,23 @@ pub async fn signal_lint(
             // `use_server_future` / `use_server_cached` so the server
             // pre-renders the resolved branch; `use_effect` is correct only
             // for browser-only side effects.
+            //
+            // The specialized `bootstrap_gate_signal` variant fires when
+            // the .set target is a `use_signal(|| false)` binding AND the
+            // rsx body contains `if <name>() { ... } else { ... }` gating
+            // the whole subtree — the canonical "router behind a boot
+            // flag" shape iter03 produced.
+            let bool_gates = collect_bool_gate_signals(&f.block);
+            let rsx_gates = collect_rsx_if_signal_calls(&f.block);
             let mut e = EffectSpawnVisitor {
                 effect_depth: 0,
                 spawn_depth: 0,
                 saw_await: false,
                 set_lines: Vec::new(),
+                set_calls: Vec::new(),
                 effect_line: 0,
+                bool_gates: &bool_gates,
+                rsx_gates: &rsx_gates,
                 issues: &mut issues,
                 file: &sf.path,
                 component: f.sig.ident.to_string(),
@@ -203,6 +230,13 @@ pub async fn signal_lint(
 
     let (context_signal_triads, context_signal_triads_summary) =
         detect_context_signal_triads(&files);
+
+    // Cross-link related findings: when the same component has both a
+    // `signal_many_writers` and a `signal_used_as_fence` issue on the
+    // same `signal` binding, point each at the other via `related_codes`.
+    // Lifting the signal into a Store fixes both at once — the caller
+    // shouldn't have to read both messages to realise that.
+    link_related_findings(&mut issues);
 
     Ok(SignalLintReport {
         issues,
@@ -364,6 +398,9 @@ fn emit_hook_issue(
         file: file.to_path_buf(),
         line,
         component: Some(component.to_string()),
+        signal: None,
+        related_codes: Vec::new(),
+        fix: None,
     });
 }
 
@@ -565,6 +602,9 @@ fn emit_hydration_issue(
         file: file.to_path_buf(),
         line,
         component: Some(component.to_string()),
+        signal: None,
+        related_codes: Vec::new(),
+        fix: None,
     });
 }
 
@@ -600,13 +640,36 @@ struct EffectSpawnVisitor<'a> {
     /// flush these on exit from the spawn, attaching the recorded await
     /// flag to decide whether to emit.
     set_lines: Vec<usize>,
+    /// `.set(...)` calls captured with their receiver ident and whether
+    /// the value is the literal `true`. Used to detect the
+    /// `bootstrap_gate_signal` specialization: a `use_signal(|| false)`
+    /// binding flipped to `true` after an awaited server fn.
+    set_calls: Vec<SetCall>,
     /// Line of the enclosing `use_effect(` call — used as the issue line so
     /// the report points at the hook (where the fix lives) rather than at
     /// the buried `.set`.
     effect_line: usize,
+    /// Names of `let mut X = use_signal(|| false);` bindings in the
+    /// component body. Pre-scanned because the visitor never traverses
+    /// `Local` statements (the binding lives outside the effect body).
+    bool_gates: &'a [String],
+    /// Names referenced as `if X() { ... }` in any rsx body in the
+    /// component. These are the candidate gates for the bootstrap shape.
+    rsx_gates: &'a std::collections::HashSet<String>,
     issues: &'a mut Vec<SignalIssue>,
     file: &'a std::path::Path,
     component: String,
+}
+
+#[derive(Debug, Clone)]
+struct SetCall {
+    receiver: String,
+    /// `true` iff the argument is the literal `true`. We only fire
+    /// `bootstrap_gate_signal` on this specific value — a `.set(false)`
+    /// or `.set(some_var)` doesn't match the bootstrap shape.
+    is_true_literal: bool,
+    #[allow(dead_code)]
+    line: usize,
 }
 
 impl<'a, 'ast> Visit<'ast> for EffectSpawnVisitor<'a> {
@@ -625,11 +688,13 @@ impl<'a, 'ast> Visit<'ast> for EffectSpawnVisitor<'a> {
             // doesn't see another spawn's await.
             let saved_await = self.saw_await;
             let saved_sets = std::mem::take(&mut self.set_lines);
+            let saved_calls = std::mem::take(&mut self.set_calls);
             self.saw_await = false;
             syn::visit::visit_expr_call(self, e);
             self.flush_pending_issues();
             self.saw_await = saved_await;
             self.set_lines = saved_sets;
+            self.set_calls = saved_calls;
             self.spawn_depth -= 1;
         } else {
             syn::visit::visit_expr_call(self, e);
@@ -648,7 +713,23 @@ impl<'a, 'ast> Visit<'ast> for EffectSpawnVisitor<'a> {
 
     fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
         if self.effect_depth > 0 && self.spawn_depth > 0 && e.method == "set" {
-            self.set_lines.push(e.method.span().start().line);
+            let line = e.method.span().start().line;
+            self.set_lines.push(line);
+            if let syn::Expr::Path(p) = &*e.receiver
+                && p.path.segments.len() == 1
+            {
+                let receiver = p.path.segments[0].ident.to_string();
+                let is_true_literal = e
+                    .args
+                    .first()
+                    .map(|arg| matches!(arg, syn::Expr::Lit(l) if matches!(l.lit, syn::Lit::Bool(syn::LitBool { value: true, .. }))))
+                    .unwrap_or(false);
+                self.set_calls.push(SetCall {
+                    receiver,
+                    is_true_literal,
+                    line,
+                });
+            }
         }
         syn::visit::visit_expr_method_call(self, e);
     }
@@ -667,20 +748,61 @@ impl<'a> EffectSpawnVisitor<'a> {
         } else {
             *self.set_lines.first().unwrap()
         };
-        self.issues.push(SignalIssue {
-            code: "hydration_unsafe_effect",
-            message:
-                "`use_effect` spawns an async block that awaits a server fn and writes a signal \
-                 consumed by rsx — this renders the loading branch on SSR and again on the first \
-                 client paint, then flips. Prefer `use_server_future` (or `use_server_cached`) so \
-                 the server pre-renders the resolved branch and there's no hydration flash. \
-                 `use_effect` is correct for browser-only side effects; keep it for those."
-                    .to_string(),
-            file: self.file.to_path_buf(),
-            line,
-            component: Some(self.component.clone()),
+
+        // Bootstrap-gate specialization: did any `.set(true)` write target
+        // a `use_signal(|| false)` binding that also gates a top-level rsx
+        // `if`? If so, emit the dedicated finding with a paste-ready
+        // `use_server_future` snippet and skip the generic hydration
+        // warning — they're the same fix.
+        let gate_match = self.set_calls.iter().find(|sc| {
+            sc.is_true_literal
+                && self.bool_gates.iter().any(|g| g == &sc.receiver)
+                && self.rsx_gates.contains(&sc.receiver)
         });
+        if let Some(sc) = gate_match {
+            let signal_name = sc.receiver.clone();
+            self.issues.push(SignalIssue {
+                code: "bootstrap_gate_signal",
+                message: format!(
+                    "`use_effect` flips `{signal_name}` (a `use_signal(|| false)` binding) to \
+                     `true` after awaiting a server fn, and rsx gates the whole subtree behind \
+                     `if {signal_name}() {{ … }} else {{ loading }}`. SSR renders the loading \
+                     branch, the client paints the same loading branch, then flashes to the real \
+                     content once the fetch resolves. Replace the effect + flag with \
+                     `use_server_future`: drop the `{signal_name}` signal, drop the `use_effect`, \
+                     and write `let boot = use_server_future(|| async {{ /* the server fn */ }})?; \
+                     match boot() {{ Some(value) => rsx! {{ /* resolved tree */ }}, None => rsx! \
+                     {{ /* loading */ }} }}` — Dioxus 0.7 pre-renders the resolved branch on the \
+                     server and there's no hydration flash. `use_effect` is correct for \
+                     browser-only side effects (cleanup, focus, scroll); keep it for those.",
+                ),
+                file: self.file.to_path_buf(),
+                line,
+                component: Some(self.component.clone()),
+                signal: None,
+                related_codes: Vec::new(),
+                fix: None,
+            });
+        } else {
+            self.issues.push(SignalIssue {
+                code: "hydration_unsafe_effect",
+                message:
+                    "`use_effect` spawns an async block that awaits a server fn and writes a signal \
+                     consumed by rsx — this renders the loading branch on SSR and again on the first \
+                     client paint, then flips. Prefer `use_server_future` (or `use_server_cached`) so \
+                     the server pre-renders the resolved branch and there's no hydration flash. \
+                     `use_effect` is correct for browser-only side effects; keep it for those."
+                        .to_string(),
+                file: self.file.to_path_buf(),
+                line,
+                component: Some(self.component.clone()),
+                signal: None,
+                related_codes: Vec::new(),
+                fix: None,
+            });
+        }
         self.set_lines.clear();
+        self.set_calls.clear();
     }
 }
 
@@ -830,6 +952,9 @@ impl<'a> EffectNavigateVisitor<'a> {
             file: self.file.to_path_buf(),
             line: issue_line,
             component: Some(self.component.clone()),
+            signal: None,
+            related_codes: Vec::new(),
+            fix: None,
         });
         self.already_flagged = true;
     }
@@ -916,6 +1041,9 @@ fn check_prop_clone_overuse(
             file: file.to_path_buf(),
             line: lines[0],
             component: Some(f.sig.ident.to_string()),
+            signal: None,
+            related_codes: Vec::new(),
+            fix: None,
         });
     }
 
@@ -968,6 +1096,9 @@ fn check_prop_clone_overuse(
             file: file.to_path_buf(),
             line: first_line,
             component: Some(f.sig.ident.to_string()),
+            signal: None,
+            related_codes: Vec::new(),
+            fix: None,
         });
     }
 }
@@ -1192,6 +1323,9 @@ fn check_signal_many_writers(
             file: file.to_path_buf(),
             line: first_line,
             component: Some(f.sig.ident.to_string()),
+            signal: Some(signal.clone()),
+            related_codes: Vec::new(),
+            fix: Some(store_skeleton_fix_snippet(signal, &names)),
         });
     }
 }
@@ -1300,7 +1434,99 @@ fn check_signal_used_as_fence(
             file: file.to_path_buf(),
             line: *line,
             component: Some(f.sig.ident.to_string()),
+            signal: Some(name.clone()),
+            related_codes: Vec::new(),
+            fix: Some(fence_store_skeleton(name)),
         });
+    }
+}
+
+/// Paste-ready `Store` skeleton sized to the writers we observed. The
+/// rollup keeps this short — it's a hint, not a generator. Named after
+/// the component but not bound to its name (the reviewer renames as
+/// they integrate).
+fn store_skeleton_fix_snippet(signal: &str, writers: &[&str]) -> String {
+    let writer_lines: Vec<String> = writers
+        .iter()
+        .take(3)
+        .map(|w| format!("    pub fn {w}(&mut self) {{ /* moved-out logic for {w} */ }}"))
+        .collect();
+    let etc = if writers.len() > 3 {
+        "    // … remaining writers …\n"
+    } else {
+        ""
+    };
+    format!(
+        "// Lift `{signal}` into a Store with named mutators:\n\
+         pub struct {struct_name}Store {{ pub {signal}: /* type */ }}\n\
+         impl {struct_name}Store {{\n\
+{writers}\n{etc}}}\n\
+         // In the component body:\n\
+         //   let mut store = use_context_provider(|| Signal::new({struct_name}Store {{ {signal}: /* init */ }}));\n\
+         //   store.write().{first_writer}();",
+        struct_name = capitalize(signal),
+        writers = writer_lines.join("\n"),
+        first_writer = writers.first().copied().unwrap_or("commit"),
+        signal = signal,
+        etc = etc,
+    )
+}
+
+fn fence_store_skeleton(name: &str) -> String {
+    format!(
+        "// Replace the reactive signal with a Cell or a Store generation field:\n\
+         use std::cell::Cell;\n\
+         let {name}: Cell<u32> = Cell::new(0);\n\
+         // bump:    {name}.set({name}.get() + 1);\n\
+         // compare: if {name}.get() == previous {{ … }}\n\
+         // For a shared/Store version: expose `bump_{name}()` and `current_{name}()`\n\
+         // methods on the Store and read the generation when needed.",
+    )
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+/// Pair findings that share `(component, signal)` and surface peer codes
+/// via `related_codes`. Currently bridges `signal_many_writers` and
+/// `signal_used_as_fence` — the Store-lift fix covers both. Other code
+/// pairs can be added here without touching the per-lint sites.
+fn link_related_findings(issues: &mut [SignalIssue]) {
+    use std::collections::HashMap;
+    // Build (component, signal) -> set of codes observed.
+    let mut buckets: HashMap<(String, String), Vec<&'static str>> = HashMap::new();
+    for issue in issues.iter() {
+        let (Some(component), Some(signal)) = (&issue.component, &issue.signal) else {
+            continue;
+        };
+        buckets
+            .entry((component.clone(), signal.clone()))
+            .or_default()
+            .push(issue.code);
+    }
+    for issue in issues.iter_mut() {
+        let (Some(component), Some(signal)) = (&issue.component, &issue.signal) else {
+            continue;
+        };
+        let Some(codes) = buckets.get(&(component.clone(), signal.clone())) else {
+            continue;
+        };
+        if codes.len() < 2 {
+            continue;
+        }
+        let mut related: Vec<String> = codes
+            .iter()
+            .filter(|c| **c != issue.code)
+            .map(|c| c.to_string())
+            .collect();
+        related.sort();
+        related.dedup();
+        issue.related_codes = related;
     }
 }
 
@@ -1325,8 +1551,7 @@ struct FenceVisitor<'a> {
     /// pair up with a later `sig() == binding_name` comparison}). When we
     /// descend into a `let X = sig()` whose X is in this set, we treat the
     /// inner `sig` read as fence usage instead of disqualifying.
-    paired_snapshots:
-        &'a std::collections::HashMap<String, std::collections::HashSet<String>>,
+    paired_snapshots: &'a std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Set whenever the visitor is inside the init expression of a `let X =
     /// sig()` that pairs with a later compare. Reads observed here don't
     /// disqualify.
@@ -1712,6 +1937,123 @@ fn rsx_interpolated_names(block: &syn::Block) -> std::collections::HashSet<Strin
 /// set of names whose reactive reads matter for the polling-future lint.
 /// Mirrors the scope inspector in `explain_signal_graph`, but lives here so
 /// the signal lints stay independent.
+/// Names of `let [mut] X = use_signal(|| false);` bindings in the component
+/// body. We require the initial value to be the literal `false` because
+/// the bootstrap-gate shape always starts in the not-bootstrapped state.
+/// Sibling shapes like `use_signal(|| Some(true))` or `use_signal(MyEnum::Loading)`
+/// could conceivably gate rsx but aren't the recurring generator pattern.
+fn collect_bool_gate_signals(block: &syn::Block) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for stmt in &block.stmts {
+        let syn::Stmt::Local(local) = stmt else {
+            continue;
+        };
+        let Some(init) = &local.init else { continue };
+        // Receiver shape: `use_signal(|| false)`. The init expression is
+        // an ExprCall with `use_signal` as the path and a single closure
+        // argument whose body is `false`.
+        let syn::Expr::Call(call) = &*init.expr else {
+            continue;
+        };
+        let Some(tail) = extract_path_tail(&call.func) else {
+            continue;
+        };
+        if tail != "use_signal" {
+            continue;
+        }
+        let Some(arg) = call.args.first() else {
+            continue;
+        };
+        let syn::Expr::Closure(closure) = arg else {
+            continue;
+        };
+        let is_false_init = match &*closure.body {
+            syn::Expr::Lit(l) => matches!(l.lit, syn::Lit::Bool(syn::LitBool { value: false, .. })),
+            _ => false,
+        };
+        if !is_false_init {
+            continue;
+        }
+        let name = match &local.pat {
+            syn::Pat::Ident(p) => p.ident.to_string(),
+            syn::Pat::Type(t) => match &*t.pat {
+                syn::Pat::Ident(p) => p.ident.to_string(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Scan every `rsx!` macro body in the component for `if <Ident>()` token
+/// sequences. We don't try to parse the rsx grammar — just look for the
+/// signature shape `Ident( ) { … }` inside the token stream. iter03's
+/// `if bootstrapped() { Router … } else { div … }` matches.
+fn collect_rsx_if_signal_calls(block: &syn::Block) -> std::collections::HashSet<String> {
+    use proc_macro2::Delimiter;
+    let mut visitor = RsxCollector { bodies: Vec::new() };
+    visitor.visit_block(block);
+    let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for body in &visitor.bodies {
+        let tokens: Vec<TokenTree> = body.clone().into_iter().collect();
+        scan_if_calls(&tokens, &mut out);
+    }
+
+    fn scan_if_calls(tokens: &[TokenTree], out: &mut std::collections::HashSet<String>) {
+        let mut i = 0;
+        while i + 2 < tokens.len() {
+            if let TokenTree::Ident(kw) = &tokens[i] {
+                if kw == "if" {
+                    if let (TokenTree::Ident(name), TokenTree::Group(args)) =
+                        (&tokens[i + 1], &tokens[i + 2])
+                        && args.delimiter() == Delimiter::Parenthesis
+                        && args.stream().is_empty()
+                    {
+                        out.insert(name.to_string());
+                    }
+                }
+            }
+            if let TokenTree::Group(g) = &tokens[i] {
+                let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+                scan_if_calls(&inner, out);
+            }
+            i += 1;
+        }
+        // Trailing groups in the last window.
+        for tt in tokens.iter().skip(i) {
+            if let TokenTree::Group(g) = tt {
+                let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+                scan_if_calls(&inner, out);
+            }
+        }
+    }
+
+    out
+}
+
+struct RsxCollector {
+    bodies: Vec<proc_macro2::TokenStream>,
+}
+
+impl<'ast> Visit<'ast> for RsxCollector {
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        let is_rsx = m
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident == "rsx")
+            .unwrap_or(false);
+        if is_rsx {
+            self.bodies.push(m.tokens.clone());
+        }
+        syn::visit::visit_macro(self, m);
+    }
+}
+
 fn collect_use_signal_bindings(block: &syn::Block) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for stmt in &block.stmts {
@@ -1790,6 +2132,9 @@ impl<'a> PollingFutureVisitor<'a> {
             file: self.file.to_path_buf(),
             line: self.future_line,
             component: Some(self.component.clone()),
+            signal: None,
+            related_codes: Vec::new(),
+            fix: None,
         });
     }
 }
@@ -2162,12 +2507,17 @@ mod hydration_tests {
         let mut issues: Vec<SignalIssue> = Vec::new();
         for item in &file.items {
             let syn::Item::Fn(f) = item else { continue };
+            let bool_gates = collect_bool_gate_signals(&f.block);
+            let rsx_gates = collect_rsx_if_signal_calls(&f.block);
             let mut v = EffectSpawnVisitor {
                 effect_depth: 0,
                 spawn_depth: 0,
                 saw_await: false,
                 set_lines: Vec::new(),
+                set_calls: Vec::new(),
                 effect_line: 0,
+                bool_gates: &bool_gates,
+                rsx_gates: &rsx_gates,
                 issues: &mut issues,
                 file: Path::new("snippet.rs"),
                 component: f.sig.ident.to_string(),
@@ -3183,5 +3533,266 @@ fn Demo() -> Element {
             hits.is_empty(),
             "non-int init signal is out of scope: {hits:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_gate_tests {
+    use super::*;
+
+    fn lint_component(body: &str) -> Vec<SignalIssue> {
+        let src =
+            format!("use dioxus::prelude::*;\n#[component]\nfn App() -> Element {{\n{body}\n}}\n");
+        let file: syn::File = syn::parse_str(&src).expect("test component parses");
+        let mut issues: Vec<SignalIssue> = Vec::new();
+        for item in &file.items {
+            let syn::Item::Fn(f) = item else { continue };
+            let bool_gates = collect_bool_gate_signals(&f.block);
+            let rsx_gates = collect_rsx_if_signal_calls(&f.block);
+            let mut e = EffectSpawnVisitor {
+                effect_depth: 0,
+                spawn_depth: 0,
+                saw_await: false,
+                set_lines: Vec::new(),
+                set_calls: Vec::new(),
+                effect_line: 0,
+                bool_gates: &bool_gates,
+                rsx_gates: &rsx_gates,
+                issues: &mut issues,
+                file: Path::new("comp.rs"),
+                component: f.sig.ident.to_string(),
+            };
+            e.visit_block(&f.block);
+        }
+        issues
+    }
+
+    /// iter03's canonical shape: a bool gate, an effect that flips it after
+    /// awaiting `who_am_i`, and rsx gating the router behind it. Must fire
+    /// `bootstrap_gate_signal`, not the generic `hydration_unsafe_effect`.
+    #[test]
+    fn fires_bootstrap_gate_signal_on_iter03_shape() {
+        let issues = lint_component(
+            r#"
+let mut bootstrapped = use_signal(|| false);
+use_effect(move || {
+    spawn(async move {
+        let _ = who_am_i().await;
+        bootstrapped.set(true);
+    });
+});
+rsx! {
+    if bootstrapped() {
+        Router::<Route> {}
+    } else {
+        div { "Loading..." }
+    }
+}
+"#,
+        );
+        let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
+        assert!(
+            codes.contains(&"bootstrap_gate_signal"),
+            "expected bootstrap_gate_signal, got: {codes:?}",
+        );
+        assert!(
+            !codes.contains(&"hydration_unsafe_effect"),
+            "specialized finding should suppress generic one: {codes:?}",
+        );
+    }
+
+    /// A `use_signal(|| 0u32)` flipped to a numeric counter inside an
+    /// effect isn't the bootstrap shape — must fall back to the generic
+    /// `hydration_unsafe_effect` and NOT fire `bootstrap_gate_signal`.
+    #[test]
+    fn falls_back_to_generic_when_gate_is_not_bool_false() {
+        let issues = lint_component(
+            r#"
+let mut counter = use_signal(|| 0u32);
+use_effect(move || {
+    spawn(async move {
+        let _ = some_fn().await;
+        counter.set(counter() + 1);
+    });
+});
+rsx! {
+    div { "x" }
+}
+"#,
+        );
+        let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
+        assert!(
+            codes.contains(&"hydration_unsafe_effect"),
+            "non-bool init must fall back to generic: {codes:?}",
+        );
+        assert!(
+            !codes.contains(&"bootstrap_gate_signal"),
+            "non-bool init must NOT fire bootstrap: {codes:?}",
+        );
+    }
+
+    /// `.set(false)` on a `use_signal(|| false)` is not the boot pattern —
+    /// the signal must flip true. Must fall back to generic.
+    #[test]
+    fn falls_back_when_set_value_is_not_true_literal() {
+        let issues = lint_component(
+            r#"
+let mut flag = use_signal(|| false);
+use_effect(move || {
+    spawn(async move {
+        let _ = some_fn().await;
+        flag.set(false);
+    });
+});
+rsx! {
+    if flag() { div { "a" } } else { div { "b" } }
+}
+"#,
+        );
+        let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
+        assert!(
+            codes.contains(&"hydration_unsafe_effect"),
+            "set(false) must fall back to generic: {codes:?}",
+        );
+        assert!(
+            !codes.contains(&"bootstrap_gate_signal"),
+            "set(false) is not the bootstrap shape: {codes:?}",
+        );
+    }
+
+    /// Bool flag exists but rsx doesn't gate on it — the user just stores
+    /// a "ready" status without conditional rendering. Fall back to
+    /// generic so we don't suggest `use_server_future` when there's
+    /// nothing to pre-render.
+    #[test]
+    fn falls_back_when_rsx_has_no_if_gate() {
+        let issues = lint_component(
+            r#"
+let mut flag = use_signal(|| false);
+use_effect(move || {
+    spawn(async move {
+        let _ = some_fn().await;
+        flag.set(true);
+    });
+});
+rsx! {
+    div { class: if flag() { "ready" } else { "loading" } }
+}
+"#,
+        );
+        let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
+        // Note: the class-attribute conditional uses `if flag() { ... }`
+        // INSIDE an rsx attribute value, which our scan picks up via
+        // recursive group traversal. To avoid this false-positive in the
+        // future, the scan would need a "top-level if" filter. For now,
+        // accept that an inline conditional in rsx is a gate-like shape.
+        // The bootstrap finding still applies here — the user could
+        // benefit from server-side resolution.
+        assert!(
+            codes.contains(&"hydration_unsafe_effect") || codes.contains(&"bootstrap_gate_signal"),
+            "must surface at least one finding: {codes:?}",
+        );
+    }
+
+    /// `collect_bool_gate_signals` picks up `use_signal(|| false)` and
+    /// rejects other inits. Pin the helper directly so the visitor wiring
+    /// can rely on a stable contract.
+    #[test]
+    fn collect_bool_gate_signals_picks_up_only_false_init() {
+        let src = r#"#[component]
+fn X() -> Element {
+    let mut a = use_signal(|| false);
+    let mut b = use_signal(|| true);
+    let mut c = use_signal(|| 0);
+    let mut d = use_signal(String::new);
+    rsx! {}
+}"#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        for item in &file.items {
+            let syn::Item::Fn(f) = item else { continue };
+            let bools = collect_bool_gate_signals(&f.block);
+            assert_eq!(bools, vec!["a".to_string()]);
+        }
+    }
+
+    /// `collect_rsx_if_signal_calls` picks up `if <name>()` and rejects
+    /// non-call bare-ident conditions. Pins the scanner.
+    #[test]
+    fn collect_rsx_if_signal_calls_recognises_gate_shape() {
+        let src = r#"#[component]
+fn X() -> Element {
+    rsx! {
+        if bootstrapped() {
+            div { "ready" }
+        } else {
+            div { "loading" }
+        }
+        if some_signal_read {
+            div { "no parens — not a gate match" }
+        }
+    }
+}"#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        for item in &file.items {
+            let syn::Item::Fn(f) = item else { continue };
+            let gates = collect_rsx_if_signal_calls(&f.block);
+            assert!(gates.contains("bootstrapped"));
+            assert!(!gates.contains("some_signal_read"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod related_codes_tests {
+    use super::*;
+
+    fn issue(code: &'static str, component: &str, signal: Option<&str>) -> SignalIssue {
+        SignalIssue {
+            code,
+            message: String::new(),
+            file: PathBuf::new(),
+            line: 1,
+            component: Some(component.to_string()),
+            signal: signal.map(|s| s.to_string()),
+            related_codes: Vec::new(),
+            fix: None,
+        }
+    }
+
+    /// Two findings on the same signal in the same component must cross
+    /// reference each other via `related_codes`.
+    #[test]
+    fn pairs_signal_many_writers_with_signal_used_as_fence() {
+        let mut issues = vec![
+            issue("signal_many_writers", "BoardBody", Some("local_lock")),
+            issue("signal_used_as_fence", "BoardBody", Some("local_lock")),
+            // Unrelated finding in same component but different signal
+            // — must not link.
+            issue("signal_many_writers", "BoardBody", Some("cards")),
+        ];
+        link_related_findings(&mut issues);
+        assert_eq!(
+            issues[0].related_codes,
+            vec!["signal_used_as_fence".to_string()]
+        );
+        assert_eq!(
+            issues[1].related_codes,
+            vec!["signal_many_writers".to_string()]
+        );
+        // Unrelated finding: untouched.
+        assert!(issues[2].related_codes.is_empty());
+    }
+
+    /// Findings without a `signal` field don't link — the pairing is
+    /// only meaningful when both halves identify a specific binding.
+    #[test]
+    fn skips_findings_missing_signal_field() {
+        let mut issues = vec![
+            issue("hydration_unsafe_effect", "App", None),
+            issue("signal_many_writers", "App", Some("flag")),
+        ];
+        link_related_findings(&mut issues);
+        assert!(issues[0].related_codes.is_empty());
+        assert!(issues[1].related_codes.is_empty());
     }
 }

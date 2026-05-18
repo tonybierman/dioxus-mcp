@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 use crate::tools::ast::ParseError;
-use crate::tools::inspect::prop_drill::{PropDrillParams, prop_drill};
 use crate::tools::inspect::project_index::{ProjectIndexParams, project_index};
+use crate::tools::inspect::prop_drill::{PropDrillParams, prop_drill};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SignalDrilledParams {
@@ -92,6 +92,10 @@ pub async fn signal_drilled_2_levels(
             project_root: p.project_root.clone(),
             ignore_callbacks: true,
             kinds: Some(vec!["state_passthrough".into()]),
+            // signal_drilled_2_levels does its own chain reconstruction
+            // (it needs the full graph) — don't apply the prop_drill
+            // chain filter or we'd lose the leaf edges it walks back from.
+            min_chain_depth: None,
         },
     )
     .await?;
@@ -226,11 +230,7 @@ mod tests {
             "BoardBody",
             "dragging",
             "Signal<Option<String>>",
-            &[
-                "BoardBody".into(),
-                "Column".into(),
-                "CardItem".into(),
-            ],
+            &["BoardBody".into(), "Column".into(), "CardItem".into()],
         );
         assert!(snippet.contains("use_context_provider(|| dragging)"));
         assert!(snippet.contains("use_context::<Signal<Option<String>>>"));

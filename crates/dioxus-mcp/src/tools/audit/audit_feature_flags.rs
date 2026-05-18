@@ -28,6 +28,18 @@ pub struct AuditReport {
     pub dioxus_features: Vec<String>,
     pub has_dioxus_toml: bool,
     pub findings: Vec<Finding>,
+    /// True when there are no `error` / `warning` findings and the audit
+    /// recognises the manifest as a well-formed Dioxus 0.7 project. A
+    /// generator can read this single bool as a "green light" without
+    /// scraping the findings array. `info` findings (e.g. the
+    /// fullstack-`server`-is-opt-in note) DO NOT clear `pass`; they're
+    /// reviewer hints, not configuration errors. Always paired with
+    /// `affirmations` describing what specifically passed.
+    pub pass: bool,
+    /// Human-readable list of things the audit verified are correct.
+    /// Useful so the generator can echo "default = [\"web\"] is correct"
+    /// back to the user instead of relying on "no warnings ≈ green".
+    pub affirmations: Vec<String>,
 }
 
 const PLATFORM_FEATURES: &[&str] = &[
@@ -61,6 +73,8 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
             dioxus_features: vec![],
             has_dioxus_toml: false,
             findings,
+            pass: false,
+            affirmations: Vec::new(),
         };
     };
 
@@ -198,6 +212,50 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
     }
 
     let ok = !findings.iter().any(|f| f.level == "error");
+    let no_warnings = !findings.iter().any(|f| f.level == "warning");
+    let pass = ok && no_warnings && project.is_dioxus_project;
+
+    // Build the affirmations list AFTER findings so we can include
+    // everything the audit verified is OK. The list is what generators
+    // echo to the user when the manifest is clean — distinct from
+    // "no findings" because the latter is indistinguishable from "the
+    // audit didn't actually run any checks".
+    let mut affirmations: Vec<String> = Vec::new();
+    if project.is_dioxus_project {
+        affirmations.push("Cargo.toml declares `dioxus` as a dependency".into());
+    }
+    if matches!(project.version_major_minor(), Some((0, 7))) {
+        affirmations.push("Dioxus version is 0.7.x (matches this MCP's templates)".into());
+    }
+    if let Some(text) = manifest_text.as_deref()
+        && let Ok(parsed) = text.parse::<toml::Table>()
+        && let Some(features) = parsed.get("features").and_then(|v| v.as_table())
+        && let Some(default) = features.get("default").and_then(|v| v.as_array())
+    {
+        let names: Vec<String> = default
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        if names == ["web".to_string()] {
+            affirmations
+                .push("`[features] default = [\"web\"]` — wasm bundle is the cargo default".into());
+        }
+        if has_fullstack && manifest_has_optin_server_local(text) {
+            affirmations.push(
+                "`server` is wired up as an opt-in feature (`server = [\"dioxus/server\"]`)".into(),
+            );
+        }
+    }
+    // Server-only deps gated behind `server` — generators that mark them
+    // `optional = true` and route them through `dep:foo` in a feature
+    // pull this off correctly. Affirm when no deps look mis-routed.
+    if let Some(text) = manifest_text.as_deref()
+        && server_deps_correctly_gated(text)
+    {
+        affirmations
+            .push("Server-only deps are `optional = true` and gated behind `server`".into());
+    }
+
     AuditReport {
         ok,
         manifest: Some(manifest),
@@ -205,7 +263,62 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
         dioxus_features: effective_dioxus_features,
         has_dioxus_toml: project.has_dioxus_toml,
         findings,
+        pass,
+        affirmations,
     }
+}
+
+fn manifest_has_optin_server_local(text: &str) -> bool {
+    crate::project::manifest_has_optin_server_feature(text)
+}
+
+/// Heuristic: do server-only deps (axum, tower, dioxus-cli-config, tokio,
+/// etc.) declare `optional = true` AND get pulled in by a feature that
+/// includes `dep:...` for them? We don't enumerate every server crate —
+/// just verify that EVERY dep marked `optional = true` is referenced in
+/// the `[features]` table. That's the practical guarantee a clean
+/// fullstack starter offers.
+fn server_deps_correctly_gated(text: &str) -> bool {
+    let Ok(parsed) = text.parse::<toml::Table>() else {
+        return false;
+    };
+    let deps_tbl = match parsed.get("dependencies").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return true, // no deps to gate — vacuously fine
+    };
+    let mut optional_deps: Vec<&str> = Vec::new();
+    for (name, val) in deps_tbl {
+        if let Some(t) = val.as_table()
+            && let Some(b) = t.get("optional").and_then(|v| v.as_bool())
+            && b
+        {
+            optional_deps.push(name.as_str());
+        }
+    }
+    if optional_deps.is_empty() {
+        return true;
+    }
+    let features = match parsed.get("features").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return false,
+    };
+    // For each optional dep, find a feature that activates it via
+    // `dep:<name>` (the standard 0.7 pattern) or just `<name>` (older
+    // implicit-feature style).
+    'outer: for dep in &optional_deps {
+        for (_, value) in features {
+            if let Some(arr) = value.as_array() {
+                for entry in arr {
+                    let Some(s) = entry.as_str() else { continue };
+                    if s == format!("dep:{dep}") || s == *dep {
+                        continue 'outer;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]

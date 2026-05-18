@@ -69,17 +69,17 @@ pub async fn insecure_set_cookie(
             let mut v = CookieLiteralVisitor { hits: Vec::new() };
             v.visit_block(&f.block);
             for hit in v.hits {
-                let Some(severity) = classify(&hit.value) else {
+                let Some((severity, code)) = classify(&hit.value) else {
                     continue;
                 };
                 findings.push(InsecureCookieFinding {
-                    code: "insecure_set_cookie",
+                    code,
                     severity,
                     file: sf.path.clone(),
                     line: hit.line,
                     server_fn: server_fn_name.clone(),
                     literal: hit.value.clone(),
-                    message: build_message(severity, &hit.value),
+                    message: build_message(code, severity, &hit.value),
                 });
             }
         }
@@ -91,28 +91,75 @@ pub async fn insecure_set_cookie(
     })
 }
 
-/// Classify a cookie-value string. Returns `None` when the literal doesn't
-/// look like a cookie value at all (no attributes), `Some("error")` for
-/// browser-rejected combinations (`SameSite=None` without `Secure`), and
-/// `Some("warning")` for everything else missing `Secure`.
-fn classify(literal: &str) -> Option<&'static str> {
+/// Classify a cookie-value string. Returns the `(severity, code)` pair
+/// to emit, or `None` when the literal isn't a cookie at all. Codes:
+///
+///   * `insecure_set_cookie` — the existing finding. `error` when
+///     `SameSite=None` + missing `Secure` (browsers reject), `warning`
+///     when `Secure` is missing for any other shape.
+///   * `samesite_lax_session_hint` — `info` when the cookie has `Secure`
+///     and `SameSite=Lax` (or `SameSite` unset, which defaults to Lax in
+///     modern browsers). Lax is acceptable for most session flows but
+///     `Strict` is tighter — surface so reviewers can decide.
+fn classify(literal: &str) -> Option<(&'static str, &'static str)> {
     let attrs = parse_attrs(literal);
     if attrs.is_empty() {
         return None;
     }
     let has_secure = attrs.iter().any(|a| a.eq_ignore_ascii_case("Secure"));
-    if has_secure {
-        return None;
-    }
-    let same_site_none = attrs.iter().any(|a| {
-        let lower = a.to_ascii_lowercase();
-        lower.starts_with("samesite=none")
+    let lower_attrs: Vec<String> = attrs.iter().map(|a| a.to_ascii_lowercase()).collect();
+    let samesite_value = lower_attrs.iter().find_map(|a| {
+        let stripped = a.strip_prefix("samesite=")?;
+        Some(stripped.trim().to_string())
     });
-    if same_site_none {
-        Some("error")
-    } else {
-        Some("warning")
+    let same_site_none = matches!(samesite_value.as_deref(), Some("none"));
+    let same_site_lax = matches!(samesite_value.as_deref(), Some("lax"));
+    let same_site_unset = samesite_value.is_none();
+    let same_site_strict = matches!(samesite_value.as_deref(), Some("strict"));
+    if !has_secure {
+        if same_site_none {
+            return Some(("error", "insecure_set_cookie"));
+        }
+        return Some(("warning", "insecure_set_cookie"));
     }
+    // Secure is present. Hint on Lax / unset session cookies that could
+    // be Strict. Skip Strict (already gold) and skip None (handled
+    // above; with Secure set it's actually fine for cross-site).
+    let _ = same_site_strict;
+    if (same_site_lax || same_site_unset) && is_session_cookie(literal) {
+        return Some(("info", "samesite_lax_session_hint"));
+    }
+    None
+}
+
+/// Treat the literal as a session cookie when its `name=` prefix or path
+/// hints at a session — `sid`, `session`, `auth`, `token`, or the
+/// `__Host-`/`__Secure-` prefix. We're deliberately narrow: the Lax /
+/// Strict trade-off is only interesting on cookies that gate access. A
+/// preference cookie like `theme=dark` is fine on Lax.
+fn is_session_cookie(literal: &str) -> bool {
+    let head = literal.split(';').next().unwrap_or("").trim();
+    let lower = head.to_ascii_lowercase();
+    let name = lower.split('=').next().unwrap_or("");
+    let stripped = name
+        .strip_prefix("__host-")
+        .or_else(|| name.strip_prefix("__secure-"))
+        .unwrap_or(name);
+    matches!(
+        stripped,
+        "sid"
+            | "session"
+            | "session_id"
+            | "sessionid"
+            | "auth"
+            | "auth_token"
+            | "token"
+            | "access_token"
+            | "csrf"
+            | "csrftoken"
+    ) || stripped.contains("session")
+        || stripped.contains("auth")
+        || stripped.contains("token")
 }
 
 fn parse_attrs(literal: &str) -> Vec<String> {
@@ -151,18 +198,29 @@ fn is_likely_attribute_or_pair(s: &str) -> bool {
 
 fn is_known_cookie_attr(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "secure" | "httponly" | "partitioned"
-    ) || lower.starts_with("samesite=")
+    matches!(lower.as_str(), "secure" | "httponly" | "partitioned")
+        || lower.starts_with("samesite=")
         || lower.starts_with("path=")
         || lower.starts_with("max-age=")
         || lower.starts_with("expires=")
         || lower.starts_with("domain=")
 }
 
-fn build_message(severity: &str, literal: &str) -> String {
+fn build_message(code: &str, severity: &str, literal: &str) -> String {
     let escaped = literal.replace('\n', "\\n").replace('\r', "\\r");
+    if code == "samesite_lax_session_hint" {
+        return format!(
+            "Set-Cookie value `{escaped}` ships a session cookie with `SameSite=Lax` \
+             (or default, which is Lax in modern browsers). Lax is fine for most \
+             session flows — top-level GET navigations still carry the cookie, so \
+             standard logged-in browsing works. `Strict` is tighter: the cookie is \
+             never sent on any cross-site request, including the user clicking a \
+             link from another site. Use `Strict` for cookies that gate \
+             state-changing actions and don't need to survive cross-site navigation \
+             (admin sessions, payment checkout). Stay with `Lax` if users routinely \
+             land on your site from external links and need to be logged in."
+        );
+    }
     if severity == "error" {
         format!(
             "Set-Cookie value `{escaped}` declares `SameSite=None` but lacks `Secure`. \
@@ -216,10 +274,7 @@ impl<'ast> Visit<'ast> for CookieLiteralVisitor {
         for tt in m.tokens.clone() {
             if let proc_macro2::TokenTree::Literal(lit) = tt {
                 let s = lit.to_string();
-                if s.starts_with('"')
-                    && s.ends_with('"')
-                    && s.len() >= 2
-                {
+                if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
                     let value = unquote(&s);
                     self.hits.push(LiteralHit {
                         value,
@@ -263,19 +318,49 @@ mod tests {
     #[test]
     fn classify_missing_secure_is_warning() {
         let result = classify("sid=abc; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400");
-        assert_eq!(result, Some("warning"));
+        assert_eq!(result, Some(("warning", "insecure_set_cookie")));
     }
 
     #[test]
     fn classify_samesite_none_without_secure_is_error() {
         let result = classify("sid=abc; Path=/; SameSite=None");
-        assert_eq!(result, Some("error"));
+        assert_eq!(result, Some(("error", "insecure_set_cookie")));
     }
 
+    /// Session cookie with `Secure` + `SameSite=Strict` is the gold
+    /// standard — no finding.
     #[test]
-    fn classify_with_secure_is_clean() {
-        let result = classify("sid=abc; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=86400");
+    fn classify_with_secure_strict_is_clean() {
+        let result = classify("sid=abc; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=86400");
         assert_eq!(result, None);
+    }
+
+    /// iter03 shape: session cookie with `Secure` + `SameSite=Lax`.
+    /// Modern lint should emit the info-level `samesite_lax_session_hint`
+    /// so the reviewer can decide Lax vs Strict.
+    #[test]
+    fn classify_secure_lax_session_emits_info_hint() {
+        let result = classify("sid=abc; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=86400");
+        assert_eq!(result, Some(("info", "samesite_lax_session_hint")));
+    }
+
+    /// `Secure` + `SameSite=Lax` on a non-session cookie (e.g. `theme=dark`)
+    /// stays silent — the Lax/Strict trade-off only matters for cookies
+    /// that gate access.
+    #[test]
+    fn classify_secure_lax_non_session_is_clean() {
+        let result = classify("theme=dark; Path=/; SameSite=Lax; Secure; Max-Age=86400");
+        assert_eq!(result, None);
+    }
+
+    /// iter03 logout: empty session cookie with `Secure` + Lax. Still a
+    /// session-name cookie — surface the hint.
+    #[test]
+    fn classify_session_cookie_with_default_samesite_emits_hint() {
+        // No explicit SameSite — modern browsers default to Lax. Treat
+        // the same as explicit Lax for session cookies.
+        let result = classify("sid=abc; Path=/; HttpOnly; Secure; Max-Age=86400");
+        assert_eq!(result, Some(("info", "samesite_lax_session_hint")));
     }
 
     #[test]
@@ -289,7 +374,8 @@ mod tests {
     #[test]
     fn classify_secure_case_insensitive() {
         // RFC says attributes are case-insensitive; respect that.
-        let result = classify("sid=x; Path=/; HttpOnly; secure");
+        // A non-session cookie with secure + no SameSite is clean.
+        let result = classify("pref=x; Path=/; HttpOnly; secure");
         assert_eq!(result, None, "lowercase secure should still count");
     }
 
@@ -297,6 +383,6 @@ mod tests {
     fn classify_samesite_none_case_insensitive() {
         // `samesite=none` lowercase also rejected when Secure missing.
         let result = classify("sid=x; samesite=none");
-        assert_eq!(result, Some("error"));
+        assert_eq!(result, Some(("error", "insecure_set_cookie")));
     }
 }

@@ -23,6 +23,13 @@ pub struct PropDrillParams {
     /// drills. Applied after `ignore_callbacks`. Empty = no filter.
     #[serde(default)]
     pub kinds: Option<Vec<String>>,
+    /// Minimum chain depth (in hops) for a passthrough to be reported.
+    /// Default `1` = report every single-hop drill (current behavior).
+    /// Set to `2` to silence sibling-sharing drills that `signal_drilled_2_levels`
+    /// already covers (BoardBody → Column → CardItem is `chain_depth=2`,
+    /// a one-off Column → CardItem with no upstream chain is `chain_depth=1`).
+    #[serde(default)]
+    pub min_chain_depth: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,14 +45,25 @@ pub struct Passthrough {
     /// drills are usually a correct pattern; state drills are the real
     /// signal a context provider is missing.
     pub kind: &'static str,
-    /// `info` | `warning`. A single-level Signal<T> handed to a single child
-    /// is the correct shape for shared ephemeral state (drag selection, focus
-    /// ring, etc.) — downgrade those to `info` so the warning list stays the
-    /// real "this should be a context" signal. `warning` is reserved for
-    /// state passthroughs that fan out to multiple distinct children in this
-    /// parent (any pattern that probably wants `use_context`). Callback
-    /// passthroughs are always `info` — they're a correct pattern.
+    /// `info` | `warning` | `hint`. A single-level Signal<T> handed to a
+    /// single child is the correct shape for shared ephemeral state (drag
+    /// selection, focus ring, etc.) — downgrade those to `info` so the
+    /// warning list stays the real "this should be a context" signal.
+    /// `warning` is reserved for state passthroughs that fan out to
+    /// multiple distinct children in this parent (any pattern that
+    /// probably wants `use_context`). Callback passthroughs are always
+    /// `info` — they're a correct pattern. `hint` is reserved for edges
+    /// whose `chain_depth >= 2`: those are reported in full by
+    /// `signal_drilled_2_levels` and surfacing them at `info` here just
+    /// double-counts the same fix.
     pub severity: &'static str,
+    /// Number of hops in the maximal chain that this edge participates in,
+    /// computed across the whole project. `1` = a sibling-share edge with
+    /// no upstream/downstream continuation (BoardBody → Column when Column
+    /// doesn't redrill); `>=2` = part of a chain already reported by
+    /// `signal_drilled_2_levels`. Callers can use `min_chain_depth` to
+    /// filter, or read this field to dedupe against the deeper lint.
+    pub chain_depth: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,17 +183,6 @@ pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDr
 
             assign_severity(&mut passthroughs, &prop_types);
 
-            // Apply kind filters.
-            if p.ignore_callbacks {
-                passthroughs.retain(|pt| pt.kind != "callback_passthrough");
-            }
-            if let Some(kinds) = &p.kinds
-                && !kinds.is_empty()
-            {
-                let allowed: HashSet<&str> = kinds.iter().map(|s| s.as_str()).collect();
-                passthroughs.retain(|pt| allowed.contains(pt.kind));
-            }
-
             if !passthroughs.is_empty() {
                 parents.push(ParentEntry {
                     component: name,
@@ -185,6 +192,41 @@ pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDr
             }
         }
     }
+
+    // Compute chain depth across the global forwarding graph. We do this
+    // BEFORE applying kind / severity filters so chain detection still
+    // picks up callback chains the caller may have ignored.
+    annotate_chain_depth(&mut parents);
+
+    // After chain depth is known, demote `info` state passthroughs whose
+    // chain_depth >= 2 to `hint` — `signal_drilled_2_levels` already
+    // surfaces those at warning, so re-emitting them here at info just
+    // doubles up the same fix.
+    for parent in parents.iter_mut() {
+        for pt in parent.passthroughs.iter_mut() {
+            if pt.chain_depth >= 2 && pt.kind == "state_passthrough" && pt.severity == "info" {
+                pt.severity = "hint";
+            }
+        }
+    }
+
+    // Apply post-classification filters per parent.
+    let min_chain = p.min_chain_depth.unwrap_or(1).max(1);
+    for parent in parents.iter_mut() {
+        if p.ignore_callbacks {
+            parent
+                .passthroughs
+                .retain(|pt| pt.kind != "callback_passthrough");
+        }
+        if let Some(kinds) = &p.kinds
+            && !kinds.is_empty()
+        {
+            let allowed: HashSet<&str> = kinds.iter().map(|s| s.as_str()).collect();
+            parent.passthroughs.retain(|pt| allowed.contains(pt.kind));
+        }
+        parent.passthroughs.retain(|pt| pt.chain_depth >= min_chain);
+    }
+    parents.retain(|p| !p.passthroughs.is_empty());
 
     parents.sort_by(|a, b| a.component.cmp(&b.component));
 
@@ -315,10 +357,145 @@ fn analyze_invocation(
                 via,
                 line,
                 kind,
-                // Severity is assigned after the parent's full passthrough
-                // set is collected (fan-out depends on cross-finding state).
+                // Severity and chain_depth are assigned after the project's
+                // full passthrough set is collected (fan-out depends on
+                // cross-finding state; chain_depth depends on the global
+                // forwarding graph).
                 severity: "warning",
+                chain_depth: 1,
             });
+        }
+    }
+}
+
+/// Compute the maximal forwarding-chain length each passthrough belongs to.
+///
+/// Chain identity is the (component, prop-name) tuple: an edge from
+/// `(BoardBody, "dragging")` lands at component `Column`. If `Column` also
+/// has a passthrough with `parent_prop == "dragging"`, that's a continuation;
+/// otherwise the chain ends.
+///
+/// Algorithm:
+///   1. Build the forwarding graph: each edge is keyed
+///      `(parent_component, parent_prop) -> (child_component, child_prop)`.
+///   2. For each node `(component, prop)`, compute the max forward chain
+///      length via DFS with memoisation.
+///   3. For each passthrough, its chain depth = chain length starting
+///      from itself = max of (1, forward chain from the child node + 1).
+///
+/// We DON'T traverse backward — chain length is symmetric: BoardBody →
+/// Column → CardItem has length 2 from both edges' perspective because
+/// either edge is part of the same 2-hop chain. Forward DFS captures the
+/// "from here onward" part; we then back-fill by taking the max forward
+/// length over every edge that reaches this node.
+fn annotate_chain_depth(parents: &mut [ParentEntry]) {
+    use std::collections::HashMap;
+    // Edges: (parent_component, parent_prop) -> [(child_component, child_prop), ...]
+    let mut edges: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
+    for parent in parents.iter() {
+        for pt in parent.passthroughs.iter() {
+            edges
+                .entry((parent.component.clone(), pt.parent_prop.clone()))
+                .or_default()
+                .push((pt.child.clone(), pt.child_prop.clone()));
+        }
+    }
+
+    // Forward chain length starting at node `n`: 1 + max forward over its
+    // outgoing edges (or 1 if no outgoing edges).
+    let mut memo: HashMap<(String, String), u8> = HashMap::new();
+    fn forward(
+        node: &(String, String),
+        edges: &HashMap<(String, String), Vec<(String, String)>>,
+        memo: &mut HashMap<(String, String), u8>,
+        stack: &mut HashSet<(String, String)>,
+    ) -> u8 {
+        if let Some(&d) = memo.get(node) {
+            return d;
+        }
+        // Cycle guard: if we re-enter a node mid-DFS, treat it as a leaf
+        // so the chain is finite. Real apps shouldn't form prop cycles
+        // but defensive code is cheap.
+        if !stack.insert(node.clone()) {
+            return 1;
+        }
+        let Some(out) = edges.get(node) else {
+            memo.insert(node.clone(), 1);
+            stack.remove(node);
+            return 1;
+        };
+        let mut best = 1u8;
+        for child in out {
+            let d = forward(child, edges, memo, stack).saturating_add(1);
+            if d > best {
+                best = d;
+            }
+        }
+        memo.insert(node.clone(), best);
+        stack.remove(node);
+        best
+    }
+
+    // Reverse edges: (child_component, child_prop) -> [(parent_component, parent_prop)].
+    // Used to back-fill the chain depth contributed by an upstream edge.
+    let mut rev: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
+    for (parent_key, children) in &edges {
+        for child in children {
+            rev.entry(child.clone())
+                .or_default()
+                .push(parent_key.clone());
+        }
+    }
+    let mut back_memo: HashMap<(String, String), u8> = HashMap::new();
+    fn backward(
+        node: &(String, String),
+        rev: &HashMap<(String, String), Vec<(String, String)>>,
+        memo: &mut HashMap<(String, String), u8>,
+        stack: &mut HashSet<(String, String)>,
+    ) -> u8 {
+        if let Some(&d) = memo.get(node) {
+            return d;
+        }
+        if !stack.insert(node.clone()) {
+            return 0;
+        }
+        let Some(parents) = rev.get(node) else {
+            memo.insert(node.clone(), 0);
+            stack.remove(node);
+            return 0;
+        };
+        let mut best = 0u8;
+        for parent in parents {
+            let d = backward(parent, rev, memo, stack).saturating_add(1);
+            if d > best {
+                best = d;
+            }
+        }
+        memo.insert(node.clone(), best);
+        stack.remove(node);
+        best
+    }
+
+    for parent in parents.iter_mut() {
+        for pt in parent.passthroughs.iter_mut() {
+            let parent_node = (parent.component.clone(), pt.parent_prop.clone());
+            let child_node = (pt.child.clone(), pt.child_prop.clone());
+            let mut stack_f: HashSet<(String, String)> = HashSet::new();
+            let mut stack_b: HashSet<(String, String)> = HashSet::new();
+            // The chain length THIS edge participates in =
+            //   (back-edges reaching parent_node) + this edge + (forward edges from child_node)
+            let back = backward(&parent_node, &rev, &mut back_memo, &mut stack_b);
+            let fwd = forward(&child_node, &edges, &mut memo, &mut stack_f);
+            pt.chain_depth = back.saturating_add(1).saturating_add(fwd.saturating_sub(1));
+            // `forward` returns 1 for a leaf node (no outgoing) — that
+            // already counts as "the child receives the prop". This edge
+            // contributes 1 hop, so total = back + 1 + (fwd - 1) = back + fwd.
+            // Simplified above; double-check edge case: a single isolated
+            // edge yields back=0, fwd=1 → depth = 0 + 1 + 0 = 1. ✓
+            // A 2-hop chain: middle->leaf edge has back=1 (one upstream),
+            // fwd=1 (leaf node has no outgoing) → depth = 1 + 1 + 0 = 2. ✓
+            // Root->middle edge has back=0, fwd=2 (middle has one outgoing
+            // to leaf) → depth = 0 + 1 + 1 = 2. ✓
         }
     }
 }
@@ -492,6 +669,7 @@ mod tests {
             line: 1,
             kind,
             severity: "warning",
+            chain_depth: 1,
         }
     }
 
@@ -546,6 +724,86 @@ mod tests {
         for pt in &pts {
             assert_eq!(pt.severity, "info");
         }
+    }
+
+    /// A single sibling-share edge with no upstream chain has
+    /// `chain_depth = 1` after `annotate_chain_depth`.
+    #[test]
+    fn isolated_edge_has_chain_depth_one() {
+        let mut parents = vec![ParentEntry {
+            component: "Column".into(),
+            file: PathBuf::from("col.rs"),
+            passthroughs: vec![passthrough("dragging", "CardItem", "state_passthrough")],
+        }];
+        annotate_chain_depth(&mut parents);
+        assert_eq!(parents[0].passthroughs[0].chain_depth, 1);
+    }
+
+    /// The canonical BoardBody → Column → CardItem chain: both edges
+    /// participate in a chain of length 2 and must surface `chain_depth = 2`.
+    #[test]
+    fn two_hop_chain_marks_both_edges_depth_two() {
+        let mut parents = vec![
+            ParentEntry {
+                component: "BoardBody".into(),
+                file: PathBuf::from("board.rs"),
+                passthroughs: vec![passthrough("dragging", "Column", "state_passthrough")],
+            },
+            ParentEntry {
+                component: "Column".into(),
+                file: PathBuf::from("col.rs"),
+                passthroughs: vec![passthrough("dragging", "CardItem", "state_passthrough")],
+            },
+        ];
+        annotate_chain_depth(&mut parents);
+        assert_eq!(parents[0].passthroughs[0].chain_depth, 2);
+        assert_eq!(parents[1].passthroughs[0].chain_depth, 2);
+    }
+
+    /// 2-hop chain edges whose Signal severity would have been `info` are
+    /// demoted to the new `hint` tier so `signal_drilled_2_levels` owns the
+    /// rollup. The 1-hop edge keeps `info`.
+    #[test]
+    fn chain_depth_two_signal_state_passthrough_demotes_info_to_hint() {
+        let mut parents = vec![
+            ParentEntry {
+                component: "BoardBody".into(),
+                file: PathBuf::from("board.rs"),
+                passthroughs: vec![passthrough("dragging", "Column", "state_passthrough")],
+            },
+            ParentEntry {
+                component: "Column".into(),
+                file: PathBuf::from("col.rs"),
+                passthroughs: vec![passthrough("dragging", "CardItem", "state_passthrough")],
+            },
+            ParentEntry {
+                component: "OneOff".into(),
+                file: PathBuf::from("oo.rs"),
+                passthroughs: vec![passthrough("focus", "Leaf", "state_passthrough")],
+            },
+        ];
+        let types: HashMap<String, String> = [
+            ("dragging".into(), "Signal<Option<String>>".into()),
+            ("focus".into(), "Signal<bool>".into()),
+        ]
+        .into();
+        for parent in parents.iter_mut() {
+            assign_severity(&mut parent.passthroughs, &types);
+        }
+        annotate_chain_depth(&mut parents);
+        // Same demotion the live runner does:
+        for parent in parents.iter_mut() {
+            for pt in parent.passthroughs.iter_mut() {
+                if pt.chain_depth >= 2 && pt.kind == "state_passthrough" && pt.severity == "info" {
+                    pt.severity = "hint";
+                }
+            }
+        }
+        // 2-hop edges → hint.
+        assert_eq!(parents[0].passthroughs[0].severity, "hint");
+        assert_eq!(parents[1].passthroughs[0].severity, "hint");
+        // 1-hop sibling share → info (unchanged).
+        assert_eq!(parents[2].passthroughs[0].severity, "info");
     }
 
     #[test]

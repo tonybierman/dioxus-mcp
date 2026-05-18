@@ -1,15 +1,20 @@
 //! `presence_map_unbounded`: flag `static <MAP>: Lazy<Mutex<HashMap<…>>>`
 //! that takes `.insert(...)` writes from server fn bodies but has no
-//! reachable eviction call (`.retain()`, `.remove()`, `.clear()`).
+//! reachable *bounded* eviction.
 //!
 //! Pattern: a server-side presence / session map that monotonically
 //! accumulates entries on each request. Without a TTL sweep the map grows
 //! forever; long-running servers will exhaust memory. The fix is usually a
 //! TTL filter on read OR a periodic sweep that removes stale entries.
 //!
-//! Severity is `info` — many maps are deliberately append-only (caches
-//! with bounded keyspace, etc.). The lint is a nudge for the reviewer, not
-//! a hard error.
+//! Eviction taxonomy:
+//! * `retain` / `extract_if` / `clear` / `drain` → TTL/sweep eviction.
+//!   Treated as bounded → no finding.
+//! * `.remove()` only → narrow eviction. Typical iter03 shape: only
+//!   `logout_user` calls `.remove()`. Abandoned tabs that never log out
+//!   accumulate forever. Fire at `warn`.
+//! * No eviction at all → fire at `info`. The original default — many
+//!   caches with bounded keyspace are deliberately append-only.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -43,6 +48,11 @@ pub struct PresenceMapFinding {
     /// Server fns observed inserting into the map. Surfaced so the reviewer
     /// can see at a glance where new entries land.
     pub insert_sites: Vec<InsertSite>,
+    /// Server fns observed calling `.remove()` on the map. Populated only
+    /// for `narrow_eviction_only` findings so the reviewer can see which
+    /// user-triggered fn provides the partial mitigation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_sites: Vec<InsertSite>,
     pub message: String,
 }
 
@@ -99,12 +109,13 @@ pub async fn presence_map_unbounded(
 
     let binding_set: HashSet<String> = statics.iter().map(|s| s.binding.clone()).collect();
 
-    // Walk every server fn body, accumulate per-binding insert sites and
-    // a flag for any eviction call on that binding. We use the same
-    // `is_server_fn` predicate as the blocking-locks lint — both legacy
-    // `#[server]` and the verb-macro shapes count.
+    // Walk every server fn body, accumulate per-binding insert sites,
+    // narrow remove sites, and a flag for any bounded-eviction call. We
+    // use the same `is_server_fn` predicate as the blocking-locks lint —
+    // both legacy `#[server]` and the verb-macro shapes count.
     let mut inserts: HashMap<String, Vec<InsertSite>> = HashMap::new();
-    let mut evictions: HashSet<String> = HashSet::new();
+    let mut narrow_removes: HashMap<String, Vec<InsertSite>> = HashMap::new();
+    let mut bounded_evictions: HashSet<String> = HashSet::new();
     for sf in &files {
         let Ok(ast) = &sf.ast else { continue };
         for item in &ast.items {
@@ -116,21 +127,37 @@ pub async fn presence_map_unbounded(
             let mut v = MapUsageVisitor {
                 targets: &binding_set,
                 inserts: HashMap::new(),
-                evictions: HashSet::new(),
+                removes: HashMap::new(),
+                bounded_evictions: HashSet::new(),
                 aliases: HashMap::new(),
             };
             v.visit_block(&f.block);
             for (binding, lines) in v.inserts {
                 for line in lines {
-                    inserts.entry(binding.clone()).or_default().push(InsertSite {
-                        server_fn: server_fn_name.clone(),
-                        file: sf.path.clone(),
-                        line,
-                    });
+                    inserts
+                        .entry(binding.clone())
+                        .or_default()
+                        .push(InsertSite {
+                            server_fn: server_fn_name.clone(),
+                            file: sf.path.clone(),
+                            line,
+                        });
                 }
             }
-            for binding in v.evictions {
-                evictions.insert(binding);
+            for (binding, lines) in v.removes {
+                for line in lines {
+                    narrow_removes
+                        .entry(binding.clone())
+                        .or_default()
+                        .push(InsertSite {
+                            server_fn: server_fn_name.clone(),
+                            file: sf.path.clone(),
+                            line,
+                        });
+                }
+            }
+            for binding in v.bounded_evictions {
+                bounded_evictions.insert(binding);
             }
         }
     }
@@ -140,29 +167,65 @@ pub async fn presence_map_unbounded(
         let Some(insert_sites) = inserts.get(&s.binding) else {
             continue;
         };
-        if evictions.contains(&s.binding) {
+        if bounded_evictions.contains(&s.binding) {
             continue;
         }
         let n = insert_sites.len();
+        let remove_sites = narrow_removes.get(&s.binding).cloned().unwrap_or_default();
+        let (code, severity, message) = if !remove_sites.is_empty() {
+            let remove_fns: Vec<String> = {
+                let mut v: Vec<String> = remove_sites.iter().map(|r| r.server_fn.clone()).collect();
+                v.sort();
+                v.dedup();
+                v
+            };
+            let remove_fns_str = remove_fns.join(", ");
+            (
+                "presence_map_narrow_eviction",
+                "warning",
+                format!(
+                    "`{binding}: {ty}` only sheds entries via `.remove()` in \
+                     {remove_fns_str} ({rn} call site{rs}). That covers users who \
+                     explicitly opt out, but abandoned tabs / users who never call \
+                     {remove_fns_str} accumulate forever. Add a TTL sweep \
+                     (`map.retain(|_, (ts, _)| ts.elapsed() < TTL)`) on a periodic \
+                     task, or filter expired entries on read AND evict them there; \
+                     consider `dashmap` + `mini-moka` for a TTL-aware drop-in. \
+                     Server fns insert at {n} site{s}.",
+                    binding = s.binding,
+                    ty = s.ty,
+                    s = if n == 1 { "" } else { "s" },
+                    rn = remove_sites.len(),
+                    rs = if remove_sites.len() == 1 { "" } else { "s" },
+                ),
+            )
+        } else {
+            (
+                "presence_map_unbounded",
+                "info",
+                format!(
+                    "`{binding}: {ty}` grows on every request — server fns insert into it \
+                     ({n} site{s}) but no `.retain()` / `.remove()` / `.clear()` call is \
+                     reachable from any server fn. Long-running servers will accumulate \
+                     entries forever. Add a TTL sweep (`map.retain(|_, (ts, _)| ts.elapsed() < TTL)`) \
+                     to a periodic task or filter expired entries on read AND evict them \
+                     there; consider `dashmap` + `mini-moka` for a TTL-aware drop-in.",
+                    binding = s.binding,
+                    ty = s.ty,
+                    s = if n == 1 { "" } else { "s" },
+                ),
+            )
+        };
         findings.push(PresenceMapFinding {
-            code: "presence_map_unbounded",
-            severity: "info",
+            code,
+            severity,
             file: s.file.clone(),
             line: s.line,
             binding: s.binding.clone(),
             map_type: s.ty.clone(),
             insert_sites: insert_sites.clone(),
-            message: format!(
-                "`{binding}: {ty}` grows on every request — server fns insert into it \
-                 ({n} site{s}) but no `.retain()` / `.remove()` / `.clear()` call is \
-                 reachable from any server fn. Long-running servers will accumulate \
-                 entries forever. Add a TTL sweep (`map.retain(|_, (ts, _)| ts.elapsed() < TTL)`) \
-                 to a periodic task or filter expired entries on read AND evict them \
-                 there; consider `dashmap` + `mini-moka` for a TTL-aware drop-in.",
-                binding = s.binding,
-                ty = s.ty,
-                s = if n == 1 { "" } else { "s" },
-            ),
+            remove_sites,
+            message,
         });
     }
 
@@ -217,8 +280,15 @@ struct MapUsageVisitor<'a> {
     targets: &'a HashSet<String>,
     /// (binding_name -> [line of insert]).
     inserts: HashMap<String, Vec<usize>>,
-    /// Set of binding_names where an eviction call appears.
-    evictions: HashSet<String>,
+    /// (binding_name -> [line of `.remove()`]). Narrow eviction — only
+    /// shrinks the map for keys the caller passes in. Counted separately
+    /// from `retain`/`extract_if`/`clear`/`drain` because a user-opt-out
+    /// `.remove()` doesn't bound the map under abandoned-tab traffic.
+    removes: HashMap<String, Vec<usize>>,
+    /// Set of binding_names where a *bounded* eviction call appears
+    /// (`retain`, `extract_if`, `clear`, `drain`). These shrink the map
+    /// without needing the caller to know the key.
+    bounded_evictions: HashSet<String>,
     /// Local aliases for a tracked static (e.g. `let mut presence =
     /// PRESENCE.lock().unwrap();` adds `presence -> PRESENCE`). Real server
     /// fn bodies almost never call `.insert(...)` directly on the static —
@@ -279,8 +349,14 @@ impl<'a, 'ast> Visit<'ast> for MapUsageVisitor<'a> {
                         .or_default()
                         .push(mc.method.span().start().line);
                 }
-                "remove" | "retain" | "clear" | "drain" | "extract_if" => {
-                    self.evictions.insert(name);
+                "remove" => {
+                    self.removes
+                        .entry(name)
+                        .or_default()
+                        .push(mc.method.span().start().line);
+                }
+                "retain" | "clear" | "drain" | "extract_if" => {
+                    self.bounded_evictions.insert(name);
                 }
                 _ => {}
             }
@@ -296,9 +372,13 @@ fn receiver_root_ident(expr: &syn::Expr) -> Option<String> {
         syn::Expr::Reference(r) => receiver_root_ident(&r.expr),
         syn::Expr::Unary(u) => receiver_root_ident(&u.expr),
         syn::Expr::Try(t) => receiver_root_ident(&t.expr),
-        syn::Expr::Path(p) if p.path.segments.len() == 1 => {
-            Some(p.path.segments[0].ident.to_string())
-        }
+        // Accept the LAST segment of any path. Fully-qualified accesses
+        // (`crate::server::state::SESSIONS.lock()`) are common; matching
+        // by last segment lets the visitor resolve the static without
+        // requiring the caller to import it. Collision risk is low — the
+        // tracked set is hand-built from `Lazy<Mutex<HashMap>>` statics,
+        // which use distinct SCREAMING_SNAKE_CASE names.
+        syn::Expr::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
         _ => None,
     }
 }
@@ -341,7 +421,8 @@ mod tests {
         let binding_set: HashSet<String> = statics.iter().map(|s| s.binding.clone()).collect();
 
         let mut inserts: HashMap<String, Vec<InsertSite>> = HashMap::new();
-        let mut evictions: HashSet<String> = HashSet::new();
+        let mut narrow_removes: HashMap<String, Vec<InsertSite>> = HashMap::new();
+        let mut bounded_evictions: HashSet<String> = HashSet::new();
         for sf in &files {
             let Ok(ast) = &sf.ast else { continue };
             for item in &ast.items {
@@ -353,21 +434,37 @@ mod tests {
                 let mut v = MapUsageVisitor {
                     targets: &binding_set,
                     inserts: HashMap::new(),
-                    evictions: HashSet::new(),
+                    removes: HashMap::new(),
+                    bounded_evictions: HashSet::new(),
                     aliases: HashMap::new(),
                 };
                 v.visit_block(&f.block);
                 for (binding, lines) in v.inserts {
                     for line in lines {
-                        inserts.entry(binding.clone()).or_default().push(InsertSite {
-                            server_fn: server_fn_name.clone(),
-                            file: sf.path.clone(),
-                            line,
-                        });
+                        inserts
+                            .entry(binding.clone())
+                            .or_default()
+                            .push(InsertSite {
+                                server_fn: server_fn_name.clone(),
+                                file: sf.path.clone(),
+                                line,
+                            });
                     }
                 }
-                for binding in v.evictions {
-                    evictions.insert(binding);
+                for (binding, lines) in v.removes {
+                    for line in lines {
+                        narrow_removes
+                            .entry(binding.clone())
+                            .or_default()
+                            .push(InsertSite {
+                                server_fn: server_fn_name.clone(),
+                                file: sf.path.clone(),
+                                line,
+                            });
+                    }
+                }
+                for binding in v.bounded_evictions {
+                    bounded_evictions.insert(binding);
                 }
             }
         }
@@ -376,17 +473,24 @@ mod tests {
             let Some(insert_sites) = inserts.get(&s.binding) else {
                 continue;
             };
-            if evictions.contains(&s.binding) {
+            if bounded_evictions.contains(&s.binding) {
                 continue;
             }
+            let remove_sites = narrow_removes.get(&s.binding).cloned().unwrap_or_default();
+            let (code, severity) = if !remove_sites.is_empty() {
+                ("presence_map_narrow_eviction", "warning")
+            } else {
+                ("presence_map_unbounded", "info")
+            };
             findings.push(PresenceMapFinding {
-                code: "presence_map_unbounded",
-                severity: "info",
+                code,
+                severity,
                 file: s.file.clone(),
                 line: s.line,
                 binding: s.binding.clone(),
                 map_type: s.ty.clone(),
                 insert_sites: insert_sites.clone(),
+                remove_sites,
                 message: String::new(),
             });
         }
@@ -419,6 +523,44 @@ async fn ping_presence(sid: String, label: String) -> Result<(), ServerFnError> 
         assert_eq!(findings[0].insert_sites.len(), 1);
         assert_eq!(findings[0].insert_sites[0].server_fn, "ping_presence");
         assert_eq!(findings[0].severity, "info");
+    }
+
+    /// iter03's `SESSIONS` / `PRESENCE` shape: only `.remove()` from
+    /// `logout_user` evicts. That covers users who opt out but not abandoned
+    /// tabs — fire at `warn` with the narrow-eviction code, surface the
+    /// remove sites so the reviewer can audit the gate.
+    #[test]
+    fn narrow_remove_only_fires_as_warn() {
+        let findings = scan(
+            r#"use std::collections::HashMap;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+static SESSIONS: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[post("/api/login")]
+async fn login_user(name: String) -> Result<(), ServerFnError> {
+    let mut sessions = SESSIONS.lock().unwrap();
+    sessions.insert("sid".into(), name);
+    Ok(())
+}
+
+#[post("/api/logout")]
+async fn logout_user(sid: String) -> Result<(), ServerFnError> {
+    let mut sessions = SESSIONS.lock().unwrap();
+    sessions.remove(&sid);
+    Ok(())
+}
+"#,
+        );
+        assert_eq!(findings.len(), 1, "must fire: {findings:?}");
+        let f = &findings[0];
+        assert_eq!(f.binding, "SESSIONS");
+        assert_eq!(f.code, "presence_map_narrow_eviction");
+        assert_eq!(f.severity, "warning");
+        assert_eq!(f.remove_sites.len(), 1);
+        assert_eq!(f.remove_sites[0].server_fn, "logout_user");
     }
 
     /// A static map that has BOTH `.insert(...)` and `.retain(...)` calls

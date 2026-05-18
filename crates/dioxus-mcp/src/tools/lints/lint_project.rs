@@ -31,6 +31,10 @@ const ALL_LINTS: &[&str] = &[
     "presence_map_unbounded",
     "insecure_set_cookie",
     "components_audit",
+    "duplicate_helper_client_server",
+    "vec_or_owned_prop_passthrough",
+    "magic_id_prefix_for_optimistic",
+    "shared_enum_validation",
 ];
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -103,6 +107,14 @@ pub struct LintProjectReport {
     pub insecure_set_cookie: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components_audit: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_helper_client_server: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vec_or_owned_prop_passthrough: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub magic_id_prefix_for_optimistic: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_enum_validation: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -229,6 +241,7 @@ pub async fn lint_project(
                 project_root: p.project_root.clone(),
                 ignore_callbacks: false,
                 kinds: None,
+                min_chain_depth: None,
             },
         )
         .await?;
@@ -361,8 +374,7 @@ pub async fn lint_project(
             lint: "server_state_blocking_locks".into(),
             issues: count,
         });
-        report.server_state_blocking_locks =
-            Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+        report.server_state_blocking_locks = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
     if want("presence_map_unbounded") {
@@ -423,6 +435,96 @@ pub async fn lint_project(
             issues: count,
         });
         report.components_audit = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("duplicate_helper_client_server") {
+        let r =
+            crate::tools::lints::duplicate_helper_client_server::duplicate_helper_client_server(
+                state,
+                crate::tools::lints::duplicate_helper_client_server::DuplicateHelperParams {
+                    project_root: p.project_root.clone(),
+                },
+            )
+            .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report
+            .lints_run
+            .push("duplicate_helper_client_server".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "duplicate_helper_client_server".into(),
+            issues: count,
+        });
+        report.duplicate_helper_client_server =
+            Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("vec_or_owned_prop_passthrough") {
+        let r = crate::tools::lints::vec_or_owned_prop_passthrough::vec_or_owned_prop_passthrough(
+            state,
+            crate::tools::lints::vec_or_owned_prop_passthrough::VecOrOwnedPropParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report
+            .lints_run
+            .push("vec_or_owned_prop_passthrough".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "vec_or_owned_prop_passthrough".into(),
+            issues: count,
+        });
+        report.vec_or_owned_prop_passthrough =
+            Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("magic_id_prefix_for_optimistic") {
+        let r = crate::tools::lints::magic_id_prefix::magic_id_prefix_for_optimistic(
+            state,
+            crate::tools::lints::magic_id_prefix::MagicIdPrefixParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report
+            .lints_run
+            .push("magic_id_prefix_for_optimistic".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "magic_id_prefix_for_optimistic".into(),
+            issues: count,
+        });
+        report.magic_id_prefix_for_optimistic =
+            Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("shared_enum_validation") {
+        let r = crate::tools::lints::shared_enum_validation::shared_enum_validation(
+            state,
+            crate::tools::lints::shared_enum_validation::SharedEnumValidationParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("shared_enum_validation".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "shared_enum_validation".into(),
+            issues: count,
+        });
+        report.shared_enum_validation = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
     // Sum from `issues_by_lint` instead of accumulating per-lint, so adding a
@@ -495,6 +597,7 @@ fn build_headline(report: &LintProjectReport) -> Vec<HeadlineEntry> {
                 let sev = match pt.get("severity").and_then(|x| x.as_str()) {
                     Some("error") => "error",
                     Some("info") => "info",
+                    Some("hint") => "hint",
                     _ => "warning",
                 };
                 bump("prop_drill", Some(kind), sev, 1);
@@ -615,6 +718,57 @@ fn build_headline(report: &LintProjectReport) -> Vec<HeadlineEntry> {
             arr.len(),
         );
     }
+    if let Some(v) = &report.duplicate_helper_client_server
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "warning");
+            bump("duplicate_helper_client_server", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.vec_or_owned_prop_passthrough
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            // `info` is the default tier; the per-finding `confidence`
+            // (medium vs low) doesn't change severity rollup — that's
+            // surfaced in the raw finding body for callers that want it.
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "info");
+            bump("vec_or_owned_prop_passthrough", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.magic_id_prefix_for_optimistic
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "info");
+            bump("magic_id_prefix_for_optimistic", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.shared_enum_validation
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "info");
+            bump("shared_enum_validation", code, sev, 1);
+        }
+    }
 
     let mut rows: Vec<HeadlineEntry> = buckets
         .into_iter()
@@ -637,9 +791,10 @@ fn build_headline(report: &LintProjectReport) -> Vec<HeadlineEntry> {
 
 fn severity_rank(s: &str) -> u8 {
     match s {
-        "error" => 3,
-        "warning" => 2,
-        "info" => 1,
+        "error" => 4,
+        "warning" => 3,
+        "info" => 2,
+        "hint" => 1,
         _ => 0,
     }
 }
@@ -649,6 +804,7 @@ fn severity_str(raw: Option<&str>, default: &'static str) -> &'static str {
         Some("error") => "error",
         Some("warning") => "warning",
         Some("info") => "info",
+        Some("hint") => "hint",
         _ => default,
     }
 }
@@ -823,10 +979,7 @@ mod tests {
             .iter()
             .position(|h| h.severity == "warning")
             .unwrap();
-        let info_idx = headline
-            .iter()
-            .position(|h| h.severity == "info")
-            .unwrap();
+        let info_idx = headline.iter().position(|h| h.severity == "info").unwrap();
         assert!(
             warn_idx < info_idx,
             "warning must precede info: {headline:?}",
@@ -847,10 +1000,7 @@ mod tests {
             ..Default::default()
         };
         let headline = build_headline(&report);
-        let with_headline = LintProjectReport {
-            headline,
-            ..report
-        };
+        let with_headline = LintProjectReport { headline, ..report };
         let summary = render_summary(&with_headline);
         assert!(
             summary.contains("Top fixes"),

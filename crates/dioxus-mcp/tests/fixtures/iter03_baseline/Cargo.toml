@@ -1,0 +1,16 @@
+# Regression fixture for the iter03 generator shape — pinned in
+# tests/integration.rs::tool_lint_project_iter03_baseline. Never built by
+# cargo; only its source is parsed by syn.
+[package]
+name = "iter03-baseline-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+server = ["dioxus/server"]
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }

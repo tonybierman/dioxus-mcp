@@ -522,6 +522,10 @@ mod tests {
             presence_map_unbounded: None,
             insecure_set_cookie: None,
             components_audit: None,
+            duplicate_helper_client_server: None,
+            vec_or_owned_prop_passthrough: None,
+            magic_id_prefix_for_optimistic: None,
+            shared_enum_validation: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -586,6 +590,10 @@ mod tests {
             presence_map_unbounded: None,
             insecure_set_cookie: None,
             components_audit: None,
+            duplicate_helper_client_server: None,
+            vec_or_owned_prop_passthrough: None,
+            magic_id_prefix_for_optimistic: None,
+            shared_enum_validation: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -647,6 +655,10 @@ mod tests {
             presence_map_unbounded: None,
             insecure_set_cookie: None,
             components_audit: None,
+            duplicate_helper_client_server: None,
+            vec_or_owned_prop_passthrough: None,
+            magic_id_prefix_for_optimistic: None,
+            shared_enum_validation: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc, true);

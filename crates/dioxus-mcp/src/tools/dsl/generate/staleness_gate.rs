@@ -143,9 +143,7 @@ mod tests {
     #[test]
     fn rejects_empty_name() {
         let dir = tempfile::TempDir::new().unwrap();
-        let g = DslStalenessGate {
-            name: "".into(),
-        };
+        let g = DslStalenessGate { name: "".into() };
         let err = generate_staleness_gate(dir.path(), &g).unwrap_err();
         assert!(err.contains("name"), "got: {err}");
     }
