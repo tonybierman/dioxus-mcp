@@ -47,9 +47,16 @@ pub struct RouteEntry {
 
 #[derive(Debug, Serialize)]
 pub struct RouteMapReport {
-    pub file: PathBuf,
+    /// File the `Routable` enum was found in. `None` when no enum exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// Name of the `Routable` enum. Empty when no enum exists.
     pub enum_name: String,
     pub routes: Vec<RouteEntry>,
+    /// Human-readable note set when the tool degraded instead of erroring
+    /// (e.g. no `Routable` enum found — app may use server-side routing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMapReport, String> {
@@ -63,23 +70,43 @@ pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMap
                 crate_root.join(rf)
             }
         }
-        None => find_routable(&crate_root).ok_or_else(|| {
-            "could not find a Routable enum in src/; pass router_file".to_string()
-        })?,
+        None => match find_routable(&crate_root) {
+            Some(p) => p,
+            None => {
+                return Ok(RouteMapReport {
+                    file: None,
+                    enum_name: String::new(),
+                    routes: Vec::new(),
+                    note: Some(
+                        "no Routable enum found in src/; app may use server-side routing or not yet declare routes"
+                            .into(),
+                    ),
+                });
+            }
+        },
     };
 
     let src = std::fs::read_to_string(&router_file)
         .map_err(|e| format!("read {}: {e}", router_file.display()))?;
     let file = syn::parse_file(&src).map_err(|e| format!("parse: {e}"))?;
 
-    let routable_enum = file
-        .items
-        .iter()
-        .find_map(|it| match it {
-            syn::Item::Enum(e) if e.attrs.iter().any(|a| has_derive(a, "Routable")) => Some(e),
-            _ => None,
-        })
-        .ok_or_else(|| format!("no `#[derive(Routable)]` enum in {}", router_file.display()))?;
+    let routable_enum = match file.items.iter().find_map(|it| match it {
+        syn::Item::Enum(e) if e.attrs.iter().any(|a| has_derive(a, "Routable")) => Some(e),
+        _ => None,
+    }) {
+        Some(e) => e,
+        None => {
+            return Ok(RouteMapReport {
+                file: Some(router_file.clone()),
+                enum_name: String::new(),
+                routes: Vec::new(),
+                note: Some(format!(
+                    "no `#[derive(Routable)]` enum in {}",
+                    router_file.display()
+                )),
+            });
+        }
+    };
 
     let enum_name = routable_enum.ident.to_string();
     let mut layout_stack: Vec<String> = Vec::new();
@@ -149,9 +176,10 @@ pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMap
     }
 
     Ok(RouteMapReport {
-        file: router_file,
+        file: Some(router_file),
         enum_name,
         routes,
+        note: None,
     })
 }
 

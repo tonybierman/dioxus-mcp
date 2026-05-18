@@ -235,7 +235,7 @@ pub(super) const CORE_SCREEN: &str = r#"  Screen:
 "#;
 
 pub(super) const CORE_SERVER_FN: &str = r#"  ServerFn:
-    description: An Axum-backed server fn using Dioxus 0.7's #[get/post("/path")] attribute. Requires fullstack feature on the dioxus dep.
+    description: "An Axum-backed server fn using Dioxus 0.7's #[get/post(\"/path\")] attribute. Requires fullstack feature on the dioxus dep. The MCP's indexer (project_index / project_tour / server_fn_call_graph / openapi_spec) recognizes BOTH the new verb-macro form (#[get/post/put/delete/patch(\"/path\")]) AND the legacy #[server(...)] attribute form — hand-written code using either is picked up. The verb-macro form has a stable path (the literal you wrote); the legacy form's path is derived from the fn ident and may be hashed at runtime when no `#[server(Name)]` is given (the openapi_spec report flags these under `guessed_paths`)."
     fields:
       - {name: name, type: string, required: true}
       - {name: args, type: "ArgDef[]", required: false}
@@ -243,7 +243,7 @@ pub(super) const CORE_SERVER_FN: &str = r#"  ServerFn:
       - {name: method, type: "get|post (defaults: post if args else get)", required: false}
       - {name: path, type: "string (default: /api/{snake_name})", required: false}
       - {name: extractors, type: "ArgDef[] — Axum-style request extractors. Each {name, type} entry lands BOTH in the `#[get/post(...)]` attribute's argument list AND in the fn signature, so a cookie-bearing handler is one DSL entry instead of a hand-edit. Example: extractors: [{name: cookies, type: \"TypedHeader<Cookie>\"}] emits `#[get(\"/api/board\", cookies: TypedHeader<Cookie>)]` and `pub async fn handler(cookies: TypedHeader<Cookie>, ...)`. You're responsible for adding the relevant extractor crates (axum_extra, axum::headers, tower_cookies, …) to Cargo.toml so the type resolves.", required: false}
-      - {name: auth_required, type: "bool (default false). When true the scaffolder injects the canonical cookie-authed prologue: ensures a `cookies: TypedHeader<Cookie>` extractor is declared (auto-prepended when missing), pulls the session id out of the named cookie, and maps the missing-cookie case to `ServerFnError::ServerError(\"not logged in\")`. A `// TODO touch_session(session_id).await?` marker is left in the body so the caller can wire it to their own session store. You still need axum-extra (with the `typed-header` and `cookie` features) in Cargo.toml.", required: false}
+      - {name: auth_required, type: "bool (default false). When true the scaffolder injects the canonical cookie-authed prologue: ensures a `cookies: TypedHeader<Cookie>` extractor is declared (auto-prepended when missing), pulls the session id out of the named cookie, and maps the missing-cookie case to `ServerFnError::ServerError(\"not logged in\")`. A `// TODO touch_session(session_id).await?` marker is left in the body so the caller can wire it to their own session store. You still need axum-extra (with the `typed-header` and `cookie` features) in Cargo.toml. WRITE-SIDE COUNTERPART: for the login fn that has to actually emit `Set-Cookie`, call `FullstackContext::current().add_response_header(\"set-cookie\", ...)` from inside the fn body — `search_docs query: \"set cookie from server fn\"` returns a curated snippet.", required: false}
       - {name: session_cookie, type: "string (default \"session_id\"). Cookie name the auth prologue reads. Only consulted when auth_required: true.", required: false}
     example:
       server_fns:
@@ -354,6 +354,8 @@ pub(super) const CORE_RESOURCE: &str = r#"  Resource:
       - {name: route_base, type: "string (default \"/{plural-snake}\"); plural follows `plural` if set, else the built-in algorithm (regular `+s`; `+es` for s/sh/ch/x/z endings; `y → ies` after a consonant)", required: false}
       - {name: plural, type: "string — override the auto-pluralized form for irregular nouns (Person → people, Mouse → mice). Affects the default route_base and the list_{plural} server-fn name.", required: false}
       - {name: derives, type: "string[] forwarded to the synthesized Model", required: false}
+      - {name: auth_required, type: "bool (default false). When true every synthesized server fn (list/get/create/update/delete) receives the same cookie-authed prologue as `ServerFn { auth_required: true }`: a `cookies: TypedHeader<Cookie>` extractor is added and the session id is extracted, mapping the missing-cookie case to `ServerFnError::ServerError(\"not logged in\")`. Pair with the auth extension's session_state primitive on the client side. WRITE-SIDE: for the login fn that has to emit Set-Cookie, see `search_docs query: \"set cookie from server fn\"`.", required: false}
+      - {name: session_cookie, type: "string (default \"session_id\"). Cookie name the auth prologue reads. Only consulted when `auth_required: true`.", required: false}
     example:
       resources:
         - name: Product
@@ -366,6 +368,13 @@ pub(super) const CORE_RESOURCE: &str = r#"  Resource:
           fields:
             - {name: id, type: i64}
             - {name: name, type: String}
+        - name: Card
+          # All five synth server fns get the cookie prologue — no need to
+          # rewrite generated fns by hand.
+          auth_required: true
+          fields:
+            - {name: id, type: i64}
+            - {name: title, type: String}
 "#;
 
 pub(super) const CORE_REMOVE: &str = r#"  Remove:

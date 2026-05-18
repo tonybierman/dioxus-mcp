@@ -20,6 +20,12 @@ pub(super) struct SynthServerFn {
     method: &'static str,
     path: String,
     body: String,
+    /// When true, the synth fn receives the same cookie-authed prologue as
+    /// `create_server_fn`'s `auth_required: true` — a `cookies: TypedHeader<Cookie>`
+    /// extractor and a session-id extraction that errors out on missing cookie.
+    pub(super) auth_required: bool,
+    /// Cookie name for the auth prologue. Honored only when `auth_required` is true.
+    pub(super) session_cookie: Option<String>,
 }
 
 /// For every `screens:` entry with `template.kind: client_crud`, find the
@@ -316,6 +322,8 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
             )
         };
 
+        let auth_required = r.auth_required;
+        let session_cookie = r.session_cookie.clone();
         synth.push(SynthServerFn {
             name: list_name.clone(),
             args: vec![],
@@ -323,6 +331,8 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
             method: "get",
             path: format!("/api{route_base}"),
             body: mk_body(&format!("{store_path}::global().list()")),
+            auth_required,
+            session_cookie: session_cookie.clone(),
         });
         synth.push(SynthServerFn {
             name: get_name.clone(),
@@ -331,6 +341,8 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
             method: "post",
             path: format!("/api{route_base}/get"),
             body: mk_body(&format!("{store_path}::global().get(id)")),
+            auth_required,
+            session_cookie: session_cookie.clone(),
         });
         synth.push(SynthServerFn {
             name: create_name.clone(),
@@ -339,6 +351,8 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
             method: "post",
             path: format!("/api{route_base}"),
             body: mk_body(&format!("{store_path}::global().create(item)")),
+            auth_required,
+            session_cookie: session_cookie.clone(),
         });
         synth.push(SynthServerFn {
             name: update_name.clone(),
@@ -347,6 +361,8 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
             method: "post",
             path: format!("/api{route_base}/update"),
             body: mk_body(&format!("{store_path}::global().update(item)")),
+            auth_required,
+            session_cookie: session_cookie.clone(),
         });
         synth.push(SynthServerFn {
             name: delete_name.clone(),
@@ -355,6 +371,8 @@ pub(super) fn expand_resources(doc: &mut DslDoc) -> Result<Vec<SynthServerFn>, S
             method: "post",
             path: format!("/api{route_base}/delete"),
             body: mk_body(&format!("{store_path}::global().delete(id)")),
+            auth_required,
+            session_cookie,
         });
 
         // 4. Screens: list + new + edit. The edit screen takes an `id`
@@ -529,6 +547,18 @@ pub(super) async fn generate_synth_server_fn(
     if target.exists() {
         return Err(format!("{} already exists", target.display()));
     }
+    // When the resource declares auth_required, auto-prepend a `cookies:
+    // TypedHeader<Cookie>` extractor (idempotent — user-supplied
+    // extractors would already have it). For now resources don't accept
+    // custom extractors directly; this list will only ever start empty.
+    let mut extractors: Vec<(String, String)> = Vec::new();
+    if sf.auth_required && !extractors.iter().any(|(n, _)| n == "cookies") {
+        extractors.insert(0, ("cookies".into(), "TypedHeader<Cookie>".into()));
+    }
+    let session_cookie = sf
+        .session_cookie
+        .clone()
+        .unwrap_or_else(|| "session_id".into());
     let body = render(
         "server_fn_body",
         SERVER_FN_WITH_BODY_TPL,
@@ -538,6 +568,9 @@ pub(super) async fn generate_synth_server_fn(
             method => sf.method,
             path => sf.path.clone(),
             args => sf.args.iter().map(|(n, t)| context!{ name => n.clone(), ty => t.clone() }).collect::<Vec<_>>(),
+            extractors => extractors.iter().map(|(n, t)| context!{ name => n.clone(), ty => t.clone() }).collect::<Vec<_>>(),
+            auth_required => sf.auth_required,
+            session_cookie => session_cookie,
             body => sf.body.clone(),
             extra_uses => Vec::<String>::new(),
         },

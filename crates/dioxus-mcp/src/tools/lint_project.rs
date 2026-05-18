@@ -174,6 +174,8 @@ pub async fn lint_project(
             state,
             crate::tools::prop_drill::PropDrillParams {
                 project_root: p.project_root.clone(),
+                ignore_callbacks: false,
+                kinds: None,
             },
         )
         .await?;

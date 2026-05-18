@@ -88,7 +88,7 @@ pub async fn project_tour(
 
     let routes_fut = async {
         if want("routes") {
-            crate::tools::route_map::route_map(
+            match crate::tools::route_map::route_map(
                 state,
                 crate::tools::route_map::RouteMapParams {
                     router_file: None,
@@ -96,9 +96,12 @@ pub async fn project_tour(
                 },
             )
             .await
-            .ok()
+            {
+                Ok(rm) => (Some(rm), None),
+                Err(e) => (None, Some(e)),
+            }
         } else {
-            None
+            (None, None)
         }
     };
 
@@ -135,7 +138,7 @@ pub async fn project_tour(
         }
     };
 
-    let (audit, mut routes, mut index, mut assets) =
+    let (audit, (mut routes, routes_err), mut index, mut assets) =
         tokio::join!(audit_fut, routes_fut, index_fut, assets_fut);
 
     let mut trunc = TruncationFlags::default();
@@ -163,7 +166,7 @@ pub async fn project_tour(
     }
 
     let summary = render_summary(&audit, &routes, &index, &assets, &trunc);
-    let next_actions = derive_next_actions(&audit, &index);
+    let next_actions = derive_next_actions(&audit, &routes, routes_err.as_deref(), &index);
 
     Ok(ProjectTourReport {
         summary,
@@ -182,9 +185,39 @@ pub async fn project_tour(
 /// "pick a render target") stays in `audit.findings` for the caller to read.
 fn derive_next_actions(
     audit: &Option<crate::tools::audit_feature_flags::AuditReport>,
+    routes: &Option<crate::tools::route_map::RouteMapReport>,
+    routes_err: Option<&str>,
     index: &Option<crate::tools::project_index::ProjectIndexReport>,
 ) -> Vec<NextAction> {
     let mut out: Vec<NextAction> = Vec::new();
+
+    // Tool-level partial failure: route_map errored. Surface the error so the
+    // caller knows the `routes` section is missing for a reason other than
+    // "no router".
+    if let Some(err) = routes_err {
+        out.push(NextAction {
+            title: "route_map failed".into(),
+            reason: err.to_string(),
+            hint:
+                "re-run `route_map` directly with `router_file: \"...\"` to point at the right file"
+                    .into(),
+        });
+    }
+
+    // Degraded result: tool succeeded but reported a note (e.g. no Routable
+    // enum). Pass the note through as a next-action so the caller doesn't have
+    // to inspect the nested struct to spot it.
+    if let Some(r) = routes
+        && let Some(note) = &r.note
+    {
+        out.push(NextAction {
+            title: "routes section is empty".into(),
+            reason: note.clone(),
+            hint: "if the app uses server-side routing, ignore; otherwise scaffold a `Routable` enum with `execute_code`"
+                .into(),
+        });
+    }
+
     if let Some(a) = audit {
         for f in &a.findings {
             let msg = f.message.as_str();
@@ -265,17 +298,21 @@ fn render_summary(
 
     if let Some(r) = routes {
         let suffix = if trunc.routes { " (truncated)" } else { "" };
-        out.push_str(&format!(
-            "**Routes** ({}{}): enum `{}`\n",
-            r.routes.len(),
-            suffix,
-            r.enum_name
-        ));
-        for route in r.routes.iter().take(10) {
+        if let Some(note) = &r.note {
+            out.push_str(&format!("**Routes** (0): {note}\n"));
+        } else {
             out.push_str(&format!(
-                "  - `{}` → `{}`\n",
-                route.full_path, route.component
+                "**Routes** ({}{}): enum `{}`\n",
+                r.routes.len(),
+                suffix,
+                r.enum_name
             ));
+            for route in r.routes.iter().take(10) {
+                out.push_str(&format!(
+                    "  - `{}` → `{}`\n",
+                    route.full_path, route.component
+                ));
+            }
         }
     }
 
@@ -321,7 +358,7 @@ fn render_summary(
     // Cross-reference: the structured `next_actions` field carries the
     // executable hints; the summary just points at them so a human-only
     // reader knows they exist.
-    let actions = derive_next_actions(audit, index);
+    let actions = derive_next_actions(audit, routes, None, index);
     if !actions.is_empty() {
         out.push_str(&format!(
             "\n**Next actions** ({}): see `next_actions` for paste-ready hints.\n",

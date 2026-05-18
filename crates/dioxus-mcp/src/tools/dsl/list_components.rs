@@ -84,6 +84,118 @@ pub async fn list_components(p: ListComponentsParams) -> Result<ListComponentsRe
     })
 }
 
+// ----------------- suggest_components -----------------
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SuggestComponentsParams {
+    /// Free-text prompt / user ask. Scanned for UI-primitive keywords
+    /// (drag, dialog, combobox, calendar, toast, …); matching catalog
+    /// entries are returned. Pass the user's verbatim words — the matcher
+    /// is intentionally generous.
+    pub prompt: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SuggestComponentsResult {
+    /// Keywords from the prompt that mapped to a catalog entry.
+    pub matched_keywords: Vec<String>,
+    /// Suggested catalog entries, ordered by match strength (descending).
+    pub components: Vec<ComponentEntry>,
+    /// One-line nudge for what to do next. Empty when no matches were found.
+    pub next: String,
+}
+
+/// Map a UI-primitive keyword (case-insensitive substring) to one or more
+/// canonical catalog names. The matcher is keyword → catalog name, not the
+/// other way around, so synonyms ("drag-to-reorder" → drag_and_drop_list) can
+/// be handled without rewriting the catalog. Keep this list short and
+/// high-signal; the agent should still scan `list_components` for anything
+/// that doesn't match.
+const KEYWORD_HINTS: &[(&str, &[&str])] = &[
+    ("drag", &["drag_and_drop_list"]),
+    ("sortable", &["drag_and_drop_list"]),
+    ("reorder", &["drag_and_drop_list"]),
+    ("dialog", &["dialog", "alert_dialog"]),
+    ("modal", &["dialog", "alert_dialog"]),
+    ("combobox", &["combo_box"]),
+    ("autocomplete", &["combo_box"]),
+    ("typeahead", &["combo_box"]),
+    ("date picker", &["date_picker", "calendar"]),
+    ("datepicker", &["date_picker", "calendar"]),
+    ("calendar", &["calendar", "date_picker"]),
+    ("toast", &["toast"]),
+    ("snackbar", &["toast"]),
+    ("notification", &["toast"]),
+    ("tooltip", &["tooltip"]),
+    ("popover", &["popover"]),
+    ("menu", &["dropdown_menu", "context_menu"]),
+    ("dropdown", &["dropdown_menu"]),
+    ("context menu", &["context_menu"]),
+    ("tabs", &["tabs"]),
+    ("accordion", &["accordion"]),
+    ("slider", &["slider"]),
+    ("switch", &["switch"]),
+    ("toggle", &["switch"]),
+    ("checkbox", &["checkbox"]),
+    ("radio", &["radio_group"]),
+    ("progress", &["progress"]),
+    ("spinner", &["spinner"]),
+    ("avatar", &["avatar"]),
+    ("badge", &["badge"]),
+    ("breadcrumb", &["breadcrumb"]),
+    ("pagination", &["pagination"]),
+    ("table", &["table"]),
+    ("sheet", &["sheet"]),
+    ("drawer", &["sheet"]),
+    ("command", &["command"]),
+    ("palette", &["command"]),
+];
+
+pub async fn suggest_components(
+    p: SuggestComponentsParams,
+) -> Result<SuggestComponentsResult, String> {
+    let prompt_lc = p.prompt.to_ascii_lowercase();
+    let mut matched_keywords: Vec<String> = Vec::new();
+    let mut catalog_names: Vec<&'static str> = Vec::new();
+    for (kw, names) in KEYWORD_HINTS {
+        if prompt_lc.contains(kw) {
+            matched_keywords.push((*kw).to_string());
+            for n in *names {
+                if !catalog_names.contains(n) {
+                    catalog_names.push(*n);
+                }
+            }
+        }
+    }
+    let mut components: Vec<ComponentEntry> = Vec::new();
+    for name in &catalog_names {
+        if let Some((n, desc, hint)) = DX_COMPONENT_CATALOG_ENTRIES
+            .iter()
+            .find(|(n, _, _)| n == name)
+        {
+            components.push(ComponentEntry {
+                name: (*n).to_string(),
+                description: (*desc).to_string(),
+                prop_hint: (*hint).to_string(),
+                import: format!("use crate::components::{n}::{};", to_pascal(n)),
+            });
+        }
+    }
+    let next = if components.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "before writing handlers, run `dx components add {}` from the project root and then call `describe_component` for the prop surface",
+            components.first().map(|c| c.name.as_str()).unwrap_or("")
+        )
+    };
+    Ok(SuggestComponentsResult {
+        matched_keywords,
+        components,
+        next,
+    })
+}
+
 /// snake_case → PascalCase, inlined to avoid pulling heck into this small
 /// surface. The catalog only ever holds ASCII snake_case names.
 fn to_pascal(snake: &str) -> String {
@@ -140,6 +252,39 @@ mod tests {
             !names.contains(&"button"),
             "button should not match 'date': {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn suggest_components_maps_drag_keyword_to_drag_and_drop_list() {
+        let r = suggest_components(SuggestComponentsParams {
+            prompt: "I want to build drag-to-reorder cards in this Kanban".into(),
+        })
+        .await
+        .unwrap();
+        let names: Vec<&str> = r.components.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"drag_and_drop_list"),
+            "expected drag_and_drop_list suggestion, got: {names:?}"
+        );
+        assert!(
+            !r.next.is_empty(),
+            "should suggest a next action when matches are found"
+        );
+    }
+
+    #[tokio::test]
+    async fn suggest_components_returns_empty_for_unrelated_prompt() {
+        let r = suggest_components(SuggestComponentsParams {
+            prompt: "add a new field to my SQL schema".into(),
+        })
+        .await
+        .unwrap();
+        assert!(
+            r.components.is_empty(),
+            "unrelated prompt should not suggest widgets, got: {:?}",
+            r.components
+        );
+        assert!(r.next.is_empty(), "no next action when no matches");
     }
 
     #[tokio::test]

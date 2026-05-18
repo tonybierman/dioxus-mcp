@@ -79,6 +79,28 @@ pub async fn search_docs(
         });
     }
 
+    // Bolt in MCP-curated snippets that fill known gaps in the upstream
+    // corpus (e.g. cookie writes via FullstackContext). Scored against the
+    // same query, but with a small boost since these are deliberately
+    // hand-picked to answer specific questions.
+    for sup in supplemental_sections() {
+        let head_terms = tokenize(sup.heading);
+        let body_terms = tokenize(sup.body);
+        let score = score_terms(&qterms, &head_terms) * 4.0 + score_terms(&qterms, &body_terms);
+        if score <= 0.0 {
+            continue;
+        }
+        let snippet = best_snippet(sup.body, &qterms);
+        hits.push(DocHit {
+            url: format!("dioxus-mcp://docs/{}", slugify(sup.heading)),
+            raw_url: format!("dioxus-mcp://docs/{}", slugify(sup.heading)),
+            title: Some(format!("{} (mcp curated)", sup.heading)),
+            score,
+            snippet,
+            body: section_body_capped(sup.body),
+        });
+    }
+
     hits.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -96,6 +118,27 @@ pub async fn search_docs(
 struct Section {
     heading: String,
     body: String,
+}
+
+/// MCP-curated documentation snippets surfaced alongside the upstream
+/// corpus. Each entry should have a heading that contains the keywords an
+/// agent would type, and a body with a runnable Rust snippet.
+struct SupplementalSection {
+    heading: &'static str,
+    body: &'static str,
+}
+
+fn supplemental_sections() -> &'static [SupplementalSection] {
+    &[
+        SupplementalSection {
+            heading: "Writing cookies and response headers from server fns (set cookie, Set-Cookie, login)",
+            body: "Server fns can write response headers (and cookies) by reaching for the per-request `FullstackContext`. This is the symmetric write-side to parsing `TypedHeader<Cookie>` for reads — `search_docs` covers the read side via the auth extension of `get_dsl_spec`.\n\n```rust\nuse dioxus::fullstack::FullstackContext;\n\n#[server]\nasync fn login(user: String, password: String) -> ServerFnResult<()> {\n    // …authenticate, mint a session id…\n    let cookie = format!(\n        \"sid={sid}; Path=/; HttpOnly; SameSite=Lax\"\n    );\n    FullstackContext::current()\n        .add_response_header(\"set-cookie\", &cookie)\n        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;\n    Ok(())\n}\n```\n\nNotes:\n- `FullstackContext::current()` is available only inside `#[server]` / verb-macro server fns; it panics on the client.\n- The header name is lowercased; multiple `Set-Cookie` calls accumulate.\n- For verb-macro fns (`#[post(\"/api/login\")]`), the same call works — the FullstackContext is bound to the per-request scope.\n- To *delete* a cookie, set its `Max-Age=0` and an empty value.\n",
+        },
+        SupplementalSection {
+            heading: "Reading cookies from server fns (TypedHeader, parse Cookie, session)",
+            body: "Use `TypedHeader<Cookie>` as a server-fn extractor (or `cookies` arg on a verb-macro fn) to read incoming cookies.\n\n```rust\nuse axum_extra::{headers::Cookie, TypedHeader};\n\n#[get(\"/api/me\", cookies: TypedHeader<Cookie>)]\nasync fn me() -> ServerFnResult<Option<User>> {\n    let sid = cookies.get(\"sid\").unwrap_or_default();\n    // …look up the session…\n    Ok(None)\n}\n```\n\nPair with [Writing cookies and response headers from server fns] for the login/logout side. The dioxus-mcp `get_dsl_spec` auth extension wires both sides into scaffolded `Resource` and `ServerFn` primitives via the `auth_required: true` flag.\n",
+        },
+    ]
 }
 
 fn split_sections(md: &str) -> Vec<Section> {

@@ -1133,12 +1133,25 @@ pub(super) const SERVER_FN_WITH_BODY_TPL: &str = r#"use dioxus::prelude::*;
 {{ u }}
 {%- endfor %}
 
-#[{{ method }}("{{ path }}")]
+#[{{ method }}("{{ path }}"
+{%- for e in extractors %}, {{ e.name }}: {{ e.ty }}{% endfor -%}
+)]
 pub async fn {{ snake }}(
+{%- for e in extractors %}
+    {{ e.name }}: {{ e.ty }},
+{%- endfor %}
 {%- for a in args %}
     {{ a.name }}: {{ a.ty }},
 {%- endfor %}
 ) -> Result<{{ ret }}, ServerFnError> {
+{%- if auth_required %}
+    let session_id = cookies
+        .get("{{ session_cookie }}")
+        .ok_or_else(|| ServerFnError::ServerError("not logged in".into()))?
+        .to_string();
+    // TODO touch_session(&session_id).await?; — wire to your session store.
+    let _ = session_id;
+{%- endif %}
 {{ body }}
 }
 "#;

@@ -31,9 +31,13 @@ pub struct GetDslSpecParams {
     /// pull next without paying for the full ~10KB payload. `extensions:`
     /// still controls which extension groups appear; `sections:` is ignored
     /// in this mode (the index is always the full set within the requested
-    /// extension scope).
+    /// extension scope). When omitted the server picks a default: `true` on
+    /// the first `get_dsl_spec` call of the session (the spec recommends
+    /// scanning the index then re-fetching specific blocks), `false` on
+    /// follow-ups. Pass `false` explicitly to force the full payload on the
+    /// first call.
     #[serde(default)]
-    pub index_only: bool,
+    pub index_only: Option<bool>,
     /// When false, omit the ~5KB authoring-guide preamble (workflow notes,
     /// envelope conventions, etc.). When omitted, the server picks a
     /// default: `true` on the first `get_dsl_spec` call of the session,
@@ -63,14 +67,16 @@ pub async fn get_dsl_spec(
     state: &Arc<State>,
     p: GetDslSpecParams,
 ) -> Result<GetDslSpecResult, String> {
-    // Auto-pace the prologue: emit it on the first call of the session and
-    // skip it on follow-ups, unless the caller pinned the choice explicitly.
-    let include_prologue = match p.include_prologue {
-        Some(v) => v,
-        None => !state
-            .dsl_spec_prologue_seen
-            .load(std::sync::atomic::Ordering::Relaxed),
-    };
+    // Auto-pace the prologue and index-only mode: emit each on the first
+    // call of the session and skip on follow-ups, unless the caller pinned
+    // the choice explicitly. They share the same "first call?" flag — the
+    // first response is the prologue + the compact index together, then
+    // subsequent calls return full spec blocks for the requested sections.
+    let first_call = !state
+        .dsl_spec_prologue_seen
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let include_prologue = p.include_prologue.unwrap_or(first_call);
+    let index_only = p.index_only.unwrap_or(first_call);
     // Canonical (snake_case) name → (group, body). The group decides whether
     // a section is emitted under `core:` or under an `extensions: <group>:`
     // block; the body is the constant text already authored above.
@@ -157,13 +163,23 @@ pub async fn get_dsl_spec(
     // `sections:` is ignored — the index always covers everything within the
     // requested extension scope so callers can scan it and decide what to
     // pull next.
-    if p.index_only {
+    if index_only {
         let mut out = String::new();
         out.push_str("# Dioxus-MCP DSL spec — compact index\n");
         out.push_str(
             "# One line per primitive. Re-call get_dsl_spec with `sections: [name, ...]`\n",
         );
         out.push_str("# (and optionally `extensions: [...]`) to fetch the full block(s).\n");
+        if include_prologue {
+            // First call of the session: include the authoring-guide preamble
+            // alongside the index. Mark prologue as seen so the next call
+            // (without an explicit override) goes straight to full blocks.
+            out.push('\n');
+            out.push_str(CORE_PREAMBLE);
+            state
+                .dsl_spec_prologue_seen
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         out.push_str(&format!("\nversion: \"{SPEC_VERSION}\"\n"));
         let any_core = SECTIONS.iter().any(|(_, g, _)| *g == "core");
         if any_core {

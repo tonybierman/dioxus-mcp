@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use proc_macro2::TokenTree;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use syn::visit::Visit;
@@ -24,6 +25,12 @@ pub struct SignalNode {
     pub kind: String, // "signal" | "memo" | "resource" | "effect"
     pub line: usize,
     pub reads: Vec<String>,
+    /// True when this signal is referenced anywhere in the component's `rsx!`
+    /// invocations — either as a formatted-string interpolation (`{sig}`) or
+    /// as a bare ident / call (`sig`, `sig()`, `sig.read()`). A leaf
+    /// `use_signal` will have `reads: []` but still be consumed by rsx; this
+    /// flag distinguishes "consumed by rendering" from "truly unused".
+    pub read_in_rsx: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,11 +118,122 @@ fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
             kind: kind.into(),
             line,
             reads,
+            read_in_rsx: false,
         });
         known_bindings.push(binding_name);
     }
 
+    // Second pass: walk every statement and the trailing expression looking
+    // for macro invocations (notably `rsx!`). Inside a macro the tokens are
+    // not parsed as Rust expressions, so we walk the raw `TokenStream` for
+    // ident references to a known binding. We also pick up
+    // `format!`-style interpolations: `{sig}` is tokenized as the literal
+    // `"{sig}"`, so we scan literal strings for `{name[..]}` placeholders.
+    let mut rsx_hits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in &block.stmts {
+        collect_macro_idents(stmt_to_tokens_visitor(stmt), &known_bindings, &mut rsx_hits);
+    }
+
+    for node in &mut nodes {
+        if rsx_hits.contains(&node.name) {
+            node.read_in_rsx = true;
+        }
+    }
+
     nodes
+}
+
+/// Tiny adapter: produce an "iter all macros nested in this statement" by
+/// walking the syn tree and feeding their token streams to a callback.
+fn stmt_to_tokens_visitor(stmt: &syn::Stmt) -> Vec<proc_macro2::TokenStream> {
+    struct MacroFinder {
+        macros: Vec<proc_macro2::TokenStream>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for MacroFinder {
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            self.macros.push(m.tokens.clone());
+            syn::visit::visit_macro(self, m);
+        }
+    }
+    let mut f = MacroFinder { macros: Vec::new() };
+    f.visit_stmt(stmt);
+    f.macros
+}
+
+/// Walk a list of macro token streams and add any ident reference (or
+/// `{name…}` interpolation in a string literal) matching one of `known` to
+/// `hits`.
+fn collect_macro_idents(
+    streams: Vec<proc_macro2::TokenStream>,
+    known: &[String],
+    hits: &mut std::collections::HashSet<String>,
+) {
+    fn walk(
+        ts: proc_macro2::TokenStream,
+        known: &[String],
+        hits: &mut std::collections::HashSet<String>,
+    ) {
+        for tt in ts {
+            match tt {
+                TokenTree::Group(g) => walk(g.stream(), known, hits),
+                TokenTree::Ident(i) => {
+                    let s = i.to_string();
+                    if known.iter().any(|k| k == &s) {
+                        hits.insert(s);
+                    }
+                }
+                TokenTree::Literal(lit) => {
+                    // Strip surrounding quotes when present, then look for
+                    // `{name}` / `{name:fmt}` / `{name.field}` placeholders.
+                    let s = lit.to_string();
+                    let inner = s.strip_prefix('"').and_then(|s| s.strip_suffix('"'));
+                    if let Some(inner) = inner {
+                        scan_interpolations(inner, known, hits);
+                    }
+                }
+                TokenTree::Punct(_) => {}
+            }
+        }
+    }
+    for s in streams {
+        walk(s, known, hits);
+    }
+}
+
+/// Pick `{ident…}` placeholders out of a format string and add matching
+/// known names to `hits`. Handles `{name}`, `{name:fmt}`, `{name.field}` and
+/// `{{` / `}}` escapes.
+fn scan_interpolations(s: &str, known: &[String], hits: &mut std::collections::HashSet<String>) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' if i + 1 < bytes.len() && bytes[i + 1] == b'{' => {
+                i += 2;
+            }
+            b'{' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end] != b'}' && bytes[end] != b':' {
+                    end += 1;
+                }
+                let token = &s[start..end];
+                // Strip trailing `.field` so `{sig.read()}` still matches `sig`.
+                let head = token.split(['.', '(', ' ']).next().unwrap_or("");
+                if !head.is_empty() && known.iter().any(|k| k == head) {
+                    hits.insert(head.to_string());
+                }
+                // Skip past the closing `}` if present
+                while i < bytes.len() && bytes[i] != b'}' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
 }
 
 fn classify_init_call(expr: &syn::Expr) -> Option<&'static str> {

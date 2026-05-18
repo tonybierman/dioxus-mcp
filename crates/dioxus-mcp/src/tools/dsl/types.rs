@@ -259,6 +259,21 @@ pub struct DslResource {
     /// Extra derives forwarded to the synthesized Model.
     #[serde(default)]
     pub derives: Vec<String>,
+    /// When true, every server fn the resource emits (list / get / create /
+    /// update / delete) receives the same cookie-authed prologue that
+    /// `ServerFn { auth_required: true }` produces: a `cookies: TypedHeader<Cookie>`
+    /// extractor is added, the session id is pulled from the named cookie,
+    /// and a missing cookie maps to `ServerFnError::ServerError("not logged in")`.
+    /// You still need axum-extra (with the `typed-header` and `cookie`
+    /// features) in Cargo.toml.
+    ///
+    /// Default: false.
+    #[serde(default)]
+    pub auth_required: bool,
+    /// Cookie name read by the auth prologue. Only consulted when
+    /// `auth_required: true`. Default: `"session_id"`.
+    #[serde(default)]
+    pub session_cookie: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

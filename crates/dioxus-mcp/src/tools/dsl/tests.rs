@@ -71,7 +71,7 @@ async fn rejects_unknown_extension() {
         GetDslSpecParams {
             extensions: vec!["bogus".into()],
             sections: vec![],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(true),
             include_examples: true,
         },
@@ -88,7 +88,7 @@ async fn sections_filter_returns_only_requested_core_sections() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec!["model".into(), "client_store".into()],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(true),
             include_examples: true,
         },
@@ -141,7 +141,7 @@ async fn sections_filter_auto_pulls_extension_group() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec!["form".into()],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(true),
             include_examples: true,
         },
@@ -173,8 +173,10 @@ async fn index_only_returns_compact_listing() {
         GetDslSpecParams {
             extensions: vec!["crud".into()],
             sections: vec![],
-            index_only: true,
-            include_prologue: Some(true),
+            index_only: Some(true),
+            // Drop the prologue so its commentary about `example:` doesn't
+            // leak into the index-content assertions below.
+            include_prologue: Some(false),
             include_examples: true,
         },
     )
@@ -207,7 +209,7 @@ async fn include_prologue_false_drops_the_preamble() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec!["model".into()],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(false),
             include_examples: true,
         },
@@ -233,7 +235,7 @@ async fn include_examples_false_strips_example_blocks() {
         GetDslSpecParams {
             extensions: vec!["crud".into()],
             sections: vec![],
-            index_only: false,
+            index_only: Some(false),
             // Drop the prologue so its commentary about `example:` doesn't
             // confuse the assertion below.
             include_prologue: Some(false),
@@ -269,7 +271,7 @@ async fn components_section_renders_catalog_and_indexes() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec!["components".into()],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(false),
             include_examples: true,
         },
@@ -302,7 +304,7 @@ async fn components_section_renders_catalog_and_indexes() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec![],
-            index_only: true,
+            index_only: Some(true),
             include_prologue: Some(false),
             include_examples: true,
         },
@@ -324,6 +326,61 @@ async fn components_section_renders_catalog_and_indexes() {
 }
 
 #[tokio::test]
+async fn first_call_defaults_to_index_only_plus_prologue() {
+    let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
+    // First call: omit index_only AND include_prologue — both should auto-pace
+    // to "first call" defaults.
+    let first = get_dsl_spec(
+        &dummy,
+        GetDslSpecParams {
+            extensions: vec![],
+            sections: vec![],
+            index_only: None,
+            include_prologue: None,
+            include_examples: true,
+        },
+    )
+    .await
+    .expect("first call should succeed");
+    // Index header lands.
+    assert!(
+        first.spec.contains("DSL spec — compact index"),
+        "expected index marker on first call, got:\n{}",
+        first.spec
+    );
+    // Body fields don't.
+    assert!(
+        !first.spec.contains("template_kinds:"),
+        "expected NO full-spec fields on first call, got:\n{}",
+        first.spec
+    );
+
+    // Second call (same dummy state): defaults flip — full blocks, no prologue.
+    let second = get_dsl_spec(
+        &dummy,
+        GetDslSpecParams {
+            extensions: vec![],
+            sections: vec![],
+            index_only: None,
+            include_prologue: None,
+            include_examples: true,
+        },
+    )
+    .await
+    .expect("second call should succeed");
+    assert!(
+        !second.spec.contains("DSL spec — compact index"),
+        "expected full spec on second call, got:\n{}",
+        second.spec
+    );
+    assert!(
+        second.spec.contains("template_kinds:"),
+        "expected full spec fields on second call, got:\n{}",
+        second.spec
+    );
+}
+
+#[tokio::test]
 async fn sections_filter_rejects_unknown_name() {
     let dummy = std::sync::Arc::new(State::new(std::env::temp_dir()).unwrap());
     let err = get_dsl_spec(
@@ -331,7 +388,7 @@ async fn sections_filter_rejects_unknown_name() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec!["models".into()],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(true),
             include_examples: true,
         },
@@ -3844,6 +3901,65 @@ server_fns:
 }
 
 #[tokio::test]
+async fn resource_auth_required_propagates_prologue_to_every_synth_server_fn() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("resource_auth_required_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    let state = std::sync::Arc::new(crate::state::State::new(root.to_path_buf()).unwrap());
+    execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+resources:
+  - name: Card
+    auth_required: true
+    fields:
+      - {name: id, type: i64}
+      - {name: title, type: String}
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("resource auth_required scaffold should succeed");
+
+    // All five synth fns must carry the same prologue.
+    for name in [
+        "list_cards",
+        "get_card",
+        "create_card",
+        "update_card",
+        "delete_card",
+    ] {
+        let body = std::fs::read_to_string(root.join(format!("src/server/{name}.rs"))).unwrap();
+        assert!(
+            body.contains("cookies: TypedHeader<Cookie>"),
+            "{name} should auto-add cookies extractor; got:\n{body}"
+        );
+        assert!(
+            body.contains(".get(\"session_id\")"),
+            "{name} should read the session_id cookie; got:\n{body}"
+        );
+        assert!(
+            body.contains("\"not logged in\""),
+            "{name} should map missing cookie to ServerFnError; got:\n{body}"
+        );
+        syn::parse_file(&body).expect("synth server_fn should still parse with prologue");
+    }
+}
+
+#[tokio::test]
 async fn modify_errors_when_target_missing_and_skips_under_if_missing() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
@@ -4061,7 +4177,7 @@ async fn dsl_spec_default_prologue_skipped_on_repeat_call() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec![],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: None,
             include_examples: true,
         },
@@ -4078,7 +4194,7 @@ async fn dsl_spec_default_prologue_skipped_on_repeat_call() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec![],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: None,
             include_examples: true,
         },
@@ -4097,7 +4213,7 @@ async fn dsl_spec_default_prologue_skipped_on_repeat_call() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec![],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(true),
             include_examples: true,
         },
@@ -4121,7 +4237,7 @@ async fn dsl_spec_prologue_surfaces_data_layer_only_above_crud_picker() {
         GetDslSpecParams {
             extensions: vec![],
             sections: vec![],
-            index_only: false,
+            index_only: Some(false),
             include_prologue: Some(true),
             include_examples: false,
         },

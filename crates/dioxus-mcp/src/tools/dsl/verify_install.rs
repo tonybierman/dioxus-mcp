@@ -54,9 +54,12 @@ pub struct VerifyInstallReport {
     /// `true` when every step is `ok` — the catalog is fully wired.
     pub fully_wired: bool,
     /// Detected archetype based on what the source tree currently uses
-    /// (`basic`, `fullstack`, `fullstack-realtime`). Determines which
-    /// archetype-specific dep checks ran below. Empty when no Dioxus signal
-    /// is present.
+    /// (`basic`, `fullstack`, `fullstack-realtime`, `hand_rolled`).
+    /// Determines which archetype-specific dep checks ran below.
+    /// `hand_rolled` is set when the source tree shows no signal that the
+    /// user is using the `dx components add` catalog (no `components/` dir,
+    /// no theme css, no `mod components` declared); in that mode the three
+    /// dx-wiring steps are suppressed because they aren't applicable.
     pub archetype: &'static str,
     /// Per-step results in stable order.
     pub steps: Vec<VerifyInstallStep>,
@@ -79,11 +82,28 @@ pub async fn verify_install(
     let dir_step = check_components_dir(&src.join("components"));
 
     let signals = ArchetypeSignals::scan(&src);
-    let archetype = signals.archetype_label();
     let manifest_text = std::fs::read_to_string(crate_root.join("Cargo.toml")).unwrap_or_default();
     let manifest = parse_manifest(&manifest_text);
 
-    let mut steps = vec![mod_step, theme_step, dir_step];
+    // Hand-rolled UI archetype: none of the three dx-catalog markers are
+    // present. We treat that as "the user isn't planning to use the catalog"
+    // and suppress the three steps so the report doesn't flag noise. Only
+    // refines the `basic` label — a fullstack app without catalog wiring
+    // still wants its cookie / web-sys / tokio dep checks, so we keep those
+    // archetype names intact and just drop the catalog steps.
+    let no_dx_catalog = !mod_step.ok && !theme_step.ok && !dir_step.ok;
+    let base_archetype = signals.archetype_label();
+    let archetype = if no_dx_catalog && base_archetype == "basic" {
+        "hand_rolled"
+    } else {
+        base_archetype
+    };
+
+    let mut steps = if no_dx_catalog {
+        Vec::new()
+    } else {
+        vec![mod_step, theme_step, dir_step]
+    };
     extend_with_archetype_steps(&mut steps, &signals, &manifest, &crate_root);
 
     let missing: Vec<&'static str> = steps.iter().filter(|s| !s.ok).map(|s| s.id).collect();
@@ -570,20 +590,47 @@ mod tests {
     }
 
     #[test]
-    fn reports_all_three_missing_on_a_fresh_crate() {
+    fn fresh_crate_with_no_catalog_signals_reports_hand_rolled() {
+        // The historical "fresh crate" shape — main.rs with a stub App, no
+        // components/, no theme css — used to flag all three catalog steps.
+        // With the hand_rolled archetype, this is recognized as "the user
+        // isn't using the catalog" and the three steps are suppressed.
         let dir = tempdir().unwrap();
         write(
             &dir.path().join("src/main.rs"),
             "fn main() { dioxus::launch(App); }\n#[component]\nfn App() -> Element { rsx!{} }\n",
         );
         let r = run(dir.path());
+        assert_eq!(r.archetype, "hand_rolled");
+        assert!(r.fully_wired, "no catalog usage → nothing to wire");
+        assert!(
+            r.missing.is_empty(),
+            "hand_rolled archetype suppresses catalog steps, got missing = {:?}",
+            r.missing
+        );
+        // Sanity: the three catalog steps must NOT appear in the report.
+        for id in ["mod_components", "theme_asset", "components_dir"] {
+            assert!(
+                !r.steps.iter().any(|s| s.id == id),
+                "{id} should be suppressed for hand_rolled, got steps = {:?}",
+                r.steps.iter().map(|s| s.id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn partial_catalog_signals_keeps_basic_archetype_and_flags_remaining_steps() {
+        // Single catalog marker present (mod components;) — the user has
+        // started installing, so we drop back to `basic` and flag the
+        // remaining two steps as missing.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/main.rs"),
+            "mod components;\nfn main() {}\n",
+        );
+        let r = run(dir.path());
+        assert_eq!(r.archetype, "basic");
         assert!(!r.fully_wired);
-        let by_id: std::collections::HashMap<&str, &VerifyInstallStep> =
-            r.steps.iter().map(|s| (s.id, s)).collect();
-        assert!(!by_id["mod_components"].ok);
-        assert!(!by_id["theme_asset"].ok);
-        assert!(!by_id["components_dir"].ok);
-        assert!(r.missing.contains(&"mod_components"));
         assert!(r.missing.contains(&"theme_asset"));
         assert!(r.missing.contains(&"components_dir"));
     }
@@ -617,11 +664,16 @@ mod tests {
 
     #[test]
     fn ignores_commented_out_mod_decl() {
+        // We need at least one positive catalog signal so the hand_rolled
+        // suppression doesn't kick in and drop the step we want to inspect.
         let dir = tempdir().unwrap();
         write(
             &dir.path().join("src/main.rs"),
             "// mod components;\nfn main() {}\n",
         );
+        // Adding the components/ dir is enough to keep the archetype `basic`
+        // and surface the catalog steps.
+        write(&dir.path().join("src/components/mod.rs"), "");
         let r = run(dir.path());
         assert!(!step_by_id(&r, "mod_components").ok);
     }
@@ -691,16 +743,27 @@ fn App() -> Element {
         let src = crate_root.join("src");
         let main_rs = src.join("main.rs");
         let lib_rs = src.join("lib.rs");
-        let mut steps = vec![
-            check_mod_components(&main_rs, &lib_rs),
-            check_theme_asset(&src),
-            check_components_dir(&src.join("components")),
-        ];
+        let mod_step = check_mod_components(&main_rs, &lib_rs);
+        let theme_step = check_theme_asset(&src);
+        let dir_step = check_components_dir(&src.join("components"));
         let signals = ArchetypeSignals::scan(&src);
-        let archetype = signals.archetype_label();
+        let base_archetype = signals.archetype_label();
         let manifest_text =
             std::fs::read_to_string(crate_root.join("Cargo.toml")).unwrap_or_default();
         let manifest = parse_manifest(&manifest_text);
+
+        // Mirror the hand_rolled gating from the real entry point.
+        let no_dx_catalog = !mod_step.ok && !theme_step.ok && !dir_step.ok;
+        let archetype = if no_dx_catalog && base_archetype == "basic" {
+            "hand_rolled"
+        } else {
+            base_archetype
+        };
+        let mut steps = if no_dx_catalog {
+            Vec::new()
+        } else {
+            vec![mod_step, theme_step, dir_step]
+        };
         extend_with_archetype_steps(&mut steps, &signals, &manifest, crate_root);
         let missing: Vec<&'static str> = steps.iter().filter(|s| !s.ok).map(|s| s.id).collect();
         let fully_wired = missing.is_empty();
@@ -717,6 +780,9 @@ fn App() -> Element {
     fn basic_archetype_has_no_extra_dep_steps() {
         let dir = tempdir().unwrap();
         write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        // Plant a catalog signal so hand_rolled suppression doesn't fire and
+        // we can assert on the `basic` archetype label.
+        write(&dir.path().join("src/components/mod.rs"), "");
         let r = run(dir.path());
         assert_eq!(r.archetype, "basic");
         let extra_ids: Vec<&str> = r

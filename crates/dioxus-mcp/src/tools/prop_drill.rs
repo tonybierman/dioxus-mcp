@@ -14,6 +14,15 @@ use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PropDrillParams {
     pub project_root: Option<String>,
+    /// When true, drop `callback_passthrough` findings. Callback drills are
+    /// the correct pattern when there's no shared context provider, so they
+    /// usually drown out the signal from state passthroughs.
+    #[serde(default)]
+    pub ignore_callbacks: bool,
+    /// Optional kind filter — e.g. `["state_passthrough"]` to see only state
+    /// drills. Applied after `ignore_callbacks`. Empty = no filter.
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,6 +32,12 @@ pub struct Passthrough {
     pub child_prop: String,
     pub via: &'static str,
     pub line: usize,
+    /// Classification: `callback_passthrough` when the prop's type looks like
+    /// a callback (Callback<…>, EventHandler<…>, Fn/FnMut/FnOnce, or prop
+    /// name starts with `on_`); otherwise `state_passthrough`. Callback
+    /// drills are usually a correct pattern; state drills are the real
+    /// signal a context provider is missing.
+    pub kind: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +72,9 @@ pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDr
         props: HashSet<String>,
         /// For Props-struct components, the local var bound to the props (e.g. "props").
         props_arg: Option<String>,
+        /// Per-prop type strings, used to classify findings as
+        /// callback_passthrough vs state_passthrough.
+        prop_types: HashMap<String, String>,
     }
 
     let parent_info: HashMap<String, ParentInfo> = index
@@ -68,6 +86,11 @@ pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDr
                 ParentInfo {
                     props: c.props.iter().map(|p| p.name.clone()).collect(),
                     props_arg: None, // filled in below when we have the fn AST
+                    prop_types: c
+                        .props
+                        .iter()
+                        .map(|p| (p.name.clone(), p.ty.clone()))
+                        .collect(),
                 },
             )
         })
@@ -103,6 +126,7 @@ pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDr
                 continue;
             };
             let props = info.props.clone();
+            let prop_types = info.prop_types.clone();
             let props_arg = if via_props_struct.get(&name).copied().unwrap_or(false) {
                 fn_first_arg_name(f)
             } else {
@@ -126,8 +150,20 @@ pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDr
                     &known_components,
                     &props,
                     props_arg.as_deref(),
+                    &prop_types,
                     &mut passthroughs,
                 );
+            }
+
+            // Apply kind filters.
+            if p.ignore_callbacks {
+                passthroughs.retain(|pt| pt.kind != "callback_passthrough");
+            }
+            if let Some(kinds) = &p.kinds
+                && !kinds.is_empty()
+            {
+                let allowed: HashSet<&str> = kinds.iter().map(|s| s.as_str()).collect();
+                passthroughs.retain(|pt| allowed.contains(pt.kind));
             }
 
             if !passthroughs.is_empty() {
@@ -187,6 +223,7 @@ fn find_invocations(
     known: &HashSet<String>,
     parent_props: &HashSet<String>,
     parent_arg: Option<&str>,
+    parent_prop_types: &HashMap<String, String>,
     out: &mut Vec<Passthrough>,
 ) {
     let mut i = 0;
@@ -198,7 +235,14 @@ fn find_invocations(
                 && g.delimiter() == proc_macro2::Delimiter::Brace
             {
                 let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-                analyze_invocation(&name, &inner, parent_props, parent_arg, out);
+                analyze_invocation(
+                    &name,
+                    &inner,
+                    parent_props,
+                    parent_arg,
+                    parent_prop_types,
+                    out,
+                );
             }
         }
         i += 1;
@@ -207,7 +251,14 @@ fn find_invocations(
     for tt in tokens {
         if let TokenTree::Group(g) = tt {
             let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-            find_invocations(&inner, known, parent_props, parent_arg, out);
+            find_invocations(
+                &inner,
+                known,
+                parent_props,
+                parent_arg,
+                parent_prop_types,
+                out,
+            );
         }
     }
 }
@@ -217,6 +268,7 @@ fn analyze_invocation(
     tokens: &[TokenTree],
     parent_props: &HashSet<String>,
     parent_arg: Option<&str>,
+    parent_prop_types: &HashMap<String, String>,
     out: &mut Vec<Passthrough>,
 ) {
     for field in split_top_level_commas(tokens) {
@@ -245,15 +297,40 @@ fn analyze_invocation(
 
         if let Some((parent_prop, via)) = match_passthrough(&value_tokens, parent_props, parent_arg)
         {
+            let kind = classify_prop(&parent_prop, parent_prop_types);
             out.push(Passthrough {
                 parent_prop,
                 child: child.to_string(),
                 child_prop: key_s,
                 via,
                 line,
+                kind,
             });
         }
     }
+}
+
+/// Classify a parent prop as a callback or state passthrough based on its
+/// type signature (or `on_*` name as a fallback).
+fn classify_prop(name: &str, types: &HashMap<String, String>) -> &'static str {
+    if let Some(ty) = types.get(name) {
+        let stripped = ty.replace(' ', "");
+        if stripped.contains("Callback<")
+            || stripped.contains("EventHandler<")
+            || stripped.contains("Fn(")
+            || stripped.contains("FnMut(")
+            || stripped.contains("FnOnce(")
+            || stripped.contains("dynFn")
+            || stripped.contains("dynFnMut")
+            || stripped.contains("dynFnOnce")
+        {
+            return "callback_passthrough";
+        }
+    }
+    if name.starts_with("on_") {
+        return "callback_passthrough";
+    }
+    "state_passthrough"
 }
 
 fn split_top_level_commas(tokens: &[TokenTree]) -> Vec<Vec<TokenTree>> {

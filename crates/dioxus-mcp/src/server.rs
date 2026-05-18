@@ -226,6 +226,19 @@ impl DioxusMcp {
     }
 
     #[tool(
+        description = "Map a user prompt to catalog widgets. Pass the user's verbatim ask as `prompt` — the matcher scans for UI-primitive keywords (drag/dialog/combobox/calendar/toast/menu/tabs/etc.) and returns the canonical Dioxus 0.7 catalog entries that cover the request. Use this BEFORE writing event handlers for anything that looks like a UI primitive: a positive hit avoids hand-rolling drag listeners, modal trap-focus, autocomplete logic, etc. Empty `components` means no keywords matched — fall back to `list_components`."
+    )]
+    async fn suggest_components(
+        &self,
+        Parameters(p): Parameters<tools::dsl::SuggestComponentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::suggest_components(p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "Verify a project's `dx components add` wiring. Reports which one-time setup steps are still missing (`mod components;` in src/main.rs or src/lib.rs, `asset!(\"/assets/dx-components-theme.css\")` mounted in the App, `src/components/` directory present). Returns `fully_wired: bool`, a `missing: [step_id]` summary, and a `steps: [...]` list with each step's `ok`, the paths it looked at (`looked_in`), and the exact fix line + paste location when `ok: false`. Use this after `dx components add` (or after the user reports compile errors about an unresolved `crate::components` path) to finish wiring without re-running the CLI."
     )]
     async fn verify_install(
@@ -366,10 +379,15 @@ impl ServerHandler for DioxusMcp {
                    `kind: client_crud` for in-memory state. For one-off handwritten screens \
                    or single-component edits, skip the DSL and write the file directly — \
                    `execute_code` is for multi-file, cross-wired primitives, not ad-hoc UI.\n\
-                 - UI primitive widgets (button / dialog / date-picker / etc.): \
-                   `list_components` to scan the catalog, then `dx components add <name>` \
+                 - UI primitive widgets (button / dialog / date-picker / drag-to-reorder / \
+                   combobox / toast / etc.): BEFORE writing any handler code, \
+                   `list_components` (or `suggest_components { prompt: \"...\" }` with the \
+                   user's verbatim ask) to scan the catalog, then `dx components add <name>` \
                    from the project root. Call `describe_component` for the full prop / \
-                   event surface before authoring rsx! that uses it.\n\
+                   event surface before authoring rsx! that uses it. If you find yourself \
+                   hand-rolling event listeners for a UI primitive that the catalog likely \
+                   covers (drag, sortable, autocomplete, calendar, modal, toast), stop and \
+                   check the catalog first.\n\
                  - Runtime behavior (panics, renders, signal writes, navigations) -> \
                    runtime_events. Server-fn latency / errors -> server_fn_summary.\n\
                  - Project structure (what routes / components / server fns exist) -> \
