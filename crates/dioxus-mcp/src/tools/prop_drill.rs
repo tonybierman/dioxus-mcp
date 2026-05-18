@@ -38,6 +38,14 @@ pub struct Passthrough {
     /// drills are usually a correct pattern; state drills are the real
     /// signal a context provider is missing.
     pub kind: &'static str,
+    /// `info` | `warning`. A single-level Signal<T> handed to a single child
+    /// is the correct shape for shared ephemeral state (drag selection, focus
+    /// ring, etc.) — downgrade those to `info` so the warning list stays the
+    /// real "this should be a context" signal. `warning` is reserved for
+    /// state passthroughs that fan out to multiple distinct children in this
+    /// parent (any pattern that probably wants `use_context`). Callback
+    /// passthroughs are always `info` — they're a correct pattern.
+    pub severity: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +162,8 @@ pub async fn prop_drill(state: &Arc<State>, p: PropDrillParams) -> Result<PropDr
                     &mut passthroughs,
                 );
             }
+
+            assign_severity(&mut passthroughs, &prop_types);
 
             // Apply kind filters.
             if p.ignore_callbacks {
@@ -305,8 +315,55 @@ fn analyze_invocation(
                 via,
                 line,
                 kind,
+                // Severity is assigned after the parent's full passthrough
+                // set is collected (fan-out depends on cross-finding state).
+                severity: "warning",
             });
         }
+    }
+}
+
+/// Assign per-finding severity based on type + fan-out within the parent.
+/// Callbacks are always `info` — they're a correct pattern. State
+/// passthroughs that target a single child AND whose type is a `Signal<T>`
+/// are also `info` (the shared-ephemeral-state shape, e.g. drag selection,
+/// focus ring). Everything else is `warning` — that's the "this probably
+/// wants `use_context`" signal.
+fn assign_severity(passthroughs: &mut [Passthrough], types: &HashMap<String, String>) {
+    // Fan-out: how many DISTINCT children receive each parent_prop in this
+    // parent's rsx body. Drills that fan out to multiple children are the
+    // strongest signal that the prop wants a context provider.
+    let mut fanout: HashMap<&str, HashSet<String>> = HashMap::new();
+    for pt in passthroughs.iter() {
+        fanout
+            .entry(pt.parent_prop.as_str())
+            .or_default()
+            .insert(pt.child.clone());
+    }
+    let fanout: HashMap<String, usize> = fanout
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.len()))
+        .collect();
+
+    for pt in passthroughs.iter_mut() {
+        // Callbacks are a correct pattern even when drilled.
+        if pt.kind == "callback_passthrough" {
+            pt.severity = "info";
+            continue;
+        }
+        let single_child = fanout.get(&pt.parent_prop).copied().unwrap_or(1) <= 1;
+        let is_signal = types
+            .get(&pt.parent_prop)
+            .map(|t| t.replace(' ', ""))
+            .map(|t| {
+                t.contains("Signal<") || t.contains("ReadSignal<") || t.contains("WriteSignal<")
+            })
+            .unwrap_or(false);
+        pt.severity = if single_child && is_signal {
+            "info"
+        } else {
+            "warning"
+        };
     }
 }
 
@@ -420,4 +477,91 @@ fn match_base(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn passthrough(parent_prop: &str, child: &str, kind: &'static str) -> Passthrough {
+        Passthrough {
+            parent_prop: parent_prop.to_string(),
+            child: child.to_string(),
+            child_prop: parent_prop.to_string(),
+            via: "shorthand",
+            line: 1,
+            kind,
+            severity: "warning",
+        }
+    }
+
+    #[test]
+    fn single_child_signal_passthrough_is_info() {
+        let types: HashMap<String, String> =
+            [("dragging".to_string(), "Signal<Option<i64>>".to_string())].into();
+        let mut pts = vec![passthrough("dragging", "CardItem", "state_passthrough")];
+        assign_severity(&mut pts, &types);
+        assert_eq!(pts[0].severity, "info");
+    }
+
+    #[test]
+    fn signal_passthrough_to_multiple_children_is_warning() {
+        let types: HashMap<String, String> =
+            [("dragging".to_string(), "Signal<Option<i64>>".to_string())].into();
+        let mut pts = vec![
+            passthrough("dragging", "CardItem", "state_passthrough"),
+            passthrough("dragging", "ColumnHeader", "state_passthrough"),
+        ];
+        assign_severity(&mut pts, &types);
+        for pt in &pts {
+            assert_eq!(
+                pt.severity, "warning",
+                "fan-out to multiple children must escalate severity"
+            );
+        }
+    }
+
+    #[test]
+    fn non_signal_state_passthrough_is_warning_even_with_one_child() {
+        // A plain `Vec<Card>` drilled one level is the classic
+        // "this wants a context" finding — keep at warning.
+        let types: HashMap<String, String> =
+            [("cards".to_string(), "Vec<Card>".to_string())].into();
+        let mut pts = vec![passthrough("cards", "Column", "state_passthrough")];
+        assign_severity(&mut pts, &types);
+        assert_eq!(pts[0].severity, "warning");
+    }
+
+    #[test]
+    fn callback_passthroughs_are_always_info() {
+        // Callbacks drilled across multiple children are still the correct
+        // pattern.
+        let types: HashMap<String, String> =
+            [("on_move".to_string(), "Callback<MoveEvent>".to_string())].into();
+        let mut pts = vec![
+            passthrough("on_move", "Column", "callback_passthrough"),
+            passthrough("on_move", "CardItem", "callback_passthrough"),
+        ];
+        assign_severity(&mut pts, &types);
+        for pt in &pts {
+            assert_eq!(pt.severity, "info");
+        }
+    }
+
+    #[test]
+    fn read_signal_and_write_signal_count_as_signal() {
+        for ty in [
+            "ReadSignal<Option<i64>>",
+            "WriteSignal<Vec<Card>>",
+            "Signal<bool>",
+        ] {
+            let types: HashMap<String, String> = [("x".to_string(), ty.to_string())].into();
+            let mut pts = vec![passthrough("x", "Child", "state_passthrough")];
+            assign_severity(&mut pts, &types);
+            assert_eq!(
+                pts[0].severity, "info",
+                "Signal-family type `{ty}` to one child should be info"
+            );
+        }
+    }
 }

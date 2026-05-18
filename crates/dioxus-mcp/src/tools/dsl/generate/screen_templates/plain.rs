@@ -391,6 +391,51 @@ mod tests {
     }
 
     #[test]
+    fn screen_template_empty_body_with_wrap_emits_wrap_only() {
+        // `body: empty` + `wrap_with: Protected` is the canonical
+        // "guard the route with a stub body" shape. The wrap must still
+        // appear in the rsx — otherwise we silently produce a guarded route
+        // with no guard.
+        let t = DslScreenTemplate {
+            kind: "empty".into(),
+            endpoint: None,
+            item_type: None,
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: None,
+            label_field: None,
+            checkbox_field: None,
+            class: None,
+            body: Some("empty".into()),
+            styled: None,
+            compose_style: None,
+            crud: None,
+        };
+        let body = render_screen_template(
+            std::env::temp_dir().as_path(),
+            "BoardScreen",
+            "board_screen",
+            Some("Protected"),
+            &[],
+            &t,
+        )
+        .unwrap();
+        assert!(
+            body.contains("use crate::components::Protected;"),
+            "expected import for Protected, got:\n{body}"
+        );
+        assert!(
+            body.contains("Protected {}"),
+            "body: empty + wrap_with: Protected must wrap in `Protected {{}}`; got:\n{body}"
+        );
+        assert!(
+            !body.contains("h1 {"),
+            "stub body should still drop the placeholder h1, got:\n{body}"
+        );
+    }
+
+    #[test]
     fn screen_template_omits_wrapper_when_unset() {
         let out = render(
             "screen",

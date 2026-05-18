@@ -129,7 +129,20 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Run every project-wide lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`) over the crate's `src/` tree and merge the results. Returns a markdown summary, per-lint issue counts (`issues_by_lint`), the raw report from each lint under its name, deduplicated `parse_errors`, and a `total_issues` count. Use `include` / `exclude` to scope (e.g. `include: [\"check_rsx\", \"signal_lint\"]`), and `dead_component_roots` to mark extra components alive."
+        description = "Hint when a component hand-rolls a catalog widget. Today only detects the HTML5 drag/drop triplet (`ondragstart` + `ondragover` + `ondrop` on the same component) and suggests catalog widget `drag_and_drop_list`. Skips catalog wrapper files (`src/components/<catalog_name>/`). Findings are hints, not errors — the catalog widget is a single sortable list, so kanban-style cross-column boards genuinely need the hand-rolled pattern."
+    )]
+    async fn reinvented_widget(
+        &self,
+        Parameters(p): Parameters<tools::reinvented_widget::ReinventedWidgetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::reinvented_widget::reinvented_widget(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Run every project-wide lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`, `reinvented_widget`) over the crate's `src/` tree and merge the results. Returns a markdown summary, per-lint issue counts (`issues_by_lint`), the raw report from each lint under its name, deduplicated `parse_errors`, and a `total_issues` count. `reinvented_widget` findings are hints — counted in `issues_by_lint` but not in `total_issues`. Use `include` / `exclude` to scope (e.g. `include: [\"check_rsx\", \"signal_lint\"]`), and `dead_component_roots` to mark extra components alive."
     )]
     async fn lint_project(
         &self,
@@ -392,10 +405,11 @@ impl ServerHandler for DioxusMcp {
                    runtime_events. Server-fn latency / errors -> server_fn_summary.\n\
                  - Project structure (what routes / components / server fns exist) -> \
                    route_map, project_index, project_tour, server_fn_call_graph.\n\
-                 - Static analysis (dead code, prop drilling, signal/props lints, asset \
-                   audit, feature flags, OpenAPI) -> dead_components, prop_drill, \
-                   signal_lint, props_lint, asset_audit, audit_feature_flags, openapi_spec, \
-                   explain_signal_graph, lint_project.\n\
+                 - Static analysis (dead code, prop drilling, signal/props lints, \
+                   reinvented widgets, asset audit, feature flags, OpenAPI) -> \
+                   dead_components, prop_drill, signal_lint, props_lint, reinvented_widget, \
+                   asset_audit, audit_feature_flags, openapi_spec, explain_signal_graph, \
+                   lint_project.\n\
                  - Docs / canonical examples -> search_docs, find_example. RSX check -> \
                    check_rsx. Catalog widget prop / event surface -> describe_component.\n\
                  \n\

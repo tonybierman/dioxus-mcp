@@ -29,6 +29,24 @@ pub fn registry() -> &'static [LocalExample] {
             url: "https://github.com/anthropics/dioxus-mcp/blob/main/docs/patterns/streaming-snapshot.md",
             body: STREAMING_SNAPSHOT,
         },
+        LocalExample {
+            name: "cookie-session-auth",
+            blurb: "Cookie-based session auth: TypedHeader<Cookie> read, in-memory SESSIONS map, provide_session/use_session signal-in-context pair, and a Protected wrapper that redirects via use_effect. The whole login/logout/me shape in one file.",
+            url: "https://github.com/anthropics/dioxus-mcp/blob/main/docs/patterns/cookie-session-auth.md",
+            body: COOKIE_SESSION_AUTH,
+        },
+        LocalExample {
+            name: "dnd-reorder",
+            blurb: "HTML5 drag/drop kanban: `ondragstart` / `ondragover` / `ondrop` triplet with `dragging` + `drop_target` signals lifted to the parent. Covers the cross-column move the catalog `drag_and_drop_list` can't model (it's a single sortable list).",
+            url: "https://github.com/anthropics/dioxus-mcp/blob/main/docs/patterns/dnd-reorder.md",
+            body: DND_REORDER,
+        },
+        LocalExample {
+            name: "wasm-polling-timer",
+            blurb: "WASM-safe polling loop using `gloo_timers::future::TimeoutFuture` inside `use_future`. Replaces tokio sleeps (which don't compile on wasm) for periodic refreshes / heartbeats / debounced reactions.",
+            url: "https://github.com/anthropics/dioxus-mcp/blob/main/docs/patterns/wasm-polling-timer.md",
+            body: WASM_POLLING_TIMER,
+        },
     ]
 }
 
@@ -329,6 +347,270 @@ mod client_side {
 }
 "#;
 
+const COOKIE_SESSION_AUTH: &str = r#"// Cookie-based session auth pattern.
+//
+// Shape: the server owns a `SESSIONS` map keyed by sid. /api/login mints a sid
+// and emits a Set-Cookie via `FullstackContext::add_response_header`. /api/me
+// reads the cookie back via `TypedHeader<Cookie>`. The client mirrors the
+// "who am I" answer into a `Signal<Option<User>>` provided in context so a
+// `Protected` wrapper can redirect unauthenticated users.
+//
+// Cargo.toml needs:
+//   axum-extra = { version = "0.10", features = ["typed-header"] }
+//   uuid       = { version = "1", features = ["v4"] }
+//
+// The verb-macro `cookies:` extractor binds `cookies` into scope itself —
+// DO NOT also list it in the rust fn signature (FromRequest will reject the
+// body tuple if you do). The dioxus-mcp DSL `auth_required: true` flag
+// produces the same prologue automatically.
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use axum_extra::{TypedHeader, headers::Cookie};
+use dioxus::prelude::*;
+use dioxus::fullstack::FullstackContext;
+use uuid::Uuid;
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct User {
+    pub name: String,
+}
+
+// Server-side session store (replace with redis/sqlite for real apps).
+static SESSIONS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[post("/api/login")]
+pub async fn login(name: String) -> Result<(), ServerFnError> {
+    if name.trim().is_empty() {
+        return Err(ServerFnError::new("name required"));
+    }
+    let sid = Uuid::new_v4().to_string();
+    SESSIONS.lock().unwrap().insert(sid.clone(), name);
+
+    let ctx = FullstackContext::current()
+        .ok_or_else(|| ServerFnError::new("no request context"))?;
+    ctx.add_response_header(
+        "set-cookie",
+        format!("session_id={sid}; Path=/; HttpOnly; SameSite=Lax"),
+    );
+    Ok(())
+}
+
+#[get("/api/logout", cookies: TypedHeader<Cookie>)]
+pub async fn logout() -> Result<(), ServerFnError> {
+    if let Some(sid) = cookies.get("session_id") {
+        SESSIONS.lock().unwrap().remove(sid);
+    }
+    if let Some(ctx) = FullstackContext::current() {
+        ctx.add_response_header("set-cookie", "session_id=; Path=/; Max-Age=0");
+    }
+    Ok(())
+}
+
+#[get("/api/me", cookies: TypedHeader<Cookie>)]
+pub async fn me() -> Result<Option<User>, ServerFnError> {
+    let Some(sid) = cookies.get("session_id") else {
+        return Ok(None);
+    };
+    let name = SESSIONS.lock().unwrap().get(sid).cloned();
+    Ok(name.map(|name| User { name }))
+}
+
+// ----- client side -----
+
+#[derive(Clone, Copy)]
+pub struct SessionState(pub Signal<Option<User>>);
+
+pub fn provide_session() {
+    let sig = use_signal(|| None::<User>);
+    // On first mount, ask the server who we are. The Resource result is
+    // mirrored into the Signal so consumers can read it synchronously.
+    let _ = use_resource(move || {
+        let mut sig = sig;
+        async move {
+            if let Ok(u) = me().await {
+                sig.set(u);
+            }
+        }
+    });
+    use_context_provider(|| SessionState(sig));
+}
+
+pub fn use_session() -> SessionState {
+    use_context::<SessionState>()
+}
+
+#[component]
+pub fn Protected(children: Element) -> Element {
+    let session = use_session();
+    let nav = use_navigator();
+    use_effect(move || {
+        if session.0.read().is_none() {
+            nav.replace("/login");
+        }
+    });
+    if session.0.read().is_none() {
+        return rsx! { div { class: "loading", "Redirecting..." } };
+    }
+    rsx! { {children} }
+}
+"#;
+
+const DND_REORDER: &str = r#"// HTML5 drag/drop kanban pattern.
+//
+// Shape: each draggable card emits `ondragstart` to publish its identity; each
+// drop target accepts via `ondragover` (preventDefault to opt in) and
+// `ondrop` to commit the reorder. The catalog `drag_and_drop_list` only
+// covers a single sortable list — for cross-column moves you need this
+// pattern with `dragging` (the card currently being moved) and `drop_target`
+// (where the drop indicator is hovering) lifted into the parent signal.
+//
+// The trick most agents miss: `ondragover` MUST call `prevent_default()` or
+// `ondrop` won't fire. The browser defaults the dragover to "not droppable."
+
+use dioxus::prelude::*;
+
+#[derive(Clone, PartialEq)]
+pub struct Card { pub id: i64, pub col: String, pub title: String }
+
+#[component]
+pub fn Board() -> Element {
+    let mut cards = use_signal::<Vec<Card>>(Vec::new);
+    let mut dragging = use_signal::<Option<i64>>(|| None);
+    let mut drop_target = use_signal::<Option<String>>(|| None);
+
+    let commit_move = move |to_col: String| {
+        if let Some(id) = *dragging.read() {
+            cards.with_mut(|list| {
+                if let Some(c) = list.iter_mut().find(|c| c.id == id) {
+                    c.col = to_col;
+                }
+            });
+        }
+        dragging.set(None);
+        drop_target.set(None);
+    };
+
+    rsx! {
+        div { class: "board",
+            for col in ["todo", "doing", "done"] {
+                div {
+                    class: "column",
+                    class: if drop_target.read().as_deref() == Some(col) { "drag-over" } else { "" },
+                    // Crucial: prevent_default on dragover opts the element in
+                    // as a drop target. Without it, ondrop never fires.
+                    ondragover: move |e| { e.prevent_default(); drop_target.set(Some(col.to_string())); },
+                    ondragleave: move |_| { if drop_target.read().as_deref() == Some(col) { drop_target.set(None); } },
+                    ondrop: {
+                        let c = col.to_string();
+                        let commit = commit_move.clone();
+                        move |e| { e.prevent_default(); commit(c.clone()); }
+                    },
+
+                    h2 { "{col}" }
+                    for card in cards.read().iter().filter(|c| c.col == col).cloned().collect::<Vec<_>>() {
+                        div {
+                            class: "card",
+                            class: if Some(card.id) == *dragging.read() { "dragging" } else { "" },
+                            draggable: "true",
+                            ondragstart: {
+                                let id = card.id;
+                                move |_| dragging.set(Some(id))
+                            },
+                            ondragend: move |_| { dragging.set(None); drop_target.set(None); },
+                            "{card.title}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+"#;
+
+const WASM_POLLING_TIMER: &str = r#"// WASM-safe polling timer pattern.
+//
+// Shape: `use_future` owns a loop that awaits `TimeoutFuture::new(ms)` from
+// `gloo-timers`. This works on the wasm32 target where `tokio::time::sleep`
+// fails to compile (and tokio runtimes don't drive in the browser anyway).
+//
+// Cargo.toml needs (wasm side only):
+//   gloo-timers = { version = "0.3", features = ["futures"] }
+//
+// Pattern uses:
+//   - Periodic refresh of a `use_resource` by bumping a Signal<u32> tick.
+//   - Heartbeat / liveness ping.
+//   - Debounced reaction (clear the timer on every keystroke, restart it).
+
+use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
+
+#[component]
+pub fn StatusPanel() -> Element {
+    let mut tick = use_signal(|| 0u32);
+
+    // Bump `tick` every 5s; any `use_resource` that reads `tick()` will
+    // refetch. The future lives for the component's lifetime — when the
+    // component unmounts, Dioxus drops the task.
+    use_future(move || async move {
+        loop {
+            TimeoutFuture::new(5_000).await;
+            *tick.write() += 1;
+        }
+    });
+
+    let status = use_resource(move || async move {
+        let _ = tick();
+        fetch_status().await
+    });
+
+    rsx! {
+        div { class: "status",
+            match &*status.read_unchecked() {
+                None => rsx! { div { "Loading..." } },
+                Some(Err(e)) => rsx! { div { class: "error", "Error: {e}" } },
+                Some(Ok(s)) => rsx! { div { "Last update #{tick}: {s}" } },
+            }
+        }
+    }
+}
+
+// Debounced variant: every keystroke restarts the 300ms wait; the search
+// only fires once the user has stopped typing for 300ms.
+#[component]
+pub fn DebouncedSearch() -> Element {
+    let mut query = use_signal(String::new);
+    let mut results = use_signal::<Vec<String>>(Vec::new);
+
+    use_future(move || async move {
+        // Read query once each loop iteration. We read at the top so the
+        // future re-runs on every change (Dioxus tracks the read).
+        let q = query();
+        if q.trim().is_empty() { return; }
+        TimeoutFuture::new(300).await;
+        // The user might have typed more in the 300ms — recheck.
+        if q == *query.read() {
+            if let Ok(hits) = search(q).await {
+                results.set(hits);
+            }
+        }
+    });
+
+    rsx! {
+        input { value: "{query()}", oninput: move |e| query.set(e.value()) }
+        ul {
+            for hit in results.read().iter() {
+                li { "{hit}" }
+            }
+        }
+    }
+}
+
+async fn fetch_status() -> Result<String, String> { Ok("ok".into()) }
+async fn search(_q: String) -> Result<Vec<String>, String> { Ok(vec![]) }
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +642,84 @@ mod tests {
         assert!(
             entry.body.contains("EventSource"),
             "client side should subscribe via EventSource"
+        );
+    }
+
+    #[test]
+    fn registry_has_cookie_session_auth() {
+        let r = registry();
+        let entry = r
+            .iter()
+            .find(|e| e.name == "cookie-session-auth")
+            .expect("cookie-session-auth entry should exist");
+        // Server side
+        assert!(
+            entry.body.contains("TypedHeader<Cookie>"),
+            "should read cookies via TypedHeader<Cookie>"
+        );
+        assert!(
+            entry.body.contains("SESSIONS"),
+            "should reference the SESSIONS map"
+        );
+        assert!(
+            entry.body.contains("FullstackContext::current()"),
+            "should set the Set-Cookie via FullstackContext"
+        );
+        assert!(
+            entry.body.contains("ServerFnError::new"),
+            "should use the 0.7.3 ServerFnError constructor"
+        );
+        // Client side
+        assert!(
+            entry.body.contains("provide_session") && entry.body.contains("use_session"),
+            "should expose the Signal-in-context pair"
+        );
+        assert!(
+            entry.body.contains("Protected") && entry.body.contains("use_effect"),
+            "should show the Protected wrapper redirecting via use_effect"
+        );
+    }
+
+    #[test]
+    fn registry_has_dnd_reorder() {
+        let r = registry();
+        let entry = r
+            .iter()
+            .find(|e| e.name == "dnd-reorder")
+            .expect("dnd-reorder entry should exist");
+        // All three event handlers must be present — that's what makes the
+        // HTML5 drag/drop loop work.
+        assert!(entry.body.contains("ondragstart"));
+        assert!(entry.body.contains("ondragover"));
+        assert!(entry.body.contains("ondrop"));
+        assert!(
+            entry.body.contains("prevent_default"),
+            "ondragover must call prevent_default or the drop never fires"
+        );
+        // The signal-pair shape (dragging + drop_target) that the catalog
+        // widget doesn't model.
+        assert!(entry.body.contains("dragging"));
+        assert!(entry.body.contains("drop_target"));
+    }
+
+    #[test]
+    fn registry_has_wasm_polling_timer() {
+        let r = registry();
+        let entry = r
+            .iter()
+            .find(|e| e.name == "wasm-polling-timer")
+            .expect("wasm-polling-timer entry should exist");
+        assert!(
+            entry.body.contains("TimeoutFuture"),
+            "should use gloo-timers TimeoutFuture (wasm-safe)"
+        );
+        assert!(
+            entry.body.contains("use_future"),
+            "polling loop should live inside use_future"
+        );
+        assert!(
+            entry.body.contains("gloo_timers") || entry.body.contains("gloo-timers"),
+            "should reference gloo-timers in the imports/cargo notes"
         );
     }
 }

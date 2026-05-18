@@ -33,6 +33,10 @@ pub struct DocHit {
     /// to re-fetch the corpus for typical lookups. Truncation is signaled by
     /// a trailing `... [truncated]` marker.
     pub body: String,
+    /// For MCP-curated supplemental snippets, the Dioxus version the snippet
+    /// was last verified against. Absent for upstream corpus sections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_verified: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +80,7 @@ pub async fn search_docs(
             score,
             snippet,
             body: section_body_capped(&sec.body),
+            version_verified: None,
         });
     }
 
@@ -98,6 +103,7 @@ pub async fn search_docs(
             score,
             snippet,
             body: section_body_capped(sup.body),
+            version_verified: Some(sup.version_verified.to_string()),
         });
     }
 
@@ -126,17 +132,23 @@ struct Section {
 struct SupplementalSection {
     heading: &'static str,
     body: &'static str,
+    /// Dioxus version the snippet was last verified against (e.g. "0.7.3").
+    /// Bump this whenever the snippet is touched so stale snippets are
+    /// auditable from the registry source.
+    version_verified: &'static str,
 }
 
 fn supplemental_sections() -> &'static [SupplementalSection] {
     &[
         SupplementalSection {
             heading: "Writing cookies and response headers from server fns (set cookie, Set-Cookie, login)",
-            body: "Server fns can write response headers (and cookies) by reaching for the per-request `FullstackContext`. This is the symmetric write-side to parsing `TypedHeader<Cookie>` for reads — `search_docs` covers the read side via the auth extension of `get_dsl_spec`.\n\n```rust\nuse dioxus::fullstack::FullstackContext;\n\n#[server]\nasync fn login(user: String, password: String) -> ServerFnResult<()> {\n    // …authenticate, mint a session id…\n    let cookie = format!(\n        \"sid={sid}; Path=/; HttpOnly; SameSite=Lax\"\n    );\n    FullstackContext::current()\n        .add_response_header(\"set-cookie\", &cookie)\n        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;\n    Ok(())\n}\n```\n\nNotes:\n- `FullstackContext::current()` is available only inside `#[server]` / verb-macro server fns; it panics on the client.\n- The header name is lowercased; multiple `Set-Cookie` calls accumulate.\n- For verb-macro fns (`#[post(\"/api/login\")]`), the same call works — the FullstackContext is bound to the per-request scope.\n- To *delete* a cookie, set its `Max-Age=0` and an empty value.\n",
+            body: "Server fns can write response headers (and cookies) by reaching for the per-request `FullstackContext`. This is the symmetric write-side to parsing `TypedHeader<Cookie>` for reads — `search_docs` covers the read side via the auth extension of `get_dsl_spec`.\n\n```rust\nuse dioxus::fullstack::FullstackContext;\n\n#[server]\nasync fn login(user: String, password: String) -> ServerFnResult<()> {\n    // …authenticate, mint a session id…\n    let cookie = format!(\n        \"sid={sid}; Path=/; HttpOnly; SameSite=Lax\"\n    );\n    let ctx = FullstackContext::current()\n        .ok_or_else(|| ServerFnError::new(\"no request context\"))?;\n    ctx.add_response_header(\"set-cookie\", cookie);\n    Ok(())\n}\n```\n\nNotes:\n- `FullstackContext::current()` returns `Option<Self>` — `None` outside a per-request scope (e.g. on the client side of a fullstack call). Unwrap with `ok_or_else(|| ServerFnError::new(...))` rather than `.unwrap()` so the client-side branch surfaces a typed error.\n- `add_response_header` takes `impl Into<HeaderName>, impl Into<HeaderValue>` and returns `()` — no `?` or `.map_err(...)` needed. Header name is lowercased; multiple `Set-Cookie` calls accumulate.\n- Construct `ServerFnError` with the `::new(\"msg\")` helper (dioxus-fullstack-core 0.7.3 made it a struct with `{ message, code, details }` fields). The pre-0.7.3 `ServerFnError::ServerError(\"msg\".into())` tuple variant no longer exists.\n- For verb-macro fns (`#[post(\"/api/login\")]`), the same call works — the FullstackContext is bound to the per-request scope.\n- To *delete* a cookie, set its `Max-Age=0` and an empty value.\n",
+            version_verified: "0.7.3",
         },
         SupplementalSection {
             heading: "Reading cookies from server fns (TypedHeader, parse Cookie, session)",
-            body: "Use `TypedHeader<Cookie>` as a server-fn extractor (or `cookies` arg on a verb-macro fn) to read incoming cookies.\n\n```rust\nuse axum_extra::{headers::Cookie, TypedHeader};\n\n#[get(\"/api/me\", cookies: TypedHeader<Cookie>)]\nasync fn me() -> ServerFnResult<Option<User>> {\n    let sid = cookies.get(\"sid\").unwrap_or_default();\n    // …look up the session…\n    Ok(None)\n}\n```\n\nPair with [Writing cookies and response headers from server fns] for the login/logout side. The dioxus-mcp `get_dsl_spec` auth extension wires both sides into scaffolded `Resource` and `ServerFn` primitives via the `auth_required: true` flag.\n",
+            body: "Use `TypedHeader<Cookie>` as a server-fn extractor (or `cookies` arg on a verb-macro fn) to read incoming cookies.\n\n```rust\nuse axum_extra::{headers::Cookie, TypedHeader};\n\n#[get(\"/api/me\", cookies: TypedHeader<Cookie>)]\nasync fn me() -> ServerFnResult<Option<User>> {\n    let sid = cookies.get(\"sid\").unwrap_or_default();\n    // …look up the session…\n    Ok(None)\n}\n```\n\nNote: the extractor is declared only inside the verb-macro attribute — the Dioxus 0.7.9 macro binds `cookies` into scope itself, so adding `cookies: TypedHeader<Cookie>` to the rust fn signature would break `FromRequest` for the body tuple. Pair with [Writing cookies and response headers from server fns] for the login/logout side. The dioxus-mcp `get_dsl_spec` auth extension wires both sides into scaffolded `Resource` and `ServerFn` primitives via the `auth_required: true` flag.\n",
+            version_verified: "0.7.9",
         },
     ]
 }

@@ -263,7 +263,7 @@ pub struct DslResource {
     /// update / delete) receives the same cookie-authed prologue that
     /// `ServerFn { auth_required: true }` produces: a `cookies: TypedHeader<Cookie>`
     /// extractor is added, the session id is pulled from the named cookie,
-    /// and a missing cookie maps to `ServerFnError::ServerError("not logged in")`.
+    /// and a missing cookie maps to `ServerFnError::new("not logged in")`.
     /// You still need axum-extra (with the `typed-header` and `cookie`
     /// features) in Cargo.toml.
     ///
@@ -412,21 +412,21 @@ pub struct DslServerFn {
     /// "/api/{snake_name}".
     #[serde(default)]
     pub path: Option<String>,
-    /// Axum-style request extractors. Each `{name, type}` entry lands BOTH in
-    /// the `#[get/post(...)]` attribute argument list AND in the fn
-    /// signature, so a cookie-bearing handler is one DSL entry instead of a
-    /// hand-edit. Example:
-    /// `extractors: [{ name: cookies, type: "TypedHeader<Cookie>" }]`
-    /// emits `#[get("/api/board", cookies: TypedHeader<Cookie>)]` plus
-    /// `pub async fn fetch_board(cookies: TypedHeader<Cookie>, ...)`.
-    /// The user is responsible for adding `axum_extra` / `axum::headers` /
-    /// `tower_cookies` / etc. to the project so the extractor type resolves.
+    /// Axum-style request extractors. Each `{name, type}` entry lands in the
+    /// `#[get/post(...)]` attribute argument list only — the Dioxus 0.7.9
+    /// verb-macro injects the bound name into scope itself, so the rust fn
+    /// signature stays clean (`FromRequest` is wired for body args only).
+    /// Example: `extractors: [{ name: cookies, type: "TypedHeader<Cookie>" }]`
+    /// emits `#[get("/api/board", cookies: TypedHeader<Cookie>)]` and the body
+    /// can reference `cookies` directly. The user is responsible for adding
+    /// `axum_extra` / `axum::headers` / `tower_cookies` / etc. to the project
+    /// so the extractor type resolves.
     #[serde(default)]
     pub extractors: Vec<DslArgDef>,
     /// When true, the scaffolder injects the canonical cookie-authed prologue:
     /// auto-adds a `cookies: TypedHeader<Cookie>` extractor (when not already
     /// present), pulls the session id out of the named cookie, and maps the
-    /// missing-cookie case to a `ServerFnError::ServerError("not logged in")`.
+    /// missing-cookie case to a `ServerFnError::new("not logged in")`.
     /// A trailing `// TODO touch_session(session_id).await?;` marker is left
     /// in place so the caller can wire it to their session store. Pairs with
     /// the existing `session_states:` primitive for the client-side surface.
@@ -469,7 +469,12 @@ pub struct DslScreen {
     pub name: String,
     pub route: String,
     /// Optional component name (e.g. a ProtectedRoute guard) that wraps the
-    /// screen body. Imported from src/components and rendered around the page.
+    /// screen body. Imported from `src/components` AND rendered as the outer
+    /// element of the screen's rsx body — every template kind (empty,
+    /// resource_list, resource_form, client_crud, resource_edit_form, and the
+    /// no-template stub) honors it. When you hand-edit the body afterwards,
+    /// keep `{wrap_with} { ... }` as the outermost rsx element or move the
+    /// guard to `#[layout(...)]` in the Routable enum and drop this field.
     #[serde(default)]
     pub wrap_with: Option<String>,
     /// Optional template selector. Without it, the screen renders an empty

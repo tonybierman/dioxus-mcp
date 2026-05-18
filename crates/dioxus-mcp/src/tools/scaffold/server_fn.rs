@@ -14,9 +14,6 @@ const SERVER_FN_TPL: &str = r#"use dioxus::prelude::*;
 {%- for e in extractors %}, {{ e.name }}: {{ e.ty }}{% endfor -%}
 )]
 pub async fn {{ snake }}(
-{%- for e in extractors %}
-    {{ e.name }}: {{ e.ty }},
-{%- endfor %}
 {%- for a in args %}
     {{ a.name }}: {{ a.ty }},
 {%- endfor %}
@@ -24,11 +21,11 @@ pub async fn {{ snake }}(
 {%- if auth_required %}
     let session_id = cookies
         .get("{{ session_cookie }}")
-        .ok_or_else(|| ServerFnError::ServerError("not logged in".into()))?
+        .ok_or_else(|| ServerFnError::new("not logged in"))?
         .to_string();
     // TODO touch_session(&session_id).await?; — wire to your session store
-    // (extend, refresh, or invalidate). Returning ServerFnError::ServerError
-    // "session expired" is the canonical mapping when the lookup fails.
+    // (extend, refresh, or invalidate). Returning ServerFnError::new("session
+    // expired") is the canonical mapping when the lookup fails.
     let _ = session_id;
 {%- endif %}
     Ok(Default::default())

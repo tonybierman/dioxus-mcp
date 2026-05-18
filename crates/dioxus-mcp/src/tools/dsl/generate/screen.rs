@@ -72,7 +72,8 @@ pub(crate) async fn generate_screen(
     }
     if let Some(w) = &wrap_pascal {
         r.next_steps.push(format!(
-            "ensure `{w}` is exported from `crate::components` (e.g. emitted by a `protected_routes` entry or a hand-written component)"
+            "ensure `{w}` is exported from `crate::components` (e.g. emitted by a `protected_routes` entry or a hand-written component); \
+             the wrap is applied inside the rsx body — if you replace the body with hand-authored markup, keep `{w} {{ ... }}` as the outer element"
         ));
     }
     // `styled: vanilla-css` ships a starter CSS file alongside the screen so

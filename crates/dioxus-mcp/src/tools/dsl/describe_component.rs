@@ -130,6 +130,13 @@ pub struct DescribeComponentResult {
     /// nothing surprising to say.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage_notes: Vec<String>,
+    /// Known shape limitation for this catalog entry (mirrors
+    /// `list_components.limitations`). Surfaced here so a caller that runs
+    /// `describe_component` directly — without going through `list_components`
+    /// or `suggest_components` first — still sees the caveat before authoring
+    /// rsx that depends on a missing affordance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limitations: Option<String>,
 }
 
 pub async fn describe_component(
@@ -266,6 +273,8 @@ fn describe_from_dir(
 
     let usage_notes = build_usage_notes(name, &event_handlers);
 
+    let limitations = super::list_components::limitations_for_describe(name);
+
     Ok(DescribeComponentResult {
         name: name.to_string(),
         description: description.to_string(),
@@ -284,6 +293,7 @@ fn describe_from_dir(
         referenced_enums,
         ambiguous_attributes,
         usage_notes,
+        limitations: limitations.map(str::to_string),
     })
 }
 

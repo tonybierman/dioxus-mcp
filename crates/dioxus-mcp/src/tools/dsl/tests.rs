@@ -3788,14 +3788,16 @@ server_fns:
     .expect("auth_required scaffold should succeed");
 
     let body = std::fs::read_to_string(root.join("src/server/fetch_inbox.rs")).unwrap();
-    // Cookie extractor auto-injected on both the macro and the signature.
+    // Cookie extractor lives ONLY in the verb-macro — the Dioxus 0.7.9 macro
+    // binds `cookies` into scope itself; repeating it in the fn signature
+    // breaks `FromRequest` for the body tuple.
     assert!(
         body.contains("#[get(\"/api/inbox\", cookies: TypedHeader<Cookie>)]"),
         "auth_required should auto-add cookies extractor to the macro; got:\n{body}"
     );
     assert!(
-        body.contains("cookies: TypedHeader<Cookie>,"),
-        "auth_required should auto-add cookies arg; got:\n{body}"
+        !body.contains("cookies: TypedHeader<Cookie>,"),
+        "extractor must NOT be duplicated into the fn signature; got:\n{body}"
     );
     // Prologue lines.
     assert!(
@@ -3892,11 +3894,20 @@ server_fns:
     let body = std::fs::read_to_string(root.join("src/server/fetch_inbox.rs")).unwrap();
     assert!(
         body.contains("cookies: CookieJar"),
-        "caller-supplied cookies type should be preserved; got:\n{body}"
+        "caller-supplied cookies type should be preserved (in the verb-macro \
+         attr); got:\n{body}"
     );
     assert!(
         !body.contains("TypedHeader<Cookie>"),
         "auth_required should NOT clobber the caller's cookies extractor; got:\n{body}"
+    );
+    // The extractor lives in the verb-macro only — it must not be repeated in
+    // the rust fn signature.
+    let cookies_jar_occurrences = body.matches("cookies: CookieJar").count();
+    assert_eq!(
+        cookies_jar_occurrences, 1,
+        "cookies extractor must appear only in the verb-macro attribute, not also \
+         in the fn signature; got:\n{body}"
     );
 }
 
@@ -3946,6 +3957,12 @@ resources:
         assert!(
             body.contains("cookies: TypedHeader<Cookie>"),
             "{name} should auto-add cookies extractor; got:\n{body}"
+        );
+        // Verb-macro attribute only — no duplicate in the fn signature.
+        let cookie_occurrences = body.matches("cookies: TypedHeader<Cookie>").count();
+        assert_eq!(
+            cookie_occurrences, 1,
+            "{name}: cookies extractor must appear only in the verb-macro attr; got:\n{body}"
         );
         assert!(
             body.contains(".get(\"session_id\")"),

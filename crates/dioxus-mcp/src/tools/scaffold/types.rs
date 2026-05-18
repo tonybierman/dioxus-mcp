@@ -120,23 +120,23 @@ pub struct CreateServerFnParams {
     /// Route path under which the server fn is exposed. Defaults to
     /// "/api/{snake_name}".
     pub path: Option<String>,
-    /// Axum-style request extractors declared on the route attribute and
-    /// threaded into the function signature. Each entry lands as
-    /// `name: ty` both inside the `#[get/post(...)]` attribute's argument
-    /// list AND in the fn signature, so a cookie-bearing handler is one DSL
-    /// entry instead of a hand-edit. Example:
+    /// Axum-style request extractors declared on the route attribute. Each
+    /// entry lands as `name: ty` inside the `#[get/post(...)]` attribute's
+    /// argument list only — the Dioxus 0.7.9 verb-macro binds the name into
+    /// the fn scope itself, and repeating it in the rust fn signature would
+    /// break `FromRequest` for the body tuple. Example:
     /// `extractors: [{ name: cookies, type: "TypedHeader<Cookie>" }]`
-    /// emits `#[get("/api/board", cookies: TypedHeader<Cookie>)]` and
-    /// `pub async fn handler(cookies: TypedHeader<Cookie>, ...)`. The user
-    /// must already have `axum_extra` / `axum::headers` / etc. in scope.
+    /// emits `#[get("/api/board", cookies: TypedHeader<Cookie>)]` and the
+    /// body can reference `cookies` directly. The user must already have
+    /// `axum_extra` / `axum::headers` / etc. in scope.
     #[serde(default)]
     pub extractors: Vec<ArgSpec>,
     /// When true, the scaffolder injects the canonical cookie-authed prologue:
     /// it ensures a `cookies: TypedHeader<Cookie>` extractor is present, pulls
     /// the session id out of `session_cookie` (default `"session_id"`), and
-    /// maps the missing-cookie case to `ServerFnError::ServerError("not
-    /// logged in")`. A trailing `// TODO touch_session(...)` marker is left
-    /// in place so callers can wire their session store.
+    /// maps the missing-cookie case to `ServerFnError::new("not logged in")`.
+    /// A trailing `// TODO touch_session(...)` marker is left in place so
+    /// callers can wire their session store.
     #[serde(default)]
     pub auth_required: bool,
     /// Cookie name read by the auth prologue. Only consulted when

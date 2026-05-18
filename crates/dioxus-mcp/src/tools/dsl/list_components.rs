@@ -13,6 +13,32 @@ use serde::{Deserialize, Serialize};
 
 use super::execute::DX_COMPONENT_CATALOG_ENTRIES;
 
+/// Per-catalog-entry caveats — known shape limitations the agent should weigh
+/// BEFORE running `dx components add`. Only listed when the widget materially
+/// fails to model a common variant of its named pattern (e.g. drag_and_drop_list
+/// is *one* sortable list — no cross-list drop callback). Leave entries off
+/// when the widget covers the full conventional surface; this list should
+/// stay short.
+const CATALOG_LIMITATIONS: &[(&str, &str)] = &[(
+    "drag_and_drop_list",
+    "single sortable list; no drop callback. Cannot model cross-list / \
+         cross-column moves — hand-roll the html5 dragstart/dragover/drop \
+         pattern for kanban-style boards.",
+)];
+
+fn limitations_for(name: &str) -> Option<&'static str> {
+    CATALOG_LIMITATIONS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, l)| *l)
+}
+
+/// Public alias for `describe_component` so the limitations table has a
+/// single source of truth.
+pub(super) fn limitations_for_describe(name: &str) -> Option<&'static str> {
+    limitations_for(name)
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ListComponentsParams {
     /// Optional case-insensitive substring filter applied to component names
@@ -35,6 +61,13 @@ pub struct ComponentEntry {
     /// Post-install import path. Drop straight into `use ...;` then use the
     /// PascalCase identifier inside `rsx!`.
     pub import: String,
+    /// Known shape limitations — only present when the widget materially
+    /// fails to model a common variant of its named pattern (e.g.
+    /// `drag_and_drop_list` is one sortable list, no cross-list drop).
+    /// Read this BEFORE running `dx components add` so installs that
+    /// won't fit the user's shape are rejected up front.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limitations: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +104,7 @@ pub async fn list_components(p: ListComponentsParams) -> Result<ListComponentsRe
             description: (*desc).to_string(),
             prop_hint: (*hint).to_string(),
             import: format!("use crate::components::{name}::{};", to_pascal(name)),
+            limitations: limitations_for(name).map(str::to_string),
         })
         .collect();
     Ok(ListComponentsResult {
@@ -178,6 +212,7 @@ pub async fn suggest_components(
                 description: (*desc).to_string(),
                 prop_hint: (*hint).to_string(),
                 import: format!("use crate::components::{n}::{};", to_pascal(n)),
+                limitations: limitations_for(n).map(str::to_string),
             });
         }
     }
@@ -285,6 +320,47 @@ mod tests {
             r.components
         );
         assert!(r.next.is_empty(), "no next action when no matches");
+    }
+
+    #[tokio::test]
+    async fn drag_and_drop_list_surface_includes_limitations() {
+        let r = list_components(ListComponentsParams {
+            query: Some("drag_and_drop_list".into()),
+        })
+        .await
+        .unwrap();
+        let entry = r
+            .components
+            .iter()
+            .find(|c| c.name == "drag_and_drop_list")
+            .expect("drag_and_drop_list must be returned");
+        let lim = entry
+            .limitations
+            .as_deref()
+            .expect("drag_and_drop_list should carry a limitations note");
+        assert!(
+            lim.contains("cross-list") || lim.contains("cross-column"),
+            "limitation should mention the cross-column shortcoming; got: {lim}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_components_omits_limitations_when_none() {
+        let r = list_components(ListComponentsParams {
+            query: Some("button".into()),
+        })
+        .await
+        .unwrap();
+        let entry = r
+            .components
+            .iter()
+            .find(|c| c.name == "button")
+            .expect("button must be returned");
+        assert!(
+            entry.limitations.is_none(),
+            "button has no known limitations; got: {:?}",
+            entry.limitations
+        );
     }
 
     #[tokio::test]

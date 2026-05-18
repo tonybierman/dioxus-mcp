@@ -22,9 +22,23 @@ pub struct ExplainSignalGraphParams {
 #[derive(Debug, Serialize, Clone)]
 pub struct SignalNode {
     pub name: String,
-    pub kind: String, // "signal" | "memo" | "resource" | "effect"
+    /// `signal` | `memo` | `resource` | `effect` | `future` | `callback`.
+    /// `future` covers `use_future` (one-off task; reactive on signal reads).
+    /// `callback` covers `use_callback` (memoized closure; useful for sharing
+    /// async handlers across handlers).
+    pub kind: String,
     pub line: usize,
+    /// Signals (other `SignalNode` names) that this node's body reads. The
+    /// scan descends into nested closures, `async move { … }` blocks, and
+    /// `spawn(…)` calls — so the reads list reflects every signal accessed
+    /// inside a memo/effect/future/resource closure, not just the top-level
+    /// init expression.
     pub reads: Vec<String>,
+    /// Other `SignalNode` names whose body reads THIS signal — the inverse
+    /// projection of `reads`. Lets a caller spot which leaf `use_signal`s are
+    /// consumed by which closure-bound handler / effect without re-walking
+    /// the graph.
+    pub read_by: Vec<String>,
     /// True when this signal is referenced anywhere in the component's `rsx!`
     /// invocations — either as a formatted-string interpolation (`{sig}`) or
     /// as a bare ident / call (`sig`, `sig()`, `sig.read()`). A leaf
@@ -94,13 +108,18 @@ fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
     let mut nodes: Vec<SignalNode> = Vec::new();
     let mut known_bindings: Vec<String> = Vec::new();
 
+    // First pass: classify each `let foo = use_*(…)` binding to seed the node
+    // list — `collect_reads` below only matches against names it has already
+    // seen, so we need every binding's *name* in scope before any reads pass.
+    let mut pending: Vec<(String, &'static str, usize, &syn::Expr)> = Vec::new();
     for stmt in &block.stmts {
         let syn::Stmt::Local(local) = stmt else {
             continue;
         };
         let Some(init) = &local.init else { continue };
-        let kind = classify_init_call(&init.expr);
-        let Some(kind) = kind else { continue };
+        let Some(kind) = classify_init_call(&init.expr) else {
+            continue;
+        };
 
         let binding_name = match &local.pat {
             syn::Pat::Ident(p) => p.ident.to_string(),
@@ -112,15 +131,38 @@ fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
         };
 
         let line = local.let_token.span.start().line;
-        let reads = collect_reads(&init.expr, &known_bindings);
+        pending.push((binding_name.clone(), kind, line, &init.expr));
+        known_bindings.push(binding_name);
+    }
+    for (binding_name, kind, line, expr) in pending {
+        let reads = collect_reads(expr, &known_bindings);
         nodes.push(SignalNode {
-            name: binding_name.clone(),
+            name: binding_name,
             kind: kind.into(),
             line,
             reads,
+            read_by: Vec::new(),
             read_in_rsx: false,
         });
-        known_bindings.push(binding_name);
+    }
+
+    // Inverse projection: for each node, accumulate the names of *other*
+    // nodes whose `reads` mention it. Helps spot which leaf `use_signal`s
+    // are consumed by which closure-bound handler / effect.
+    let read_by_map: std::collections::BTreeMap<String, Vec<String>> = {
+        let mut m: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for n in &nodes {
+            for r in &n.reads {
+                m.entry(r.clone()).or_default().push(n.name.clone());
+            }
+        }
+        m
+    };
+    for node in &mut nodes {
+        if let Some(rb) = read_by_map.get(&node.name) {
+            node.read_by = rb.clone();
+        }
     }
 
     // Second pass: walk every statement and the trailing expression looking
@@ -253,6 +295,8 @@ fn classify_init_call(expr: &syn::Expr) -> Option<&'static str> {
         "use_memo" => Some("memo"),
         "use_resource" => Some("resource"),
         "use_effect" => Some("effect"),
+        "use_future" => Some("future"),
+        "use_callback" => Some("callback"),
         _ => None,
     }
 }
@@ -289,4 +333,120 @@ fn lint_signal_graph(nodes: &[SignalNode]) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn analyze(src: &str) -> Vec<SignalNode> {
+        let file = syn::parse_file(src).expect("parse");
+        let item = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                syn::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .expect("fn item");
+        analyze_component_body(&item.block)
+    }
+
+    #[test]
+    fn use_future_and_use_callback_are_classified() {
+        let nodes = analyze(
+            r#"
+#[component]
+fn App() -> Element {
+    let cards = use_signal(|| Vec::<String>::new());
+    let submit = use_callback(move |_| { let _ = cards.read(); });
+    let tick = use_future(move || async move { let _ = cards.read(); });
+    rsx!{}
+}
+"#,
+        );
+        let by_name = |n: &str| nodes.iter().find(|x| x.name == n).cloned().unwrap();
+        assert_eq!(by_name("cards").kind, "signal");
+        assert_eq!(by_name("submit").kind, "callback");
+        assert_eq!(by_name("tick").kind, "future");
+    }
+
+    #[test]
+    fn reads_descend_into_closures_and_async_blocks() {
+        let nodes = analyze(
+            r#"
+#[component]
+fn App() -> Element {
+    let cards = use_signal(|| Vec::<String>::new());
+    let title = use_signal(|| String::new());
+    let submit = use_callback(move |_| {
+        let _ = cards.read();
+        let _ = title.read();
+    });
+    let action = use_future(move || async move {
+        let _ = cards.read();
+    });
+    rsx!{}
+}
+"#,
+        );
+        let by_name = |n: &str| nodes.iter().find(|x| x.name == n).cloned().unwrap();
+        let submit_reads = by_name("submit").reads;
+        assert!(
+            submit_reads.contains(&"cards".to_string()),
+            "submit should read `cards` from inside the closure body; got {submit_reads:?}"
+        );
+        assert!(
+            submit_reads.contains(&"title".to_string()),
+            "submit should read `title` from inside the closure body; got {submit_reads:?}"
+        );
+        let action_reads = by_name("action").reads;
+        assert!(
+            action_reads.contains(&"cards".to_string()),
+            "action should read `cards` through the async move block; got {action_reads:?}"
+        );
+    }
+
+    #[test]
+    fn read_by_inverts_the_reads_graph() {
+        let nodes = analyze(
+            r#"
+#[component]
+fn App() -> Element {
+    let cards = use_signal(|| Vec::<String>::new());
+    let submit = use_callback(move |_| { let _ = cards.read(); });
+    let action = use_future(move || async move { let _ = cards.read(); });
+    rsx!{}
+}
+"#,
+        );
+        let cards = nodes.iter().find(|n| n.name == "cards").unwrap();
+        assert!(
+            cards.read_by.iter().any(|n| n == "submit"),
+            "cards should be read_by `submit`; got {:?}",
+            cards.read_by,
+        );
+        assert!(
+            cards.read_by.iter().any(|n| n == "action"),
+            "cards should be read_by `action`; got {:?}",
+            cards.read_by,
+        );
+    }
+
+    #[test]
+    fn leaf_signals_keep_empty_reads_but_get_read_by() {
+        let nodes = analyze(
+            r#"
+#[component]
+fn App() -> Element {
+    let cards = use_signal(|| Vec::<String>::new());
+    let count = use_memo(move || cards.read().len());
+    rsx!{}
+}
+"#,
+        );
+        let cards = nodes.iter().find(|n| n.name == "cards").unwrap();
+        assert!(cards.reads.is_empty(), "leaf signals have no reads");
+        assert_eq!(cards.read_by, vec!["count".to_string()]);
+    }
 }

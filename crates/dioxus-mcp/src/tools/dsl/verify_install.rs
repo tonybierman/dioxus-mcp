@@ -102,7 +102,18 @@ pub async fn verify_install(
     let mut steps = if no_dx_catalog {
         Vec::new()
     } else {
-        vec![mod_step, theme_step, dir_step]
+        let mut s = vec![mod_step];
+        // theme_asset is the catalog-specific step: only require the theme
+        // stylesheet when the project actually consumes a catalog widget
+        // (a `use crate::components::<catalog_name>` import or a matching
+        // src/components/<name>/ directory). Projects with a hand-rolled
+        // `src/components/` shouldn't be nagged about a stylesheet they
+        // don't need.
+        if signals.uses_dx_catalog || theme_step.ok {
+            s.push(theme_step);
+        }
+        s.push(dir_step);
+        s
     };
     extend_with_archetype_steps(&mut steps, &signals, &manifest, &crate_root);
 
@@ -129,8 +140,18 @@ struct ArchetypeSignals {
     has_server: bool,
     has_sockets: bool,
     uses_cookies: bool,
+    /// True only when source code imports the bare `headers::Cookie` path
+    /// (so the top-level `headers` crate is required). When the user goes
+    /// through `axum_extra::headers::Cookie` (the re-export bundled with the
+    /// `typed-header` feature), this stays `false`.
+    uses_bare_headers_crate: bool,
     uses_uuid: bool,
     uses_assets: bool,
+    /// True when the source imports a catalog widget (`use crate::components::<catalog_name>`)
+    /// or `src/components/<catalog_name>/` matches a catalog entry. Drives
+    /// the theme_asset / mod_components / components_dir checks — we only
+    /// flag those when the project actually uses the catalog.
+    uses_dx_catalog: bool,
 }
 
 impl ArchetypeSignals {
@@ -140,6 +161,26 @@ impl ArchetypeSignals {
             has_sockets: src_dir.join("sockets").is_dir(),
             ..Default::default()
         };
+
+        // Catalog widget directories (`src/components/<catalog_name>/`) are
+        // positive evidence the user is on the catalog path — pre-scan so we
+        // can also accept this as a `uses_dx_catalog` signal without an
+        // explicit `use` import.
+        let components_dir = src_dir.join("components");
+        let catalog_names: std::collections::BTreeSet<&'static str> =
+            crate::tools::dsl::execute::dx_component_names().collect();
+        if let Ok(entries) = std::fs::read_dir(&components_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir()
+                    && let Some(name) = entry.file_name().to_str()
+                    && catalog_names.contains(name)
+                {
+                    s.uses_dx_catalog = true;
+                    break;
+                }
+            }
+        }
+
         let mut walked: Vec<PathBuf> = Vec::new();
         walk_rs_files(src_dir, &mut walked, 6);
         for path in &walked {
@@ -160,6 +201,30 @@ impl ArchetypeSignals {
             }
             if text.contains("asset!(") {
                 s.uses_assets = true;
+            }
+            // Only set when the user reaches for the top-level `headers`
+            // crate directly. Going through `axum_extra::headers::Cookie`
+            // (the re-export the `typed-header` feature provides) does NOT
+            // need a separate `headers` dep — detect that by checking the
+            // character before each `headers::` occurrence isn't part of a
+            // qualified path (i.e. not `axum_extra::headers::`).
+            if !s.uses_bare_headers_crate && mentions_bare_headers_path(&text) {
+                s.uses_bare_headers_crate = true;
+            }
+            // `use crate::components::<catalog_name>` — positive evidence the
+            // user is consuming the catalog (rather than just having their
+            // own `src/components/` for hand-rolled UI).
+            if !s.uses_dx_catalog
+                && let Some(after) = text.find("use crate::components::")
+            {
+                let tail = &text[after + "use crate::components::".len()..];
+                let ident: String = tail
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !ident.is_empty() && catalog_names.contains(ident.as_str()) {
+                    s.uses_dx_catalog = true;
+                }
             }
         }
         s
@@ -230,6 +295,39 @@ fn parse_manifest(text: &str) -> ManifestDeps {
             }
         }
     }
+
+    // `[features]` table can pull crate features via `crate/feat` or
+    // `crate?/feat` (the latter is the optional-dep form). Fold those into
+    // the dep's known feature list so we don't false-positive an
+    // "uuid is missing v4" finding when v4 is enabled through a feature
+    // alias (e.g. `server = ["uuid/v4"]`). We don't model which crate
+    // features are *active* — most dx apps build with the union of features
+    // they care about — so treat any feature-pulled entry as enabled.
+    if let Some(features) = parsed.get("features").and_then(|v| v.as_table()) {
+        for (_, alias_value) in features {
+            let Some(alias_list) = alias_value.as_array() else {
+                continue;
+            };
+            for entry in alias_list {
+                let Some(s) = entry.as_str() else { continue };
+                // Forms: `dep/feat`, `dep?/feat`, `dep:dep_alias`. We skip
+                // the alias rename form and `dep:` which only signals the
+                // dep is enabled (already known via [dependencies]).
+                let Some((dep, feat)) = s.split_once('/') else {
+                    continue;
+                };
+                let dep = dep.trim_end_matches('?');
+                if dep.is_empty() || feat.is_empty() {
+                    continue;
+                }
+                let dep_entry = out.deps.entry(dep.to_string()).or_default();
+                dep_entry.present = true;
+                if !dep_entry.features.iter().any(|x| x == feat) {
+                    dep_entry.features.push(feat.to_string());
+                }
+            }
+        }
+    }
     out
 }
 
@@ -265,14 +363,24 @@ fn extend_with_archetype_steps(
     let cargo_toml = crate_root.join("Cargo.toml");
 
     // Cookie typed-headers require `axum-extra` with the `typed-header`
-    // feature; `headers` is needed for the `Cookie` type itself.
+    // feature. The `typed-header` feature re-exports `axum_extra::headers::Cookie`
+    // (via the bundled `headers` crate), so we don't need a separate `headers`
+    // dep when the user already imports `axum_extra::headers::Cookie`. Only
+    // require a top-level `headers` dep when the source uses the bare
+    // `headers::Cookie` path.
     if signals.uses_cookies {
         let missing = manifest.missing_features("axum-extra", &["typed-header"]);
-        let headers_missing = !manifest.has("headers");
+        let headers_required = signals.uses_bare_headers_crate;
+        let headers_missing = headers_required && !manifest.has("headers");
+        let title = if headers_required {
+            "`axum-extra` (with `typed-header`) + `headers` for TypedHeader<Cookie>"
+        } else {
+            "`axum-extra` (with `typed-header`) for TypedHeader<Cookie>"
+        };
         if missing.is_empty() && !headers_missing {
             steps.push(VerifyInstallStep {
                 id: "axum_extra_cookies",
-                title: "`axum-extra` (with `typed-header`) + `headers` for TypedHeader<Cookie>",
+                title,
                 ok: true,
                 looked_in: vec![cargo_toml.clone()],
                 fix: None,
@@ -290,7 +398,7 @@ fn extend_with_archetype_steps(
             }
             steps.push(VerifyInstallStep {
                 id: "axum_extra_cookies",
-                title: "`axum-extra` (with `typed-header`) + `headers` for TypedHeader<Cookie>",
+                title,
                 ok: false,
                 looked_in: vec![cargo_toml.clone()],
                 fix: Some(fix.trim_end().to_string()),
@@ -563,6 +671,45 @@ fn check_components_dir(dir: &Path) -> VerifyInstallStep {
     }
 }
 
+/// Returns true when the source mentions `headers::Cookie` (or `use headers::`)
+/// as a top-level path, NOT as the tail of `axum_extra::headers::Cookie` /
+/// `axum_extra::{..., headers::Cookie}`. Lookback at the byte before the
+/// occurrence picks out the qualified form cheaply without a regex.
+fn mentions_bare_headers_path(text: &str) -> bool {
+    let needles = ["headers::Cookie", "use headers::"];
+    for needle in needles {
+        let mut start = 0usize;
+        while let Some(idx) = text[start..].find(needle) {
+            let pos = start + idx;
+            let prefix_qualified = text[..pos]
+                .chars()
+                .next_back()
+                .map(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+                .unwrap_or(false);
+            // `axum_extra::{ headers::Cookie }` has a brace-or-comma-or-space
+            // before the path, so the lookback is whitespace/`{`/`,` — not
+            // qualified by character. But the *enclosing* `use` line still
+            // qualifies the path. Detect that by walking the rest of the line
+            // backward to find the nearest `use ` token, and checking if a
+            // qualifying segment precedes the brace.
+            if !prefix_qualified {
+                let line_start = text[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let line_prefix = &text[line_start..pos];
+                let line_qualified = line_prefix.contains("::{") || line_prefix.contains("::");
+                if !line_qualified {
+                    return true;
+                }
+                // The `use axum_extra::{..., headers::Cookie};` form: the
+                // `::{` (or `::`) before us in the same logical statement
+                // means this `headers::` is a re-export tail, not a bare
+                // import. Skip it.
+            }
+            start = pos + needle.len();
+        }
+    }
+    false
+}
+
 fn walk_rs_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -620,19 +767,123 @@ mod tests {
 
     #[test]
     fn partial_catalog_signals_keeps_basic_archetype_and_flags_remaining_steps() {
-        // Single catalog marker present (mod components;) — the user has
-        // started installing, so we drop back to `basic` and flag the
-        // remaining two steps as missing.
+        // The user has wired `mod components;` AND imports an actual catalog
+        // widget — but hasn't mounted the theme stylesheet or created the
+        // `src/components/` dir yet. Both gaps should surface; the catalog
+        // import is the positive evidence theme_asset requires.
         let dir = tempdir().unwrap();
         write(
             &dir.path().join("src/main.rs"),
-            "mod components;\nfn main() {}\n",
+            "mod components;\nuse crate::components::button::Button;\nfn main() {}\n",
         );
         let r = run(dir.path());
         assert_eq!(r.archetype, "basic");
         assert!(!r.fully_wired);
         assert!(r.missing.contains(&"theme_asset"));
         assert!(r.missing.contains(&"components_dir"));
+    }
+
+    #[test]
+    fn theme_asset_suppressed_when_components_dir_is_hand_rolled() {
+        // The user has their own `src/components/` and `mod components;` for
+        // hand-rolled UI — no catalog widget is consumed (no
+        // `use crate::components::<catalog_name>` import, no directory matching
+        // a catalog entry). The theme stylesheet should NOT be flagged: it
+        // wouldn't apply to hand-rolled UI anyway.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/main.rs"),
+            "mod components;\nfn main() {}\n",
+        );
+        write(
+            &dir.path().join("src/components/protected/mod.rs"),
+            "// hand-rolled, not from the catalog\n",
+        );
+        let r = run(dir.path());
+        assert!(
+            !r.missing.contains(&"theme_asset"),
+            "theme_asset should be suppressed for hand-rolled components dirs; got missing = {:?}",
+            r.missing
+        );
+        assert!(
+            !r.steps.iter().any(|s| s.id == "theme_asset"),
+            "theme_asset step shouldn't even appear when no catalog widget is used; got = {:?}",
+            r.steps.iter().map(|s| s.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn axum_extra_without_separate_headers_dep_passes_when_typed_header_is_enabled() {
+        // The `typed-header` feature on axum-extra re-exports `axum_extra::headers::Cookie`
+        // — so a project that imports `axum_extra::headers::Cookie` doesn't
+        // need a top-level `headers` dep. Verify_install used to demand both
+        // unconditionally; now it gates on whether the source touches the
+        // bare `headers::Cookie` path.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/server/auth.rs"),
+            r#"use axum_extra::{TypedHeader, headers::Cookie};
+pub async fn check(_c: TypedHeader<Cookie>) {}
+"#,
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+"#,
+        );
+        let r = run(dir.path());
+        let step = r
+            .steps
+            .iter()
+            .find(|s| s.id == "axum_extra_cookies")
+            .expect("axum_extra_cookies step should be present");
+        assert!(
+            step.ok,
+            "axum-extra w/ typed-header should be enough (the typed-header feature re-exports headers::Cookie); got: {step:?}",
+        );
+    }
+
+    #[test]
+    fn uuid_features_pulled_through_feature_alias_are_detected() {
+        // uuid is declared `optional = true` and its features are added via
+        // `[features]` aliases (`server = ["uuid/v4", "uuid/serde"]`). The
+        // parser should fold those into uuid's known features so the
+        // verify_install step doesn't false-positive.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/model/todo.rs"),
+            "pub struct Todo { pub id: Uuid }\n",
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+uuid = { version = "1", optional = true }
+
+[features]
+server = ["uuid/v4", "uuid/serde"]
+"#,
+        );
+        let r = run(dir.path());
+        let step = r.steps.iter().find(|s| s.id == "uuid_dep").unwrap();
+        assert!(
+            step.ok,
+            "uuid features pulled via [features] alias should be recognized; got: {step:?}",
+        );
     }
 
     #[test]
@@ -762,7 +1013,12 @@ fn App() -> Element {
         let mut steps = if no_dx_catalog {
             Vec::new()
         } else {
-            vec![mod_step, theme_step, dir_step]
+            let mut s = vec![mod_step];
+            if signals.uses_dx_catalog || theme_step.ok {
+                s.push(theme_step);
+            }
+            s.push(dir_step);
+            s
         };
         extend_with_archetype_steps(&mut steps, &signals, &manifest, crate_root);
         let missing: Vec<&'static str> = steps.iter().filter(|s| !s.ok).map(|s| s.id).collect();

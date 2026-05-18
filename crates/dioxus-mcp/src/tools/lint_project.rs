@@ -22,6 +22,7 @@ const ALL_LINTS: &[&str] = &[
     "prop_drill",
     "signal_lint",
     "props_lint",
+    "reinvented_widget",
 ];
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -66,6 +67,8 @@ pub struct LintProjectReport {
     pub signal_lint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub props_lint: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reinvented_widget: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,6 +235,29 @@ pub async fn lint_project(
             issues: count,
         });
         report.props_lint = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("reinvented_widget") {
+        let r = crate::tools::reinvented_widget::reinvented_widget(
+            state,
+            crate::tools::reinvented_widget::ReinventedWidgetParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        // reinvented_widget findings are hints, not errors — keep them out
+        // of `total_issues` so the headline counter still reflects "fix me"
+        // signal only. The per-lint count below still surfaces them.
+        report.lints_run.push("reinvented_widget".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "reinvented_widget".into(),
+            issues: count,
+        });
+        report.reinvented_widget = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
     report.parse_errors = dedup_parse_errors(parse_errors);
