@@ -22,10 +22,16 @@ pub struct ExplainSignalGraphParams {
 #[derive(Debug, Serialize, Clone)]
 pub struct SignalNode {
     pub name: String,
-    /// `signal` | `memo` | `resource` | `effect` | `future` | `callback`.
+    /// `signal` | `memo` | `resource` | `effect` | `future` | `callback`
+    /// | `closure`.
     /// `future` covers `use_future` (one-off task; reactive on signal reads).
     /// `callback` covers `use_callback` (memoized closure; useful for sharing
     /// async handlers across handlers).
+    /// `closure` covers `let mut name = move |args| { body }` bindings whose
+    /// body reads or writes at least one tracked signal — surfaced so the
+    /// "which closure mutates `cards`?" question has a node to point at.
+    /// Closure nodes whose body doesn't touch any tracked signal are
+    /// omitted (event handlers that only call sibling utilities are noise).
     pub kind: String,
     pub line: usize,
     /// Signals (other `SignalNode` names) that this node's body reads. The
@@ -51,6 +57,13 @@ pub struct SignalNode {
     /// `use_signal`s are consumed by which closure-bound handler / effect
     /// without re-walking the graph.
     pub read_by: Vec<String>,
+    /// Other `SignalNode` names whose body WRITES this signal — the inverse
+    /// projection of `writes`. Pairs naturally with the `closure` kind: a
+    /// leaf `use_signal` whose `written_by` lists three named closures is
+    /// the classic "lift to a Store" smell. Empty for nodes that don't get
+    /// mutated externally.
+    #[serde(default)]
+    pub written_by: Vec<String>,
     /// True when this signal is referenced anywhere in the component's `rsx!`
     /// invocations — either as a formatted-string interpolation (`{sig}`) or
     /// as a bare ident / call (`sig`, `sig()`, `sig.read()`). A leaf
@@ -75,6 +88,16 @@ pub struct SignalNode {
 pub struct ComponentGraph {
     pub component: String,
     pub nodes: Vec<SignalNode>,
+    /// Names of context-provided / hook-bound bindings (anything matched by
+    /// `let X = use_*();` where `use_*` isn't one of the well-known hooks)
+    /// that are referenced inside the component's `rsx!`. Surfaced
+    /// separately from `nodes` because the walker can't follow into the
+    /// helper to confirm the binding holds a Signal — but a caller asking
+    /// "what reactive state drives this component's render?" needs to know
+    /// these are touched in the view layer regardless. Empty when the
+    /// component doesn't bind any non-built-in `use_*` helpers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_signal_reads: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -113,11 +136,12 @@ pub async fn explain_signal_graph(
             continue;
         }
 
-        let nodes = analyze_component_body(&f.block);
+        let (nodes, context_signal_reads) = analyze_component_body(&f.block);
         let warnings = lint_signal_graph(&nodes);
         out.push(ComponentGraph {
             component: name,
             nodes,
+            context_signal_reads,
             warnings,
         });
     }
@@ -128,7 +152,7 @@ pub async fn explain_signal_graph(
     })
 }
 
-fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
+fn analyze_component_body(block: &syn::Block) -> (Vec<SignalNode>, Vec<String>) {
     let mut nodes: Vec<SignalNode> = Vec::new();
     let mut known_bindings: Vec<String> = Vec::new();
 
@@ -190,27 +214,68 @@ fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
             reads,
             writes,
             read_by: Vec::new(),
+            written_by: Vec::new(),
             read_in_rsx: false,
             context_signals,
         });
     }
 
-    // Inverse projection: for each node, accumulate the names of *other*
-    // nodes whose `reads` mention it. Helps spot which leaf `use_signal`s
-    // are consumed by which closure-bound handler / effect.
-    let read_by_map: std::collections::BTreeMap<String, Vec<String>> = {
-        let mut m: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for n in &nodes {
-            for r in &n.reads {
-                m.entry(r.clone()).or_default().push(n.name.clone());
-            }
+    // Named-closure nodes: `let [mut?] foo = move |args| { body }` where the
+    // body reads or writes a tracked signal. These are how dioxus_standup's
+    // BoardBody packages its mutators (logout, submit_card, ...) — without
+    // surfacing them, "where is `cards` mutated?" can't be answered from
+    // the graph alone. We add them AFTER the hook pass so `known_bindings`
+    // already contains every tracked signal name, and we omit closures
+    // whose bodies don't touch any tracked signal (event handlers that
+    // only call siblings are noise).
+    for (closure_name, line, expr) in collect_named_closures(block, &known_bindings) {
+        let (reads, writes) = collect_reads_writes(expr, &known_bindings);
+        if reads.is_empty() && writes.is_empty() {
+            continue;
         }
-        m
-    };
+        let context_signals = collect_known_references(expr, &context_bindings);
+        nodes.push(SignalNode {
+            name: closure_name,
+            kind: "closure".into(),
+            line,
+            reads,
+            writes,
+            read_by: Vec::new(),
+            written_by: Vec::new(),
+            read_in_rsx: false,
+            context_signals,
+        });
+    }
+
+    // Inverse projections: for each node, accumulate the names of *other*
+    // nodes whose `reads` (resp. `writes`) mention it. `read_by` answers
+    // "which closure subscribes to me?"; `written_by` answers "which
+    // closure mutates me?" — the latter is the smell signal for lifting
+    // a `use_signal` to a `Store`.
+    let mut read_by_map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut written_by_map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for n in &nodes {
+        for r in &n.reads {
+            read_by_map
+                .entry(r.clone())
+                .or_default()
+                .push(n.name.clone());
+        }
+        for w in &n.writes {
+            written_by_map
+                .entry(w.clone())
+                .or_default()
+                .push(n.name.clone());
+        }
+    }
     for node in &mut nodes {
         if let Some(rb) = read_by_map.get(&node.name) {
             node.read_by = rb.clone();
+        }
+        if let Some(wb) = written_by_map.get(&node.name) {
+            node.written_by = wb.clone();
         }
     }
 
@@ -220,9 +285,19 @@ fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
     // ident references to a known binding. We also pick up
     // `format!`-style interpolations: `{sig}` is tokenized as the literal
     // `"{sig}"`, so we scan literal strings for `{name[..]}` placeholders.
+    //
+    // We scan twice — once for tracked-node bindings (sets `read_in_rsx`),
+    // once for context bindings (populates `context_signal_reads`). The
+    // second scan exists because helper-bound bindings like
+    // `let presence = use_presence();` and `let session = use_session();`
+    // stay out of `nodes`, but a view that does `presence.read().iter()`
+    // still drives the render — callers need to know.
     let mut rsx_hits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rsx_context_hits: std::collections::HashSet<String> = std::collections::HashSet::new();
     for stmt in &block.stmts {
-        collect_macro_idents(stmt_to_tokens_visitor(stmt), &known_bindings, &mut rsx_hits);
+        let streams = stmt_to_tokens_visitor(stmt);
+        collect_macro_idents(streams.clone(), &known_bindings, &mut rsx_hits);
+        collect_macro_idents(streams, &context_bindings, &mut rsx_context_hits);
     }
 
     for node in &mut nodes {
@@ -231,7 +306,11 @@ fn analyze_component_body(block: &syn::Block) -> Vec<SignalNode> {
         }
     }
 
-    nodes
+    // Stable, alphabetical order so the report is deterministic across runs.
+    let mut context_signal_reads: Vec<String> = rsx_context_hits.into_iter().collect();
+    context_signal_reads.sort();
+
+    (nodes, context_signal_reads)
 }
 
 /// Tiny adapter: produce an "iter all macros nested in this statement" by
@@ -379,6 +458,52 @@ fn classify_init_call(expr: &syn::Expr) -> Option<&'static str> {
         "use_callback" => Some("callback"),
         _ => None,
     }
+}
+
+/// Collect every `let [mut?] name = move? |args| body` binding in the
+/// component body. The result is `(name, line, &expr)` tuples — used to
+/// promote named event-handler closures (logout, submit_card, …) to nodes
+/// when their bodies touch a tracked signal. We skip:
+///   - underscore-prefixed names (`_unused = move |_| …`) — by convention
+///     callers tagged them as throwaways
+///   - names that shadow an existing tracked binding (the hook/closure
+///     ambiguity would just confuse the read_by inverse)
+fn collect_named_closures<'a>(
+    block: &'a syn::Block,
+    known: &[String],
+) -> Vec<(String, usize, &'a syn::Expr)> {
+    let mut out: Vec<(String, usize, &syn::Expr)> = Vec::new();
+    for stmt in &block.stmts {
+        let syn::Stmt::Local(local) = stmt else {
+            continue;
+        };
+        let Some(init) = &local.init else { continue };
+        // Only count direct closure initializers. A closure wrapped in
+        // `Some(...)` or `Box::new(...)` falls outside the smell we care
+        // about (event handlers stored on widgets); the visitor would still
+        // pick up reads through the wrapper, but the binding's *purpose*
+        // is murkier.
+        if !matches!(&*init.expr, syn::Expr::Closure(_)) {
+            continue;
+        }
+        let name = match &local.pat {
+            syn::Pat::Ident(p) => p.ident.to_string(),
+            syn::Pat::Type(t) => match &*t.pat {
+                syn::Pat::Ident(p) => p.ident.to_string(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if name.starts_with('_') {
+            continue;
+        }
+        if known.iter().any(|k| k == &name) {
+            continue;
+        }
+        let line = local.let_token.span.start().line;
+        out.push((name, line, &init.expr));
+    }
+    out
 }
 
 /// Collect every `let foo = use_X(...)` binding where `use_X` is *not* one
@@ -577,6 +702,11 @@ mod tests {
     use super::*;
 
     fn analyze(src: &str) -> Vec<SignalNode> {
+        let (nodes, _context_signal_reads) = analyze_full(src);
+        nodes
+    }
+
+    fn analyze_full(src: &str) -> (Vec<SignalNode>, Vec<String>) {
         let file = syn::parse_file(src).expect("parse");
         let item = file
             .items
@@ -882,6 +1012,179 @@ fn Demo() -> Element {
                 n,
             );
         }
+    }
+
+    /// Standup `BoardBody`: `presence` and `session` come from
+    /// `use_presence()` / `use_session()` (context-bound helpers, not local
+    /// `use_signal`), and the rsx tree reads them both. Before the fix, the
+    /// per-node `read_in_rsx` flag missed them entirely because the walker
+    /// only checked known node names. The per-component
+    /// `context_signal_reads` list closes that gap so "what reactive state
+    /// drives this view?" gets a complete answer.
+    #[test]
+    fn context_signal_reads_surface_when_used_in_rsx() {
+        let (_nodes, ctx_reads) = analyze_full(
+            r#"
+#[component]
+fn BoardBody() -> Element {
+    let presence = use_presence();
+    let session = use_session();
+    let _nav = use_navigator();
+    rsx!{
+        div { "{session.name}" }
+        for p in presence.read().iter() {
+            span { "{p}" }
+        }
+    }
+}
+"#,
+        );
+        assert!(
+            ctx_reads.iter().any(|n| n == "presence"),
+            "presence is read in rsx via `presence.read().iter()`; should appear in context_signal_reads: {ctx_reads:?}"
+        );
+        assert!(
+            ctx_reads.iter().any(|n| n == "session"),
+            "session is read in rsx via `{{session.name}}`; should appear in context_signal_reads: {ctx_reads:?}"
+        );
+        // _nav is bound but never referenced anywhere — must not leak in.
+        assert!(
+            !ctx_reads.iter().any(|n| n == "_nav"),
+            "unused context binding must NOT appear in context_signal_reads: {ctx_reads:?}"
+        );
+    }
+
+    /// Empty list when the component touches no context bindings in rsx —
+    /// the field skip-serializes on empty, so this also guards the JSON
+    /// shape callers expect.
+    #[test]
+    fn context_signal_reads_empty_when_only_local_signals_in_rsx() {
+        let (_nodes, ctx_reads) = analyze_full(
+            r#"
+#[component]
+fn Counter() -> Element {
+    let count = use_signal(|| 0u32);
+    rsx!{ button { "{count}" } }
+}
+"#,
+        );
+        assert!(
+            ctx_reads.is_empty(),
+            "no context helpers ⇒ no context_signal_reads: {ctx_reads:?}"
+        );
+    }
+
+    /// Standup `BoardBody`: the named closures `logout` / `submit_card` /
+    /// `delete_card_action` / `commit_move` between them write `cards`,
+    /// `status`, `session`, `local_lock`. Before the fix none of them
+    /// appeared as nodes, so "where is `cards` mutated?" had no answer.
+    /// Now each named closure that touches a tracked signal becomes a
+    /// `kind: "closure"` node with reads/writes split, and the inverse
+    /// `written_by` lists the closures per signal.
+    #[test]
+    fn named_closures_with_signal_writes_become_nodes() {
+        let nodes = analyze(
+            r#"
+#[component]
+fn BoardBody() -> Element {
+    let mut cards = use_signal(|| Vec::<String>::new());
+    let mut status = use_signal(|| String::new());
+    let mut local_lock = use_signal(|| 0u32);
+
+    let logout = move |_| {
+        status.set(String::from("logged out"));
+        local_lock.set(0);
+    };
+    let submit_card = move |title: String| {
+        cards.with_mut(|c| c.push(title));
+        local_lock.set(local_lock() + 1);
+    };
+    let commit_move = move |id: u32| {
+        cards.set(Vec::new());
+        local_lock.set(local_lock() + 1);
+        let _ = id;
+    };
+    // No-op closure — doesn't touch any tracked signal, must NOT appear
+    // as a node (otherwise the graph fills with event-handler noise).
+    let _noop = move |_| println!("hi");
+    rsx!{}
+}
+"#,
+        );
+
+        let by_name = |n: &str| nodes.iter().find(|x| x.name == n).cloned();
+        assert!(
+            by_name("logout").is_some(),
+            "logout touches signals; should be a node"
+        );
+        assert!(
+            by_name("submit_card").is_some(),
+            "submit_card touches signals; should be a node"
+        );
+        assert!(
+            by_name("commit_move").is_some(),
+            "commit_move touches signals; should be a node"
+        );
+        // Underscore-prefixed closures are conventionally throwaways; skip them
+        // even if they happened to touch signals.
+        assert!(
+            by_name("_noop").is_none(),
+            "underscore-prefixed closure must NOT become a node"
+        );
+
+        let submit_card = by_name("submit_card").unwrap();
+        assert_eq!(submit_card.kind, "closure");
+        assert!(
+            submit_card.writes.iter().any(|w| w == "cards"),
+            "submit_card writes cards via with_mut: {:?}",
+            submit_card.writes
+        );
+        assert!(
+            submit_card.writes.iter().any(|w| w == "local_lock"),
+            "submit_card writes local_lock via .set: {:?}",
+            submit_card.writes
+        );
+
+        // Inverse: cards is now `written_by` multiple closures — the smell
+        // signal that lifts to a Store.
+        let cards = by_name("cards").unwrap();
+        let mut wb = cards.written_by.clone();
+        wb.sort();
+        assert!(
+            wb.contains(&"submit_card".to_string()) && wb.contains(&"commit_move".to_string()),
+            "cards.written_by should list multiple closures: {wb:?}"
+        );
+
+        // Inverse for reads: local_lock is read by submit_card and commit_move
+        // (via `local_lock()` inside the .set arg).
+        let local_lock = by_name("local_lock").unwrap();
+        let mut rb = local_lock.read_by.clone();
+        rb.sort();
+        assert!(
+            rb.contains(&"submit_card".to_string()) && rb.contains(&"commit_move".to_string()),
+            "local_lock.read_by should list closures that read it for the +1 bump: {rb:?}"
+        );
+    }
+
+    /// Even when a closure has zero reads/writes against tracked signals,
+    /// it stays out of `nodes` — otherwise the graph would fill with every
+    /// ondragstart / onclick handler the component ever defines.
+    #[test]
+    fn pure_event_handler_closure_is_not_a_node() {
+        let nodes = analyze(
+            r#"
+#[component]
+fn Demo() -> Element {
+    let on_click = move |_e: u32| println!("clicked");
+    let _ = on_click;
+    rsx!{}
+}
+"#,
+        );
+        assert!(
+            !nodes.iter().any(|n| n.name == "on_click"),
+            "closure with no signal touches should NOT be a node"
+        );
     }
 
     #[test]

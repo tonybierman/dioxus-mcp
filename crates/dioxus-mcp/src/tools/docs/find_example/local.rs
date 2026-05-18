@@ -31,7 +31,7 @@ pub fn registry() -> &'static [LocalExample] {
         },
         LocalExample {
             name: "cookie-session-auth",
-            blurb: "Cookie-based session auth: TypedHeader<Cookie> read, in-memory SESSIONS map, provide_session/use_session signal-in-context pair, and a Protected wrapper that redirects via use_effect. The whole login/logout/me shape in one file.",
+            blurb: "Cookie-based session auth: TypedHeader<Cookie> read, in-memory SESSIONS map, provide_session/use_session signal-in-context pair, and a Protected wrapper whose hydration-safe gate is `use_server_future` (resolved on the server before the Outlet renders). The whole login/logout/me shape in one file.",
             url: "https://github.com/anthropics/dioxus-mcp/blob/main/docs/patterns/cookie-session-auth.md",
             body: COOKIE_SESSION_AUTH,
         },
@@ -46,6 +46,12 @@ pub fn registry() -> &'static [LocalExample] {
             blurb: "WASM-safe polling loop using `gloo_timers::future::TimeoutFuture` inside `use_future`. Replaces tokio sleeps (which don't compile on wasm) for periodic refreshes / heartbeats / debounced reactions.",
             url: "https://github.com/anthropics/dioxus-mcp/blob/main/docs/patterns/wasm-polling-timer.md",
             body: WASM_POLLING_TIMER,
+        },
+        LocalExample {
+            name: "auth-gate-use-server-future",
+            blurb: "Hydration-safe authentication guard: a `Protected` route shell whose render gate is `use_server_future(move || async { who_am_i().await })`. The server resolves the auth verdict during SSR so the client paints the right branch on first frame — no `use_effect` + `nav.replace` hydration flash. Shows the early-return / Outlet pattern and cross-references the unsafe shape it replaces.",
+            url: "https://github.com/anthropics/dioxus-mcp/blob/main/docs/patterns/auth-gate-use-server-future.md",
+            body: AUTH_GATE_USE_SERVER_FUTURE,
         },
     ]
 }
@@ -426,6 +432,9 @@ pub fn provide_session() {
     let sig = use_signal(|| None::<User>);
     // On first mount, ask the server who we are. The Resource result is
     // mirrored into the Signal so consumers can read it synchronously.
+    // (This still uses `use_resource` because the result is consumed by
+    // event handlers, not the render gate. The render gate itself lives in
+    // `Protected` and uses `use_server_future` — see below.)
     let _ = use_resource(move || {
         let mut sig = sig;
         async move {
@@ -441,19 +450,40 @@ pub fn use_session() -> SessionState {
     use_context::<SessionState>()
 }
 
+// `use_server_future` resolves on the server BEFORE hydration, so the SSR
+// markup already reflects the auth verdict. The client paints the same
+// markup the server produced, no hydration flash. Compare with the old
+// shape (still seen in many Dioxus 0.5/0.6 examples) which used
+// `use_effect(move || if session.is_none() { nav.replace("/login") })` —
+// `use_effect` doesn't run on the server, so SSR rendered the protected
+// branch, the client mounted the protected markup, and only then did the
+// effect redirect. signal_lint flags that shape as
+// `hydration_unsafe_effect`. The `Redirect { to: "/login" }` below is the
+// rsx-only redirect: rendered as part of the page tree, so the server
+// emits the redirect element and the client follows on hydration without
+// painting protected content first.
 #[component]
 pub fn Protected(children: Element) -> Element {
-    let session = use_session();
-    let nav = use_navigator();
-    use_effect(move || {
-        if session.0.read().is_none() {
-            nav.replace("/login");
-        }
-    });
-    if session.0.read().is_none() {
-        return rsx! { div { class: "loading", "Redirecting..." } };
+    // Server-resolved guard. The closure runs on the server during SSR and
+    // returns the auth verdict; the client reuses the resolved value on
+    // first paint instead of re-fetching.
+    let auth = use_server_future(move || async move { me().await })?;
+
+    match auth.read().as_ref() {
+        // Resource still resolving (first client-only navigation, no SSR
+        // snapshot): keep the markup neutral so we don't paint the
+        // protected branch while we wait.
+        None => rsx! { div { class: "loading", "Checking session..." } },
+        // Server-fn failed — surface a soft error. Logged-out users hit the
+        // `Some(Ok(None))` branch below instead.
+        Some(Err(_)) => rsx! { div { class: "error", "Could not verify session." } },
+        // No session: render a Router redirect declaratively. The element
+        // exists in the SSR tree, so the server already steered the
+        // browser to /login — there's no flash of protected content.
+        Some(Ok(None)) => rsx! { Redirect { to: "/login" } },
+        // Logged in: render children.
+        Some(Ok(Some(_))) => rsx! { {children} },
     }
-    rsx! { {children} }
 }
 "#;
 
@@ -611,6 +641,133 @@ async fn fetch_status() -> Result<String, String> { Ok("ok".into()) }
 async fn search(_q: String) -> Result<Vec<String>, String> { Ok(vec![]) }
 "#;
 
+const AUTH_GATE_USE_SERVER_FUTURE: &str = r#"// Hydration-safe authentication gate pattern.
+//
+// Shape: a `Protected` route shell that decides whether to render its
+// children based on `use_server_future`. The closure runs on the server
+// during SSR, so the server already emits the "correct" markup — the
+// protected page when the user is logged in, a `Redirect { to: "/login" }`
+// element when they aren't. The client then hydrates the same tree it sees
+// on the wire; there's no flash of protected content, no "redirect after
+// mount" jitter.
+//
+// What this REPLACES (the unsafe shape):
+//
+//   #[component]
+//   pub fn Protected(children: Element) -> Element {
+//       let session = use_session();
+//       let nav = use_navigator();
+//       use_effect(move || {
+//           if session.0.read().is_none() {
+//               nav.replace("/login");
+//           }
+//       });
+//       if session.0.read().is_none() {
+//           return rsx! { div { "Redirecting..." } };
+//       }
+//       rsx! { {children} }
+//   }
+//
+// Why it's unsafe: `use_effect` doesn't run on the server, so SSR renders
+// the protected branch unconditionally. The client mounts that markup,
+// THEN the effect fires, THEN `nav.replace("/login")` kicks in — the user
+// sees protected content flash before the redirect. `signal_lint` flags
+// this shape as `hydration_unsafe_effect`.
+//
+// Why `use_server_future` fixes it: the closure passed to
+// `use_server_future` resolves on the server during SSR, the resolved
+// value is serialized into the page, and the client picks it up before
+// the first paint. The render gate already knows the auth verdict by the
+// time hydration runs.
+//
+// Companion example: `cookie-session-auth` (cookie / TypedHeader / SESSIONS
+// map shape) — pairs naturally with this gate when the auth source is a
+// session cookie.
+
+use dioxus::prelude::*;
+use dioxus_router::prelude::*;
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct User {
+    pub name: String,
+}
+
+// Whatever your auth source is — JWT, cookie session, header — wrap it
+// behind a single server fn so the Protected shell stays generic.
+#[get("/api/whoami")]
+pub async fn who_am_i() -> Result<Option<User>, ServerFnError> {
+    // ...read the cookie / header / token here. Return `None` for
+    // logged-out, `Some(user)` for logged-in. See `cookie-session-auth`
+    // for a concrete implementation.
+    Ok(None)
+}
+
+#[derive(Clone, Routable, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    Home {},
+    #[route("/login")]
+    Login {},
+
+    // Anything under `/app/...` is gated through Protected. The Outlet
+    // renders the matched child route only when Protected lets it through.
+    #[layout(Protected)]
+    #[route("/app")]
+    Dashboard {},
+    #[end_layout]
+}
+
+#[component]
+pub fn Home() -> Element { rsx! { h1 { "Home" } } }
+#[component]
+pub fn Login() -> Element { rsx! { h1 { "Login" } } }
+#[component]
+pub fn Dashboard() -> Element { rsx! { h1 { "Dashboard (protected)" } } }
+
+#[component]
+pub fn Protected() -> Element {
+    // Hydration-safe gate: resolved on the server before the first paint.
+    // The `?` propagates any infrastructure failure (rare); the inner
+    // `Result<Option<User>>` branches handle the auth verdicts.
+    let auth = use_server_future(move || async move { who_am_i().await })?;
+
+    match auth.read().as_ref() {
+        // Still resolving — only happens on client-only navigations where
+        // there's no SSR snapshot to warm-start from. Render a neutral
+        // skeleton; do NOT render the Outlet (children) here, that's the
+        // flash the whole pattern exists to prevent.
+        None => rsx! { div { class: "loading", "Checking session..." } },
+
+        // Infrastructure failure surfacing the server-fn error. Optional —
+        // you can fall through to the unauthenticated branch if you'd
+        // rather degrade silently.
+        Some(Err(_)) => rsx! { div { class: "error", "Could not verify session." } },
+
+        // Unauthenticated. Render the Redirect *declaratively* into the
+        // page tree. The router observes the element and steers the
+        // browser; because the element exists in SSR markup, the server
+        // already issued the redirect when serving the protected URL.
+        Some(Ok(None)) => rsx! { Redirect { to: "/login" } },
+
+        // Authenticated — drop through to the matched child route.
+        Some(Ok(Some(_))) => rsx! { Outlet::<Route> {} },
+    }
+}
+
+// ----- alternative: early-return instead of the explicit match -----
+//
+// Functionally identical to `Protected` above, just a shorter spelling
+// when the resource has only two verdicts that matter.
+#[component]
+pub fn ProtectedEarlyReturn() -> Element {
+    let auth = use_server_future(move || async move { who_am_i().await })?;
+    if let Some(Ok(Some(_))) = auth.read().as_ref() {
+        return rsx! { Outlet::<Route> {} };
+    }
+    rsx! { Redirect { to: "/login" } }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,9 +831,24 @@ mod tests {
             entry.body.contains("provide_session") && entry.body.contains("use_session"),
             "should expose the Signal-in-context pair"
         );
+        // The recommended hydration-safe shape: server-resolved guard via
+        // `use_server_future` and a declarative `Redirect` rendered into
+        // the rsx tree. The old `use_effect` + `nav.replace` pattern was
+        // flagged by `signal_lint hydration_unsafe_effect`; the example
+        // must NOT teach it anymore.
         assert!(
-            entry.body.contains("Protected") && entry.body.contains("use_effect"),
-            "should show the Protected wrapper redirecting via use_effect"
+            entry.body.contains("use_server_future"),
+            "Protected wrapper should gate render with use_server_future, not use_effect"
+        );
+        assert!(
+            entry.body.contains("Redirect"),
+            "redirect should be declarative rsx, not an imperative nav call inside use_effect"
+        );
+        assert!(
+            !entry
+                .body
+                .contains("use_effect(move || {\n        if session"),
+            "old use_effect-based redirect must be gone; signal_lint flags it as hydration_unsafe_effect"
         );
     }
 
@@ -700,6 +872,33 @@ mod tests {
         // widget doesn't model.
         assert!(entry.body.contains("dragging"));
         assert!(entry.body.contains("drop_target"));
+    }
+
+    #[test]
+    fn registry_has_auth_gate_use_server_future() {
+        let r = registry();
+        let entry = r
+            .iter()
+            .find(|e| e.name == "auth-gate-use-server-future")
+            .expect("auth-gate-use-server-future entry should exist");
+        assert!(
+            entry.body.contains("use_server_future"),
+            "the gate must be use_server_future, that's the whole point"
+        );
+        assert!(
+            entry.body.contains("Redirect"),
+            "should use a declarative Redirect element, not an imperative nav call"
+        );
+        assert!(
+            entry.body.contains("Outlet"),
+            "should demonstrate the early-return / Outlet shape so callers see how the children render under the gate"
+        );
+        // Cross-reference to the unsafe shape so callers learn what they're
+        // moving away from.
+        assert!(
+            entry.body.contains("use_effect") && entry.body.contains("nav.replace"),
+            "should call out the unsafe use_effect + nav.replace pattern this replaces"
+        );
     }
 
     #[test]

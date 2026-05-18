@@ -200,7 +200,16 @@ pub async fn project_tour(
         trunc.unreferenced_assets = true;
     }
 
-    let summary = render_summary(&audit, &routes, &index, &assets, &lints, &trunc);
+    // A caller that asked for `include: ["lints"]` and nothing else gets a
+    // markdown header that names the narrower scope, so they don't have to
+    // second-guess whether the rest of the report was dropped on the floor
+    // or intentionally skipped.
+    let only_lints = explicit_include
+        && want("lints")
+        && !["audit", "routes", "index", "assets"]
+            .iter()
+            .any(|s| want(s));
+    let summary = render_summary(&audit, &routes, &index, &assets, &lints, &trunc, only_lints);
     let next_actions = derive_next_actions(&audit, &routes, routes_err.as_deref(), &index);
 
     Ok(ProjectTourReport {
@@ -330,9 +339,17 @@ fn render_summary(
     assets: &Option<crate::tools::audit::asset_audit::AssetAuditReport>,
     lints: &Option<crate::tools::lints::lint_project::LintProjectReport>,
     trunc: &TruncationFlags,
+    only_lints: bool,
 ) -> String {
     let mut out = String::new();
-    out.push_str("# Project tour\n\n");
+    // Narrower header when the caller asked for lints-only — otherwise the
+    // "# Project tour" title with an otherwise empty body is misleading
+    // (looks like other sections silently failed).
+    if only_lints {
+        out.push_str("# Project lints\n\n");
+    } else {
+        out.push_str("# Project tour\n\n");
+    }
 
     if let Some(a) = audit {
         out.push_str(&format!(
@@ -499,7 +516,15 @@ mod tests {
             reinvented_widget: None,
         };
         let trunc = TruncationFlags::default();
-        let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc);
+        let summary = render_summary(
+            &None,
+            &None,
+            &None,
+            &None,
+            &Some(lint_report),
+            &trunc,
+            false,
+        );
         assert!(
             summary.contains("**Lints**: 6 issues"),
             "headline should match total_issues: {summary}"
@@ -548,7 +573,15 @@ mod tests {
             reinvented_widget: None,
         };
         let trunc = TruncationFlags::default();
-        let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc);
+        let summary = render_summary(
+            &None,
+            &None,
+            &None,
+            &None,
+            &Some(lint_report),
+            &trunc,
+            false,
+        );
         assert!(
             summary.contains("**Lints**: 0 issues\n"),
             "clean project line should be bare: {summary}"
@@ -564,10 +597,44 @@ mod tests {
     #[test]
     fn lint_summary_omitted_when_lints_not_run() {
         let trunc = TruncationFlags::default();
-        let summary = render_summary(&None, &None, &None, &None, &None, &trunc);
+        let summary = render_summary(&None, &None, &None, &None, &None, &trunc, false);
         assert!(
             !summary.contains("**Lints**"),
             "no lints section when the tour didn't run them: {summary}"
+        );
+    }
+
+    /// When the caller scoped the tour to `include: ["lints"]` only, the
+    /// markdown header should reflect the narrower scope so a reader
+    /// doesn't think the empty audit/routes/index/assets sections were
+    /// silently dropped on the floor.
+    #[test]
+    fn lints_only_summary_renames_header() {
+        let lint_report = LintProjectReport {
+            summary: String::new(),
+            lints_run: vec!["signal_lint".into()],
+            total_issues: 0,
+            issues_by_lint: vec![LintCount {
+                lint: "signal_lint".into(),
+                issues: 0,
+            }],
+            parse_errors: Vec::new(),
+            check_rsx: None,
+            dead_components: None,
+            prop_drill: None,
+            signal_lint: None,
+            props_lint: None,
+            reinvented_widget: None,
+        };
+        let trunc = TruncationFlags::default();
+        let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc, true);
+        assert!(
+            summary.starts_with("# Project lints\n"),
+            "lints-only scope should rename the header: {summary}"
+        );
+        assert!(
+            !summary.contains("# Project tour"),
+            "should not also include the full-tour header: {summary}"
         );
     }
 }

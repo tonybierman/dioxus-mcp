@@ -260,4 +260,34 @@ mod tests {
         );
         assert!(best.1 > 0.0, "the top hit should have a positive score");
     }
+
+    /// When a caller searches for the use_server_future auth-guard pattern,
+    /// the new dedicated example (`auth-gate-use-server-future`) must
+    /// outrank `cookie-session-auth` — they overlap on the verdict shape,
+    /// but only the auth-gate entry is the focused canonical answer.
+    /// Without this, callers land on the cookie example (which is broader)
+    /// for a query that has a more specific match.
+    #[test]
+    fn auth_gate_outranks_cookie_session_for_guard_query() {
+        let qterms = tokenize("use_server_future authentication guard");
+        let mut best: (&str, f32) = ("", 0.0);
+        for entry in local::registry() {
+            let name_terms = tokenize(&entry.name.replace(['-', '_'], " "));
+            let blurb_terms = tokenize(entry.blurb);
+            let body_terms = tokenize(entry.body);
+            let combined: Vec<String> = name_terms
+                .into_iter()
+                .chain(blurb_terms)
+                .chain(body_terms)
+                .collect();
+            let score = score_terms(&qterms, &combined);
+            if score > best.1 {
+                best = (entry.name, score);
+            }
+        }
+        assert_eq!(
+            best.0, "auth-gate-use-server-future",
+            "auth-gate example should rank first for the guard query; got {best:?}"
+        );
+    }
 }

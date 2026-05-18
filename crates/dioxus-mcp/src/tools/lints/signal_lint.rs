@@ -33,7 +33,32 @@ pub struct SignalLintReport {
     /// modules — a small number of bespoke context signals is fine.
     #[serde(default)]
     pub context_signal_triads: Vec<ContextSignalTriad>,
+    /// Always-emitted snapshot of the detection state behind
+    /// `context_signal_triads`. Callers can tell at a glance whether
+    /// `context_signal_triads: []` means "no pairs detected" (`detected: 0`)
+    /// or "below the noise threshold" (`detected: 2, threshold: 3`).
+    /// Without this, an empty array is indistinguishable from a clean
+    /// project — and on standup the report had 2 pairs that didn't surface.
+    pub context_signal_triads_summary: ContextSignalTriadsSummary,
     pub parse_errors: Vec<ParseError>,
+}
+
+/// Diagnostic counts for the context-signal-triad detector. Always
+/// included so callers can ground-truth the `context_signal_triads: []`
+/// case (was it "nothing matched" or "matched but below the threshold"?).
+#[derive(Debug, Serialize)]
+pub struct ContextSignalTriadsSummary {
+    /// Total number of `provide_X` + `use_X` pairs detected across the
+    /// project src tree, regardless of the threshold.
+    pub detected: usize,
+    /// Threshold the detector applies before emitting a suggestion. Three
+    /// or more pairs is the smell; below that, a handful of bespoke
+    /// context signals is fine.
+    pub threshold: usize,
+    /// The suffixes of every detected pair, in stable (file, name) order —
+    /// useful so the caller doesn't have to walk `context_signal_triads`
+    /// to see the names when `detected < threshold`.
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,17 +186,36 @@ pub async fn signal_lint(
             // or the closures should share a single capture. Same shape
             // standup's `Column` ended up in for ondragover/ondrop/onmatch.
             check_prop_clone_overuse(f, &sf.path, &mut issues);
+
+            // A single `use_signal` written from ≥3 distinct named closures
+            // / hooks in the same component is the canonical "lift to a
+            // Store" smell — see `get_dsl_spec`'s `Store` primitive for the
+            // recommended refactor. Same shape standup's `BoardBody` ended
+            // up in for `cards` and `local_lock`.
+            check_signal_many_writers(f, &sf.path, &signal_bindings, &mut issues);
+
+            // Counter signals that are *only* incremented/decremented and
+            // *only* compared with `==` are sentinels, not state — they
+            // belong in a Cell or a Store generation method, not a Signal.
+            check_signal_used_as_fence(f, &sf.path, &signal_bindings, &mut issues);
         }
     }
 
-    let context_signal_triads = detect_context_signal_triads(&files);
+    let (context_signal_triads, context_signal_triads_summary) =
+        detect_context_signal_triads(&files);
 
     Ok(SignalLintReport {
         issues,
         context_signal_triads,
+        context_signal_triads_summary,
         parse_errors: collect_parse_errors(&files),
     })
 }
+
+/// Threshold used by `detect_context_signal_triads`. Lifted to a constant
+/// so the summary can echo it back to callers without drifting out of
+/// sync with the check.
+const CONTEXT_SIGNAL_TRIAD_THRESHOLD: usize = 3;
 
 /// Walk every scanned `.rs` file and look for paired `pub fn provide_<X>`
 /// and `pub fn use_<X>` definitions in the same module — the classic
@@ -185,7 +229,7 @@ pub async fn signal_lint(
 /// in `walk_rs_files`.
 fn detect_context_signal_triads(
     files: &[crate::tools::ast::ScannedFile],
-) -> Vec<ContextSignalTriad> {
+) -> (Vec<ContextSignalTriad>, ContextSignalTriadsSummary) {
     let mut modules: Vec<ContextSignalModule> = Vec::new();
     for sf in files {
         let Ok(ast) = &sf.ast else { continue };
@@ -216,19 +260,26 @@ fn detect_context_signal_triads(
             }
         }
     }
-    if modules.len() < 3 {
-        return Vec::new();
-    }
     // Stable, human-friendly order: sort by file path so the report is
-    // deterministic across runs and OS-specific dir-read orders.
+    // deterministic across runs and OS-specific dir-read orders. Done
+    // before the threshold check so the summary's `names` list matches
+    // what callers would see if/when the threshold is hit.
     modules.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
     let names: Vec<String> = modules.iter().map(|m| m.name.clone()).collect();
+    let summary = ContextSignalTriadsSummary {
+        detected: modules.len(),
+        threshold: CONTEXT_SIGNAL_TRIAD_THRESHOLD,
+        names: names.clone(),
+    };
+    if modules.len() < CONTEXT_SIGNAL_TRIAD_THRESHOLD {
+        return (Vec::new(), summary);
+    }
     let message = format!(
         "{} sibling context-signal modules detected ({}). Three or more `provide_X` + `use_X` pairs is a smell — consolidate into a single `Store` (see the `Store` primitive in `get_dsl_spec`) so callers share one provider and one type, instead of N near-identical files.",
         modules.len(),
         names.join(", ")
     );
-    vec![ContextSignalTriad { modules, message }]
+    (vec![ContextSignalTriad { modules, message }], summary)
 }
 
 struct LoopVisitor<'a> {
@@ -867,6 +918,541 @@ fn check_prop_clone_overuse(
     }
 }
 
+/// A "write source" inside the component body — either a named closure
+/// (`let mut commit_move = move |…| { … }`) or a hook (`use_future(|| async
+/// { … })` / `use_effect(|| { … })`). We track these as the units of code
+/// from which a Signal can be written, so the many-writers lint can answer
+/// "how many distinct callable bodies mutate this signal?" — three or
+/// more is the smell.
+struct WriteSource<'a> {
+    /// Display name used in the lint message. Closures keep their let-
+    /// binding ident (`commit_move`); hooks use a synthetic `<use_X@LINE>`
+    /// form so the report points at the source.
+    name: String,
+    /// Closure / async block body whose interior is scanned for `.set()`,
+    /// `.write()`, `+=`, etc. Held as a borrowed `syn::Expr` so we can
+    /// reuse the visit infrastructure.
+    body: &'a syn::Expr,
+    /// Source line of the binding / hook — used as the issue line.
+    line: usize,
+}
+
+/// Walk a component body and produce one `WriteSource` per named closure
+/// binding and per standalone `use_future` / `use_effect` / `use_resource`
+/// / `use_callback` call site. Closures bound to `_name` are skipped — by
+/// convention those are throwaway handlers and double-counting them just
+/// muddies the smell. We do NOT include `use_signal` / `use_memo`
+/// initializers (their bodies aren't mutator callsites in the same sense).
+fn collect_write_sources(block: &syn::Block) -> Vec<WriteSource<'_>> {
+    let mut out: Vec<WriteSource> = Vec::new();
+    for stmt in &block.stmts {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                let Some(init) = &local.init else { continue };
+                let line = local.let_token.span.start().line;
+                let name = match &local.pat {
+                    syn::Pat::Ident(p) => p.ident.to_string(),
+                    syn::Pat::Type(t) => match &*t.pat {
+                        syn::Pat::Ident(p) => p.ident.to_string(),
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if name.starts_with('_') {
+                    continue;
+                }
+                // Named closure: `let [mut?] foo = move |args| { body }`.
+                if matches!(&*init.expr, syn::Expr::Closure(_)) {
+                    out.push(WriteSource {
+                        name,
+                        body: &init.expr,
+                        line,
+                    });
+                    continue;
+                }
+                // `let bar = use_future(|| async { ... });` — the future
+                // body is itself a write source.
+                if is_named_hook_init(&init.expr) {
+                    out.push(WriteSource {
+                        name: format!("<{name}>"),
+                        body: &init.expr,
+                        line,
+                    });
+                }
+            }
+            // Standalone `use_future(|| …);` / `use_effect(|| …);` — no
+            // `let` binding, so we synthesise a name from the call form.
+            syn::Stmt::Expr(expr, semi) if semi.is_some() => {
+                if let Some(form) = standalone_hook_form(expr) {
+                    use syn::spanned::Spanned;
+                    let line = expr.span().start().line;
+                    out.push(WriteSource {
+                        name: format!("<{form}@{line}>"),
+                        body: expr,
+                        line,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// True when `expr` is a call whose path tail is one of the hooks whose
+/// closure body counts as a "write source" (use_future / use_effect /
+/// use_resource / use_callback).
+fn is_named_hook_init(expr: &syn::Expr) -> bool {
+    standalone_hook_form(expr).is_some()
+}
+
+/// `Some("use_future")` etc. when `expr` is a call to one of the
+/// write-source hooks; `None` for non-hook calls or for `use_signal` /
+/// `use_memo` (which initialise pure-data slots, not mutator bodies).
+fn standalone_hook_form(expr: &syn::Expr) -> Option<&'static str> {
+    let call = match expr {
+        syn::Expr::Call(c) => c,
+        _ => return None,
+    };
+    let syn::Expr::Path(p) = &*call.func else {
+        return None;
+    };
+    let last = p.path.segments.last()?.ident.to_string();
+    match last.as_str() {
+        "use_future" => Some("use_future"),
+        "use_effect" => Some("use_effect"),
+        "use_resource" => Some("use_resource"),
+        "use_callback" => Some("use_callback"),
+        _ => None,
+    }
+}
+
+/// Walk `expr` and collect every `use_signal` binding name that gets
+/// written. Mirrors `EffectSpawnVisitor`'s write detection: `.set`,
+/// `.set_silent`, `.write`, `.with_mut`, `.replace`, `.swap`, `.take`,
+/// compound `+=` / `-=` etc. on a Signal, and plain `sig = …` / `*sig = …`.
+fn collect_signal_writes(expr: &syn::Expr, signal_bindings: &[String]) -> Vec<String> {
+    struct V<'a> {
+        signals: &'a [String],
+        hits: std::collections::BTreeSet<String>,
+    }
+    impl<'a, 'ast> Visit<'ast> for V<'a> {
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            let is_write = matches!(
+                mc.method.to_string().as_str(),
+                "set" | "set_silent" | "write" | "with_mut" | "replace" | "swap" | "take"
+            );
+            if is_write
+                && let Some(name) = single_ident(&mc.receiver)
+                && self.signals.iter().any(|s| s == &name)
+            {
+                self.hits.insert(name);
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_assign(&mut self, ea: &'ast syn::ExprAssign) {
+            if let Some(name) = single_ident(&ea.left)
+                && self.signals.iter().any(|s| s == &name)
+            {
+                self.hits.insert(name);
+            }
+            syn::visit::visit_expr_assign(self, ea);
+        }
+        fn visit_expr_binary(&mut self, eb: &'ast syn::ExprBinary) {
+            syn::visit::visit_expr_binary(self, eb);
+        }
+        fn visit_expr_unary(&mut self, eu: &'ast syn::ExprUnary) {
+            // `*sig = x` shows up as `Assign(Unary(Deref, sig), x)` — the
+            // assign handler already covers it via `single_ident` peeling
+            // unary/deref. Default-recurse the body.
+            syn::visit::visit_expr_unary(self, eu);
+        }
+    }
+    let mut v = V {
+        signals: signal_bindings,
+        hits: std::collections::BTreeSet::new(),
+    };
+    v.visit_expr(expr);
+    v.hits.into_iter().collect()
+}
+
+/// Many-writers smell: a single `use_signal` binding is written from ≥3
+/// distinct named closures or hooks in the same component. Each write site
+/// duplicates lock/state plumbing the calling code has to keep in sync; the
+/// Dioxus 0.7 idiom is to lift the signal into a `Store` with named
+/// mutator methods so the call sites read like `store.commit_move(...)`
+/// instead of inline `cards.with_mut(...)`. See the `Store` primitive in
+/// `get_dsl_spec` for the recommended refactor.
+fn check_signal_many_writers(
+    f: &syn::ItemFn,
+    file: &std::path::Path,
+    signal_bindings: &[String],
+    issues: &mut Vec<SignalIssue>,
+) {
+    if signal_bindings.is_empty() {
+        return;
+    }
+    let sources = collect_write_sources(&f.block);
+    // signal_name → list of (write-source-name, line) writers.
+    let mut by_signal: std::collections::BTreeMap<String, Vec<(String, usize)>> =
+        std::collections::BTreeMap::new();
+    for src in &sources {
+        for sig in collect_signal_writes(src.body, signal_bindings) {
+            let entry = by_signal.entry(sig).or_default();
+            if !entry.iter().any(|(n, _)| n == &src.name) {
+                entry.push((src.name.clone(), src.line));
+            }
+        }
+    }
+    for (signal, writers) in &by_signal {
+        if writers.len() < 3 {
+            continue;
+        }
+        let mut names: Vec<&str> = writers.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort();
+        let first_line = writers.iter().map(|(_, l)| *l).min().unwrap_or(0);
+        issues.push(SignalIssue {
+            code: "signal_many_writers",
+            message: format!(
+                "`{signal}` is written from {n} distinct sources in this component ({list}). \
+                 Three or more mutator callsites is the canonical \"lift to Store\" smell — \
+                 each call duplicates plumbing the others have to keep in sync. Move `{signal}` \
+                 into a `Store` (see `get_dsl_spec`'s `Store` primitive) and expose named \
+                 mutator methods (`store.commit_move(...)` etc.) instead of inline `.with_mut` / \
+                 `.set` calls.",
+                n = writers.len(),
+                list = names.join(", "),
+            ),
+            file: file.to_path_buf(),
+            line: first_line,
+            component: Some(f.sig.ident.to_string()),
+        });
+    }
+}
+
+/// Fence smell: a `Signal<integer>` binding whose only reads are
+/// equality comparisons and whose only writes are `+= n` / `-= n` / `.set(0)` —
+/// the signal isn't holding state, it's a generation/sentinel counter. The
+/// Dioxus runtime overhead (reactive subscription, change tracking) buys
+/// nothing here; a plain `Cell<u32>` (server-side) or a generation field
+/// on a Store does the job at zero reactive cost.
+///
+/// We only fire when:
+///   1. the initializer is an integer literal (`0u32`, `0i64`, `0`) — the
+///      sole signal we have without a full type-resolver,
+///   2. at least 2 distinct writes exist that are all `+= n` / `-= n`
+///      compound assigns,
+///   3. every read of the binding occurs inside a `==` or `!=` comparison,
+///   4. the binding is NOT interpolated into rsx (`{sig}` would mean
+///      callers DO care about the value as a value).
+fn check_signal_used_as_fence(
+    f: &syn::ItemFn,
+    file: &std::path::Path,
+    signal_bindings: &[String],
+    issues: &mut Vec<SignalIssue>,
+) {
+    if signal_bindings.is_empty() {
+        return;
+    }
+    // Gather integer-literal-initialised signals.
+    let candidates: Vec<(String, usize)> = f
+        .block
+        .stmts
+        .iter()
+        .filter_map(|stmt| {
+            let syn::Stmt::Local(local) = stmt else {
+                return None;
+            };
+            let init = local.init.as_ref()?;
+            let name = match &local.pat {
+                syn::Pat::Ident(p) => p.ident.to_string(),
+                syn::Pat::Type(t) => match &*t.pat {
+                    syn::Pat::Ident(p) => p.ident.to_string(),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            if !signal_bindings.iter().any(|s| s == &name) {
+                return None;
+            }
+            if !is_use_signal_int_init(&init.expr) {
+                return None;
+            }
+            Some((name, local.let_token.span.start().line))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut profiles: std::collections::BTreeMap<String, FenceProfile> =
+        std::collections::BTreeMap::new();
+    let mut v = FenceVisitor {
+        target_names: candidates.iter().map(|(n, _)| n.clone()).collect(),
+        profiles: &mut profiles,
+        comparison_depth: 0,
+    };
+    v.visit_block(&f.block);
+
+    // rsx interpolation check — a fenced signal is never shown to the user.
+    let rsx_interp = rsx_interpolated_names(&f.block);
+
+    for (name, line) in &candidates {
+        let Some(p) = profiles.get(name) else {
+            // Unused signal — skip; that's a different smell.
+            continue;
+        };
+        if p.disqualified {
+            continue;
+        }
+        if p.compound_writes < 2 {
+            continue;
+        }
+        if rsx_interp.contains(name) {
+            continue;
+        }
+        issues.push(SignalIssue {
+            code: "signal_used_as_fence",
+            message: format!(
+                "`{name}` is a `Signal<integer>` used as a fence — every read is an \
+                 equality comparison and every write bumps it by a constant. The \
+                 reactive subscription is pure overhead. Replace with a `Cell<u32>` \
+                 (server-side state) or expose a generation method on a Store. See \
+                 the `Store` primitive in `get_dsl_spec`."
+            ),
+            file: file.to_path_buf(),
+            line: *line,
+            component: Some(f.sig.ident.to_string()),
+        });
+    }
+}
+
+/// Per-signal state for the fence visitor: how many `+=`/`-=` writes
+/// observed, plus a `disqualified` flag set the moment any other shape
+/// turns up (a read outside `==`, a `.set` with a non-literal arg, an
+/// rsx interpolation, …). One side step and the signal isn't a fence.
+#[derive(Default)]
+struct FenceProfile {
+    compound_writes: u32,
+    disqualified: bool,
+}
+
+struct FenceVisitor<'a> {
+    target_names: Vec<String>,
+    profiles: &'a mut std::collections::BTreeMap<String, FenceProfile>,
+    /// Depth into a `==` / `!=` comparison expression — bare identifier
+    /// reads at depth>0 are "ok" (the fence usage); reads at depth=0 are
+    /// disqualifying (callers care about the value).
+    comparison_depth: usize,
+}
+
+impl<'a> FenceVisitor<'a> {
+    fn entry(&mut self, name: &str) -> Option<&mut FenceProfile> {
+        if self.target_names.iter().any(|n| n == name) {
+            Some(self.profiles.entry(name.to_string()).or_default())
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, 'ast> Visit<'ast> for FenceVisitor<'a> {
+    fn visit_expr_binary(&mut self, eb: &'ast syn::ExprBinary) {
+        // syn 2.0 collapses `a += 1` into `ExprBinary` with `BinOp::AddAssign`,
+        // not a separate `ExprAssignOp` node. We handle three flavours here:
+        //   - `==` / `!=`  → bump comparison_depth so reads inside don't
+        //     disqualify the fence;
+        //   - `+=` / `-=`  → compound write; count when the rhs is an int
+        //     literal, disqualify otherwise (`sig += other()` means callers
+        //     care about the value);
+        //   - everything else (`+`, `-`, `<`, etc.) → default-recurse; bare
+        //     reads at depth 0 get caught by `visit_expr_path`.
+        let is_cmp = matches!(eb.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_));
+        let is_inc_dec = matches!(eb.op, syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_));
+        if is_inc_dec {
+            if let Some(name) = single_ident(&eb.left)
+                && let Some(p) = self.entry(&name)
+            {
+                if is_int_literal(&eb.right) {
+                    p.compound_writes += 1;
+                } else {
+                    p.disqualified = true;
+                }
+            }
+            // Visit the rhs but not the lhs — the lhs ident here is the
+            // write target, not a read.
+            self.visit_expr(&eb.right);
+            return;
+        }
+        if is_cmp {
+            self.comparison_depth += 1;
+            syn::visit::visit_expr_binary(self, eb);
+            self.comparison_depth -= 1;
+        } else {
+            syn::visit::visit_expr_binary(self, eb);
+        }
+    }
+    fn visit_expr_assign(&mut self, ea: &'ast syn::ExprAssign) {
+        // Plain `sig = x` — disqualifies (writes are supposed to be compound).
+        if let Some(name) = single_ident(&ea.left)
+            && let Some(p) = self.entry(&name)
+        {
+            p.disqualified = true;
+        }
+        syn::visit::visit_expr_assign(self, ea);
+    }
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        let method = mc.method.to_string();
+        // Any method-style write other than `.set(integer_literal)` is
+        // disqualifying for the fence shape.
+        let is_write_method = matches!(
+            method.as_str(),
+            "set" | "set_silent" | "write" | "with_mut" | "replace" | "swap" | "take"
+        );
+        if is_write_method
+            && let Some(name) = single_ident(&mc.receiver)
+            && let Some(p) = self.entry(&name)
+        {
+            let ok = method == "set" && mc.args.len() == 1 && is_int_literal(&mc.args[0]);
+            if !ok {
+                p.disqualified = true;
+            }
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+    fn visit_expr_path(&mut self, ep: &'ast syn::ExprPath) {
+        if let Some(name) = path_single_ident(ep) {
+            let depth = self.comparison_depth;
+            if let Some(p) = self.entry(&name)
+                && depth == 0
+            {
+                // Bare ident read outside a comparison — disqualifies.
+                p.disqualified = true;
+            }
+        }
+        syn::visit::visit_expr_path(self, ep);
+    }
+}
+
+/// Like `single_ident` but takes a borrowed `ExprPath` directly — used
+/// inside `FenceVisitor::visit_expr_path` where we already have the path.
+fn path_single_ident(ep: &syn::ExprPath) -> Option<String> {
+    if ep.path.segments.len() == 1 && ep.path.leading_colon.is_none() && ep.qself.is_none() {
+        Some(ep.path.segments[0].ident.to_string())
+    } else {
+        None
+    }
+}
+
+/// True when `expr` is `use_signal(|| <int-literal>)` — the only shape we
+/// recognise as "definitely an integer-typed signal" without a real type
+/// resolver. We accept the literal alone (`0`, `0u32`, `0i64`, `-1i32`).
+fn is_use_signal_int_init(expr: &syn::Expr) -> bool {
+    let syn::Expr::Call(c) = expr else {
+        return false;
+    };
+    let syn::Expr::Path(p) = &*c.func else {
+        return false;
+    };
+    if p.path
+        .segments
+        .last()
+        .map(|s| s.ident.to_string())
+        .as_deref()
+        != Some("use_signal")
+    {
+        return false;
+    }
+    // Argument should be a closure with an integer-literal body. Anything
+    // more complex (Vec::new(), String::new(), Option::None, ...) means
+    // we can't be sure of the type, so we skip.
+    let Some(arg) = c.args.first() else {
+        return false;
+    };
+    let syn::Expr::Closure(cl) = arg else {
+        return false;
+    };
+    is_int_literal(&cl.body)
+}
+
+/// True for `0`, `1`, `0u32`, `-5i32`, `(0)`, etc. We strip unary minus and
+/// parens so all the natural integer-literal-init forms count.
+fn is_int_literal(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(l) => matches!(l.lit, syn::Lit::Int(_)),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => is_int_literal(&u.expr),
+        syn::Expr::Paren(p) => is_int_literal(&p.expr),
+        _ => false,
+    }
+}
+
+/// Set of binding names that appear inside rsx interpolation. We
+/// conservatively scan token streams (same approach as `explain_signal_graph`)
+/// — a name showing up here means consumers care about its *value*, so the
+/// fence shape doesn't apply.
+fn rsx_interpolated_names(block: &syn::Block) -> std::collections::HashSet<String> {
+    use proc_macro2::TokenTree;
+    fn walk(ts: proc_macro2::TokenStream, hits: &mut std::collections::HashSet<String>) {
+        for tt in ts {
+            match tt {
+                TokenTree::Group(g) => walk(g.stream(), hits),
+                TokenTree::Ident(i) => {
+                    hits.insert(i.to_string());
+                }
+                TokenTree::Literal(lit) => {
+                    let s = lit.to_string();
+                    if let Some(inner) = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                        let bytes = inner.as_bytes();
+                        let mut i = 0;
+                        while i < bytes.len() {
+                            if bytes[i] == b'{' && (i + 1 >= bytes.len() || bytes[i + 1] != b'{') {
+                                let start = i + 1;
+                                let mut end = start;
+                                while end < bytes.len() && bytes[end] != b'}' && bytes[end] != b':'
+                                {
+                                    end += 1;
+                                }
+                                let token = &inner[start..end];
+                                let head = token.split(['.', '(', ' ']).next().unwrap_or("");
+                                if !head.is_empty() {
+                                    hits.insert(head.to_string());
+                                }
+                                while i < bytes.len() && bytes[i] != b'}' {
+                                    i += 1;
+                                }
+                            }
+                            i += 1;
+                        }
+                    }
+                }
+                TokenTree::Punct(_) => {}
+            }
+        }
+    }
+    struct RsxFinder {
+        hits: std::collections::HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for RsxFinder {
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            let is_rsx = m
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident == "rsx")
+                .unwrap_or(false);
+            if is_rsx {
+                walk(m.tokens.clone(), &mut self.hits);
+            }
+            syn::visit::visit_macro(self, m);
+        }
+    }
+    let mut f = RsxFinder {
+        hits: std::collections::HashSet::new(),
+    };
+    f.visit_block(block);
+    f.hits
+}
+
 /// Pre-scan a component body for `let X = use_signal(...)` bindings — the
 /// set of names whose reactive reads matter for the polling-future lint.
 /// Mirrors the scope inspector in `explain_signal_graph`, but lives here so
@@ -979,22 +1565,29 @@ impl<'a, 'ast> Visit<'ast> for PollingFutureVisitor<'a> {
         // The list covers tokio (`sleep`, `interval`), gloo-timers
         // (`TimeoutFuture::new`, `sleep`), async-std (`sleep`), and the
         // browser DOM globals (`set_interval`, `set_timeout`) used via
-        // `wasm-bindgen-futures`. We only need the path *tail* to match.
-        if self.in_future
-            && let Some(t) = tail.as_deref()
-            && matches!(
-                t,
-                "sleep"
-                    | "sleep_until"
-                    | "interval"
-                    | "interval_at"
-                    | "TimeoutFuture"
-                    | "Interval"
-                    | "set_interval"
-                    | "set_timeout"
-            )
-        {
-            self.saw_sleep = true;
+        // `wasm-bindgen-futures`. For the bare-fn forms we just match the
+        // path tail; for the `Type::new(...)` constructor form (Tokio
+        // `Interval::new`, gloo-timers `TimeoutFuture::new`) the tail is
+        // always `new`, so we also peek at the second-to-last segment.
+        if self.in_future {
+            if let Some(t) = tail.as_deref()
+                && matches!(
+                    t,
+                    "sleep"
+                        | "sleep_until"
+                        | "interval"
+                        | "interval_at"
+                        | "TimeoutFuture"
+                        | "Interval"
+                        | "set_interval"
+                        | "set_timeout"
+                )
+            {
+                self.saw_sleep = true;
+            }
+            if tail.as_deref() == Some("new") && is_timer_type_new(&e.func) {
+                self.saw_sleep = true;
+            }
         }
 
         // Reactive read via `signal()` — bare single-segment path call with
@@ -1025,6 +1618,26 @@ impl<'a, 'ast> Visit<'ast> for PollingFutureVisitor<'a> {
         }
         syn::visit::visit_expr_method_call(self, e);
     }
+}
+
+/// True when `expr` is a path-style call whose tail is `new` and whose
+/// preceding type segment names a known timer/interval type. Catches the
+/// `gloo_timers::future::TimeoutFuture::new(2000)` and `tokio::time::Interval::new(...)`
+/// constructors that the path-tail check alone misses (tail = "new"). We
+/// only look at the segment immediately before `new`, so `Foo::Bar::new`
+/// matches when `Bar` is one of the timer types — qualified or imported.
+fn is_timer_type_new(expr: &syn::Expr) -> bool {
+    let syn::Expr::Path(p) = expr else {
+        return false;
+    };
+    if p.path.segments.len() < 2 {
+        return false;
+    }
+    let ty = &p.path.segments[p.path.segments.len() - 2].ident;
+    matches!(
+        ty.to_string().as_str(),
+        "TimeoutFuture" | "Interval" | "IntervalStream"
+    )
 }
 
 /// Returns the ident name when `expr` is a bare single-segment path
@@ -1158,11 +1771,19 @@ mod hydration_tests {
                 "pub fn provide_user() {}\npub fn use_user() {}\n",
             ),
         ];
-        let triads = detect_context_signal_triads(&files);
+        let (triads, summary) = detect_context_signal_triads(&files);
         assert!(
             triads.is_empty(),
             "two paired modules is not a triad: {triads:?}"
         );
+        // Even when no triad is emitted, the summary surfaces what WAS
+        // detected — so callers can tell "below threshold" from "nothing
+        // matched" at a glance.
+        assert_eq!(summary.detected, 2);
+        assert_eq!(summary.threshold, 3);
+        let mut names = summary.names.clone();
+        names.sort();
+        assert_eq!(names, vec!["theme".to_string(), "user".to_string()]);
     }
 
     #[test]
@@ -1181,13 +1802,16 @@ mod hydration_tests {
                 "pub fn provide_locale() {}\npub fn use_locale() {}\n",
             ),
         ];
-        let triads = detect_context_signal_triads(&files);
+        let (triads, summary) = detect_context_signal_triads(&files);
         assert_eq!(triads.len(), 1, "expected one triad suggestion: {triads:?}");
         let names: Vec<&str> = triads[0].modules.iter().map(|m| m.name.as_str()).collect();
         assert!(names.contains(&"theme"));
         assert!(names.contains(&"user"));
         assert!(names.contains(&"locale"));
         assert!(triads[0].message.contains("Store"));
+        // Summary mirrors the suggestion: detected count and names match.
+        assert_eq!(summary.detected, 3);
+        assert_eq!(summary.threshold, 3);
     }
 
     #[test]
@@ -1204,11 +1828,13 @@ mod hydration_tests {
             parse_into_scanned("src/state/b.rs", "pub fn provide_b() {}\n"),
             parse_into_scanned("src/state/c.rs", "pub fn use_c() {}\n"),
         ];
-        let triads = detect_context_signal_triads(&files);
+        let (triads, summary) = detect_context_signal_triads(&files);
         assert!(
             triads.is_empty(),
             "lone halves don't form pairs: {triads:?}"
         );
+        assert_eq!(summary.detected, 1, "only `a` paired both halves");
+        assert_eq!(summary.names, vec!["a".to_string()]);
     }
 
     #[test]
@@ -1220,11 +1846,15 @@ mod hydration_tests {
             parse_into_scanned("src/state/b.rs", "fn provide_b() {}\nfn use_b() {}\n"),
             parse_into_scanned("src/state/c.rs", "fn provide_c() {}\nfn use_c() {}\n"),
         ];
-        let triads = detect_context_signal_triads(&files);
+        let (triads, summary) = detect_context_signal_triads(&files);
         assert!(
             triads.is_empty(),
             "private helpers aren't the public context-signal idiom: {triads:?}"
         );
+        // Summary should also report zero — the detector ignored the
+        // private fns entirely, didn't just suppress the suggestion.
+        assert_eq!(summary.detected, 0);
+        assert!(summary.names.is_empty());
     }
 
     #[test]
@@ -1655,6 +2285,63 @@ use_future(move || async move {
         );
     }
 
+    /// Standup's actual shape: the polling loop sleeps via
+    /// `gloo_timers::future::TimeoutFuture::new(2000).await`, not via a
+    /// bare `sleep()` helper. The path tail is `new`, so the original
+    /// timer-name match never fired — the lint silently passed even though
+    /// the body still reads a signal inside a polling loop. Guard with the
+    /// fully-qualified form so a regression that drops the second-to-last
+    /// segment check is caught.
+    #[test]
+    fn flags_polling_future_with_timeoutfuture_new() {
+        let issues = lint_polling_future(
+            r#"let mut local_lock = use_signal(|| 0u32);
+let mut cards = use_signal(|| Vec::<String>::new());
+use_future(move || async move {
+    loop {
+        let _ = local_lock();
+        cards.set(Vec::new());
+        gloo_timers::future::TimeoutFuture::new(2000).await;
+    }
+});"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "polling_future_reactive_read")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "TimeoutFuture::new should count as a sleep: {issues:?}"
+        );
+    }
+
+    /// Same shape with `tokio::time::Interval::new(...)` — the `Interval`
+    /// type's constructor also takes the `new` tail and the path-segment
+    /// check is the only thing that classifies it as a timer.
+    #[test]
+    fn flags_polling_future_with_interval_new() {
+        let issues = lint_polling_future(
+            r#"let mut tick = use_signal(|| 0u32);
+use_future(move || async move {
+    let mut iv = tokio::time::Interval::new(std::time::Duration::from_secs(1));
+    loop {
+        let _ = tick();
+        iv.tick().await;
+    }
+});"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "polling_future_reactive_read")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "Interval::new should count as a timer: {issues:?}"
+        );
+    }
+
     /// `.peek()` is the explicit escape hatch — using it for gating reads
     /// should NOT trigger the lint, because `.peek()` doesn't subscribe.
     #[test]
@@ -1739,6 +2426,233 @@ use_effect(move || {
             hits.len(),
             1,
             "expected one flag per use_effect: {issues:?}"
+        );
+    }
+
+    /// Drive `check_signal_many_writers` over a component fn body.
+    fn lint_many_writers(component_src: &str) -> Vec<SignalIssue> {
+        let src = format!("use dioxus::prelude::*;\n{component_src}\n");
+        let file: syn::File = syn::parse_str(&src).expect("test snippet parses");
+        let mut issues: Vec<SignalIssue> = Vec::new();
+        for item in &file.items {
+            let syn::Item::Fn(f) = item else { continue };
+            let bindings = collect_use_signal_bindings(&f.block);
+            check_signal_many_writers(f, Path::new("snippet.rs"), &bindings, &mut issues);
+        }
+        issues
+    }
+
+    /// Standup `BoardBody` shape: `cards` is written from a polling
+    /// `use_future` AND three named closures (logout/submit/commit). Four
+    /// distinct write sources — well past the 3-source threshold. The lint
+    /// names each writer in the message so the refactor target is obvious.
+    #[test]
+    fn flags_signal_written_from_four_sources() {
+        let issues = lint_many_writers(
+            r#"#[component]
+fn BoardBody() -> Element {
+    let mut cards = use_signal(|| Vec::<String>::new());
+    use_future(move || async move {
+        cards.set(Vec::new());
+    });
+    let logout = move |_| { cards.set(Vec::new()); };
+    let submit_card = move |t: String| { cards.with_mut(|c| c.push(t)); };
+    let commit_move = move |_| { cards.set(Vec::new()); };
+    let _ = (logout, submit_card, commit_move);
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_many_writers")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected one many-writers hit on `cards`: {issues:?}"
+        );
+        let msg = &hits[0].message;
+        assert!(msg.contains("`cards`"), "names the signal: {msg}");
+        assert!(
+            msg.contains("Store"),
+            "recommends the Store primitive: {msg}"
+        );
+        assert!(
+            msg.contains("logout") && msg.contains("submit_card") && msg.contains("commit_move"),
+            "lists each closure writer: {msg}"
+        );
+    }
+
+    /// Two writers is fine — the cutoff is three. A signal mutated from a
+    /// hook plus one event handler is the normal shape for most apps.
+    #[test]
+    fn ignores_signal_with_two_writers() {
+        let issues = lint_many_writers(
+            r#"#[component]
+fn Demo() -> Element {
+    let mut count = use_signal(|| 0u32);
+    use_effect(move || { count.set(0); });
+    let on_click = move |_| { count.set(count() + 1); };
+    let _ = on_click;
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_many_writers")
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "two writers is below the threshold: {hits:?}"
+        );
+    }
+
+    /// Multiple writes from a single closure don't multi-count — the
+    /// threshold is "distinct sources", not "distinct write sites".
+    #[test]
+    fn dedupes_multiple_writes_within_one_closure() {
+        let issues = lint_many_writers(
+            r#"#[component]
+fn Demo() -> Element {
+    let mut count = use_signal(|| 0u32);
+    let bump = move |_| {
+        count.set(1);
+        count.set(2);
+        count.set(3);
+    };
+    let _ = bump;
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_many_writers")
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "one closure with three writes is still ONE source: {hits:?}"
+        );
+    }
+
+    /// Drive `check_signal_used_as_fence` over a component fn body.
+    fn lint_fence(component_src: &str) -> Vec<SignalIssue> {
+        let src = format!("use dioxus::prelude::*;\n{component_src}\n");
+        let file: syn::File = syn::parse_str(&src).expect("test snippet parses");
+        let mut issues: Vec<SignalIssue> = Vec::new();
+        for item in &file.items {
+            let syn::Item::Fn(f) = item else { continue };
+            let bindings = collect_use_signal_bindings(&f.block);
+            check_signal_used_as_fence(f, Path::new("snippet.rs"), &bindings, &mut issues);
+        }
+        issues
+    }
+
+    /// Standup's `local_lock` shape: a `Signal<u32>` initialised to `0`,
+    /// bumped by `+= 1` from a handful of mutators, and only ever read in
+    /// `local_lock() == saved` comparisons. The runtime overhead of the
+    /// reactive subscription buys nothing here — it's a generation counter,
+    /// not state.
+    #[test]
+    fn flags_int_signal_used_purely_as_fence() {
+        let issues = lint_fence(
+            r#"#[component]
+fn BoardBody() -> Element {
+    let mut local_lock = use_signal(|| 0u32);
+    let bump_a = move |_| { local_lock += 1; };
+    let bump_b = move |_| { local_lock += 1; };
+    let check = move |saved: u32| {
+        if local_lock == saved { /* still fresh */ }
+    };
+    let _ = (bump_a, bump_b, check);
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_used_as_fence")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "fence shape should fire on local_lock: {issues:?}"
+        );
+        assert!(
+            hits[0].message.contains("Cell") || hits[0].message.contains("generation"),
+            "should recommend the lighter-weight replacement: {}",
+            hits[0].message
+        );
+    }
+
+    /// A signal read for its value (e.g. arithmetic, rsx interpolation, or
+    /// a non-comparison branch) is NOT a fence — callers care about the
+    /// number. Must not flag.
+    #[test]
+    fn ignores_int_signal_read_for_its_value() {
+        let issues = lint_fence(
+            r#"#[component]
+fn Demo() -> Element {
+    let mut count = use_signal(|| 0u32);
+    let bump = move |_| { count += 1; };
+    let _ = bump;
+    rsx!{ span { "{count}" } }
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_used_as_fence")
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "value shown in rsx — not a fence: {hits:?}"
+        );
+    }
+
+    /// Single bump → only one compound write — below the 2-write threshold.
+    /// The fence shape is about *repeated* sentinel bumps; one is too
+    /// little evidence.
+    #[test]
+    fn ignores_single_bump_int_signal() {
+        let issues = lint_fence(
+            r#"#[component]
+fn Demo() -> Element {
+    let mut tick = use_signal(|| 0u32);
+    let bump = move |_| { tick += 1; };
+    let check = move |saved: u32| { let _ = tick == saved; };
+    let _ = (bump, check);
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_used_as_fence")
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "one compound write isn't enough evidence: {hits:?}"
+        );
+    }
+
+    /// Non-integer init disqualifies: `Vec::new()` / `String::new()` are
+    /// out of scope for the fence lint regardless of the read/write pattern.
+    #[test]
+    fn ignores_non_integer_init() {
+        let issues = lint_fence(
+            r#"#[component]
+fn Demo() -> Element {
+    let mut items = use_signal(|| Vec::<u32>::new());
+    let a = move |_| { items.set(Vec::new()); };
+    let b = move |_| { items.set(Vec::new()); };
+    let _ = (a, b);
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_used_as_fence")
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "non-int init signal is out of scope: {hits:?}"
         );
     }
 }
