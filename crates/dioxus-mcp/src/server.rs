@@ -172,7 +172,20 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Run every project-wide lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`, `reinvented_widget`, `optimistic_lock_gate`) over the crate's `src/` tree and merge the results. Returns a markdown summary, per-lint issue counts (`issues_by_lint`), the raw report from each lint under its name, deduplicated `parse_errors`, and a `total_issues` count. `reinvented_widget` findings are hints — counted in `issues_by_lint` but not in `total_issues`. Use `include` / `exclude` to scope (e.g. `include: [\"check_rsx\", \"signal_lint\"]`), and `dead_component_roots` to mark extra components alive."
+        description = "Hint when a component hand-rolls a catalog widget via class-attribute conventions. Scans every `#[component] fn` rsx for `class: \"<literal>\"` strings and flags tokens that map to a catalog widget (`modal`/`dialog` → dialog, `tabs`/`tab-strip`/`tablist` → tabs, `accordion` → accordion, `popover` → popover, `tooltip` → tooltip, `calendar` → calendar, `datepicker`/`date-picker` → date_picker, `dropdown`/`dropdown-menu` → dropdown_menu, `toast`/`snackbar` → toast, `sidebar` → sidebar, `drawer` → sheet, `pagination` → pagination, `avatar` → avatar, `badge` → badge, `progress`/`progress-bar` → progress). Skips catalog wrapper files (`src/components/<catalog_name>/`). Dedupes per-component. All findings are `confidence: low` — class names are conventions, not contracts. Complements `reinvented_widget` (bare DOM tags + drag/drop) and `suggest_components` (the pre-write counterpart)."
+    )]
+    async fn components_audit(
+        &self,
+        Parameters(p): Parameters<tools::lints::components_audit::ComponentsAuditParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::components_audit::components_audit(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Run every project-wide lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`, `reinvented_widget`, `optimistic_lock_gate`, `components_audit`) over the crate's `src/` tree and merge the results. Returns a markdown summary, per-lint issue counts (`issues_by_lint`), the raw report from each lint under its name, deduplicated `parse_errors`, and a `total_issues` count. `reinvented_widget` and `components_audit` findings are hints — counted in `issues_by_lint` but not surfaced as errors. Use `include` / `exclude` to scope (e.g. `include: [\"check_rsx\", \"signal_lint\"]`), and `dead_component_roots` to mark extra components alive."
     )]
     async fn lint_project(
         &self,
@@ -449,9 +462,10 @@ impl ServerHandler for DioxusMcp {
                  - Project structure (what routes / components / server fns exist) -> \
                    route_map, project_index, project_tour, server_fn_call_graph.\n\
                  - Static analysis (dead code, prop drilling, signal/props lints, \
-                   reinvented widgets, optimistic-lock gates, asset audit, feature flags, \
-                   OpenAPI) -> dead_components, prop_drill, signal_lint, props_lint, \
-                   reinvented_widget, optimistic_lock_gate, asset_audit, audit_feature_flags, \
+                   reinvented widgets, optimistic-lock gates, hand-rolled catalog \
+                   class-shapes, asset audit, feature flags, OpenAPI) -> dead_components, \
+                   prop_drill, signal_lint, props_lint, reinvented_widget, \
+                   optimistic_lock_gate, components_audit, asset_audit, audit_feature_flags, \
                    openapi_spec, explain_signal_graph, lint_project.\n\
                  - Docs / canonical examples -> search_docs, find_example. RSX check -> \
                    check_rsx. Catalog widget prop / event surface -> describe_component.\n\

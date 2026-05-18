@@ -4,6 +4,7 @@
 //! aggregator that runs every lint in the suite and merges results.
 
 pub mod check_rsx;
+pub mod components_audit;
 pub mod lint_project;
 pub mod optimistic_lock_gate;
 pub mod props_lint;

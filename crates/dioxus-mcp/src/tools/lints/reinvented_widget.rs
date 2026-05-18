@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use syn::visit::Visit;
 
 use crate::state::State;
-use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
+use crate::tools::ast::{ParseError, collect_parse_errors, is_catalog_wrapper, walk_rs_files};
 use crate::tools::scaffold::crate_root;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -91,24 +91,6 @@ pub async fn reinvented_widget(
         findings,
         parse_errors: collect_parse_errors(&files),
     })
-}
-
-fn is_catalog_wrapper(path: &Path, src_root: &Path) -> bool {
-    let Ok(rel) = path.strip_prefix(src_root) else {
-        return false;
-    };
-    let mut comps = rel.components();
-    let Some(first) = comps.next() else {
-        return false;
-    };
-    if first.as_os_str() != "components" {
-        return false;
-    }
-    let Some(second) = comps.next() else {
-        return false;
-    };
-    let widget_name = second.as_os_str().to_string_lossy();
-    crate::tools::dsl::dx_component_names().any(|n| n == widget_name)
 }
 
 /// HTML elements whose direct catalog equivalent ships with the dx-components

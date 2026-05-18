@@ -516,6 +516,7 @@ mod tests {
             props_lint: None,
             reinvented_widget: None,
             optimistic_lock_gate: None,
+            components_audit: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -574,6 +575,7 @@ mod tests {
             props_lint: None,
             reinvented_widget: None,
             optimistic_lock_gate: None,
+            components_audit: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -629,6 +631,7 @@ mod tests {
             props_lint: None,
             reinvented_widget: None,
             optimistic_lock_gate: None,
+            components_audit: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc, true);

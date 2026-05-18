@@ -58,3 +58,26 @@ pub(crate) fn collect_parse_errors(files: &[ScannedFile]) -> Vec<ParseError> {
         })
         .collect()
 }
+
+/// Returns `true` when `path` lives under `src/components/<catalog_name>/...`
+/// — i.e. the file is part of a catalog wrapper installed via
+/// `dx components add`. Lints that flag "you reinvented a catalog widget"
+/// must skip these paths: the wrapper file IS the widget, and emitting the
+/// hand-rolled shape there is by definition correct.
+pub(crate) fn is_catalog_wrapper(path: &Path, src_root: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(src_root) else {
+        return false;
+    };
+    let mut comps = rel.components();
+    let Some(first) = comps.next() else {
+        return false;
+    };
+    if first.as_os_str() != "components" {
+        return false;
+    }
+    let Some(second) = comps.next() else {
+        return false;
+    };
+    let widget_name = second.as_os_str().to_string_lossy();
+    crate::tools::dsl::dx_component_names().any(|n| n == widget_name)
+}
