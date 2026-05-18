@@ -14,6 +14,17 @@ pub struct DslDoc {
     pub client_stores: Vec<DslClientStore>,
     #[serde(default)]
     pub view_states: Vec<DslViewState>,
+    /// Optimistic-lock staleness gates. Each entry emits
+    /// `src/state/{snake}_gate.rs` exposing a `{Pascal}Gate` struct
+    /// (`Signal<u32>` revision counter) with `bump()` / `matches(snap)` /
+    /// `snapshot()` helpers, plus the `provide_{snake}_gate()` /
+    /// `use_{snake}_gate()` context pair. Use this to extract the
+    /// snapshot+bump+compare pattern that the `optimistic_lock_gate` lint
+    /// flags — instead of hand-rolling `let mut local_lock = use_signal(|| 0u32);`
+    /// in a component, declare the gate here and call
+    /// `let mut gate = use_{snake}_gate(); let snap = gate.snapshot(); …`.
+    #[serde(default)]
+    pub staleness_gates: Vec<DslStalenessGate>,
     #[serde(default)]
     pub server_fns: Vec<DslServerFn>,
     #[serde(default)]
@@ -201,6 +212,29 @@ pub struct DslClientStore {
     /// false.
     #[serde(default)]
     pub auto_id: Option<bool>,
+}
+
+/// An optimistic-lock staleness gate, scaffolded as a tiny context-provided
+/// helper. Generates `src/state/{snake}_gate.rs` with:
+///   - `pub struct {Pascal}Gate { rev: Signal<u32> }`
+///   - `pub fn bump(&mut self) -> u32` — `+1` (wrapping), returns the new
+///     revision so callers can use it as the snapshot for a later
+///     `matches(snap)` check.
+///   - `pub fn matches(&self, snap: u32) -> bool` — equality compare
+///     against a previously-captured snapshot. Reactive (re-runs in
+///     `use_future` / `use_effect` bodies when `rev` bumps).
+///   - `pub fn snapshot(&self) -> u32` — non-reactive `.peek()` read for
+///     polling stubs that shouldn't subscribe.
+///   - `pub fn provide_{snake}_gate()` + `pub fn use_{snake}_gate()`
+///     context pair so consumers get the gate without prop-drilling.
+///
+/// Pair with the `optimistic_lock_gate` lint — hand-rolled instances of
+/// the same pattern continue to be flagged, and the suggested fix points
+/// at this primitive.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DslStalenessGate {
+    pub name: String,
 }
 
 /// In-screen view state (filter enum, sort key, search string, …) exposed

@@ -363,6 +363,18 @@ pub async fn execute_code(
         merge(&mut result, r);
     }
 
+    for g in &doc.staleness_gates {
+        // The gate file is `{snake}_gate.rs` — append the suffix to the
+        // leaf check so an idempotent re-scaffold finds the right file.
+        let gate_leaf =
+            leaf_for(&crate_root, "src/state", &format!("{}_gate", g.name));
+        if skip_or_record(&skip, &mut result, gate_leaf) {
+            continue;
+        }
+        let r = generate_staleness_gate(&crate_root, g)?;
+        merge(&mut result, r);
+    }
+
     for sf in &synth_server_fns {
         if skip_or_record(
             &skip,

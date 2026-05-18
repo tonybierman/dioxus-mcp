@@ -116,6 +116,21 @@ impl DioxusMcp {
     }
 
     #[tool(
+        description = "Flag a `Signal<T>` prop passed unchanged through 2 or more parents — the canonical \"missing `use_context_provider`\" shape that `prop_drill` only sees as a single-level passthrough at each hop. Walks `prop_drill`'s state_passthrough edges, keeps only those where the parent-side prop type is `Signal<T>` / `ReadSignal<T>` / `WriteSignal<T>`, and emits a finding for every two-hop forwarding chain (A → B → C). Returns the full chain, the signal type, and a copy-pasteable `use_context_provider` / `use_context::<…>()` fix snippet. Severity is `warning` — Signals flowing unmodified through multiple hops almost always want a context provider."
+    )]
+    async fn signal_drilled_2_levels(
+        &self,
+        Parameters(p): Parameters<
+            tools::lints::signal_drilled_2_levels::SignalDrilledParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::signal_drilled_2_levels::signal_drilled_2_levels(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "Lint Props structs: flag `#[derive(Props, ...)]` structs that don't also derive `PartialEq`. Dioxus needs PartialEq on Props for memoization."
     )]
     async fn props_lint(
@@ -166,6 +181,34 @@ impl DioxusMcp {
         Parameters(p): Parameters<tools::lints::optimistic_lock_gate::OptimisticLockGateParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::lints::optimistic_lock_gate::optimistic_lock_gate(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Flag `Set-Cookie` header values built inside server fns that lack the `Secure` attribute. Scans every string literal in a server-fn body (including `format!(...)` format strings and `HeaderValue::from_static(\"...\")` bare literals) and treats it as a cookie value when it contains at least one recognised cookie attribute (`HttpOnly`, `SameSite=`, `Path=`, `Max-Age=`, `Domain=`, `Expires=`, `Partitioned`). Findings: `SameSite=None` without `Secure` → severity `error` (browsers reject the cookie outright); any other cookie value missing `Secure` → severity `warning`. Suggests `Secure` + the `__Host-` prefix for session cookies."
+    )]
+    async fn insecure_set_cookie(
+        &self,
+        Parameters(p): Parameters<tools::lints::insecure_set_cookie::InsecureSetCookieParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::insecure_set_cookie::insecure_set_cookie(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Flag a `static <MAP>: Lazy<Mutex<HashMap<…>>>` (or `Lazy<RwLock<…>>` / `Lazy<…<BTreeMap<…>>>` / `OnceLock<…<DashMap<…>>>`) that server fns insert into but never evict from. Walks every `#[server]` / `#[get/post/put/delete/patch]` body, accumulates `.insert(...)` sites per static binding, and emits an `info`-severity finding when no `.retain()` / `.remove()` / `.clear()` / `.drain()` / `.extract_if()` call is reachable from any server fn. Long-running servers will accumulate entries forever — the lint nudges towards a TTL sweep or a TTL-aware map crate (`dashmap` + `mini-moka` is the canonical drop-in). Many app-internal caches are deliberately append-only, so the lint is a reviewer hint, not a hard error."
+    )]
+    async fn presence_map_unbounded(
+        &self,
+        Parameters(p): Parameters<
+            tools::lints::presence_map_unbounded::PresenceMapUnboundedParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::presence_map_unbounded::presence_map_unbounded(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }

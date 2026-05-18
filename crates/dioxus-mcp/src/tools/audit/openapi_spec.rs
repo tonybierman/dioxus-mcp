@@ -8,7 +8,9 @@ use serde_json::{Map, Value, json};
 
 use crate::state::State;
 use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
-use crate::tools::inspect::project_index::{ProjectIndexParams, ServerFnEntry, project_index};
+use crate::tools::inspect::project_index::{
+    ProjectIndexParams, ServerFnEntry, is_cookie_arg, project_index,
+};
 use crate::tools::inspect::route_map::{RouteEntry, RouteMapParams, route_map};
 use crate::tools::scaffold::{crate_root, has_derive};
 use crate::tools::tighten_type;
@@ -385,21 +387,13 @@ fn server_fn_path_item(
     Value::Object(item)
 }
 
-/// True when the server-fn signature includes a Dioxus auth-extractor arg.
-/// We accept either shape: a bare `cookies` arg name (the convention the DSL
-/// emits) or any arg whose type stringifies to mention both `TypedHeader` and
-/// `Cookie` (the canonical type when users hand-write the extractor with a
-/// non-`cookies` ident, e.g. `let session: TypedHeader<Cookie>`).
+/// True when the server fn declares a Dioxus auth-extractor — either in the
+/// fn signature (legacy `#[server]` shape) or inside the verb-macro attribute
+/// (`#[post("/api/x", cookies: TypedHeader<Cookie>)]`, the canonical
+/// 0.7-fullstack shape). Both surfaces are checked so attribute-style
+/// extractors stop reading as anonymous.
 fn has_cookie_extractor(sf: &ServerFnEntry) -> bool {
-    sf.args.iter().any(is_cookie_arg)
-}
-
-fn is_cookie_arg(a: &crate::tools::inspect::project_index::ServerArg) -> bool {
-    if a.name == "cookies" {
-        return true;
-    }
-    let ty = a.ty.as_str();
-    ty.contains("TypedHeader") && ty.contains("Cookie")
+    sf.is_cookie_gated()
 }
 
 fn route_path_item(r: &RouteEntry) -> (String, Value) {
@@ -973,6 +967,7 @@ mod tests {
             server_name: None,
             route_path: None,
             args: Vec::new(),
+            attr_args: Vec::new(),
             return_type: "Result<Option<String>, ServerFnError>".into(),
         };
         let mut resolver = TypeResolver::default();
@@ -1026,6 +1021,7 @@ mod tests {
                 name: "cookies".into(),
                 ty: "TypedHeader<headers::Cookie>".into(),
             }],
+            attr_args: Vec::new(),
             return_type: "Result<String, ServerFnError>".into(),
         };
         let mut resolver = TypeResolver::default();
@@ -1094,6 +1090,7 @@ mod tests {
                     ty: "String".into(),
                 },
             ],
+            attr_args: Vec::new(),
             return_type: "Result<u32, ServerFnError>".into(),
         };
         let mut resolver = TypeResolver::default();
@@ -1120,6 +1117,67 @@ mod tests {
         );
     }
 
+    /// iter03's canonical shape: the cookie extractor lives ONLY inside
+    /// the verb-macro attribute (`#[post("/api/cards/create", cookies: …)]`),
+    /// not in the fn signature. Before the fix the operation came out
+    /// anonymous — no cookie parameter, no security ref — so generated
+    /// clients silently dropped the session cookie. The fix routes the
+    /// attribute extractor list through `attr_args`; `is_cookie_gated()`
+    /// checks both surfaces, so the spec now declares the cookie correctly.
+    #[test]
+    fn attribute_style_cookie_extractor_emits_cookie_parameter() {
+        use crate::tools::inspect::project_index::ServerArg;
+        let sf = ServerFnEntry {
+            file: std::path::PathBuf::from("src/server/cards.rs"),
+            line: 12,
+            name: "create_card".into(),
+            method: Some("post".into()),
+            server_name: None,
+            route_path: Some("/api/cards/create".into()),
+            args: vec![ServerArg {
+                name: "title".into(),
+                ty: "String".into(),
+            }],
+            attr_args: vec![ServerArg {
+                name: "cookies".into(),
+                ty: "axum_extra :: TypedHeader < axum_extra :: headers :: Cookie >".into(),
+            }],
+            return_type: "Result<u32, ServerFnError>".into(),
+        };
+        let mut resolver = TypeResolver::default();
+        let path_item = server_fn_path_item(&sf, &mut resolver, "session_id");
+
+        let op = path_item.get("post").expect("post op present");
+        let params = op
+            .get("parameters")
+            .and_then(|v| v.as_array())
+            .expect("attribute-style cookie extractor must surface as parameters[]");
+        assert_eq!(params.len(), 1, "exactly one cookie parameter: {params:?}");
+        assert_eq!(params[0].get("in"), Some(&json!("cookie")));
+        assert_eq!(params[0].get("name"), Some(&json!("session_id")));
+
+        let sec = op
+            .get("security")
+            .and_then(|v| v.as_array())
+            .expect("security ref must be present so generators send the cookie");
+        assert!(sec[0].get("sessionCookie").is_some());
+
+        // And the request body must NOT pick up the cookie (it was only ever
+        // in attr_args, so this would only break if someone wires attr_args
+        // into the body-property loop).
+        let body_props = path_item
+            .get("post")
+            .and_then(|v| v.get("requestBody"))
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.get("application/json"))
+            .and_then(|v| v.get("schema"))
+            .and_then(|v| v.get("properties"))
+            .and_then(|v| v.as_object())
+            .expect("body properties present");
+        assert!(body_props.contains_key("title"));
+        assert!(!body_props.contains_key("cookies"));
+    }
+
     /// Counter-test: a plain `Result<String, ServerFnError>` keeps the
     /// non-nullable schema. Without this, an over-eager wrap would mark
     /// every success schema nullable.
@@ -1133,6 +1191,7 @@ mod tests {
             server_name: None,
             route_path: None,
             args: Vec::new(),
+            attr_args: Vec::new(),
             return_type: "Result<String, ServerFnError>".into(),
         };
         let mut resolver = TypeResolver::default();

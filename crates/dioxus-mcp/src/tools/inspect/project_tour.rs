@@ -482,6 +482,7 @@ mod tests {
                 "reinvented_widget".into(),
             ],
             total_issues: 6,
+            headline: Vec::new(),
             issues_by_lint: vec![
                 LintCount {
                     lint: "check_rsx".into(),
@@ -513,9 +514,13 @@ mod tests {
             dead_components: None,
             prop_drill: None,
             signal_lint: None,
+            signal_drilled_2_levels: None,
             props_lint: None,
             reinvented_widget: None,
             optimistic_lock_gate: None,
+            server_state_blocking_locks: None,
+            presence_map_unbounded: None,
+            insecure_set_cookie: None,
             components_audit: None,
         };
         let trunc = TruncationFlags::default();
@@ -563,6 +568,7 @@ mod tests {
             summary: String::new(),
             lints_run: vec!["signal_lint".into()],
             total_issues: 0,
+            headline: Vec::new(),
             issues_by_lint: vec![LintCount {
                 lint: "signal_lint".into(),
                 issues: 0,
@@ -572,9 +578,13 @@ mod tests {
             dead_components: None,
             prop_drill: None,
             signal_lint: None,
+            signal_drilled_2_levels: None,
             props_lint: None,
             reinvented_widget: None,
             optimistic_lock_gate: None,
+            server_state_blocking_locks: None,
+            presence_map_unbounded: None,
+            insecure_set_cookie: None,
             components_audit: None,
         };
         let trunc = TruncationFlags::default();
@@ -619,6 +629,7 @@ mod tests {
             summary: String::new(),
             lints_run: vec!["signal_lint".into()],
             total_issues: 0,
+            headline: Vec::new(),
             issues_by_lint: vec![LintCount {
                 lint: "signal_lint".into(),
                 issues: 0,
@@ -628,9 +639,13 @@ mod tests {
             dead_components: None,
             prop_drill: None,
             signal_lint: None,
+            signal_drilled_2_levels: None,
             props_lint: None,
             reinvented_widget: None,
             optimistic_lock_gate: None,
+            server_state_blocking_locks: None,
+            presence_map_unbounded: None,
+            insecure_set_cookie: None,
             components_audit: None,
         };
         let trunc = TruncationFlags::default();

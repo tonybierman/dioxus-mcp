@@ -28,6 +28,22 @@ pub struct ExplainSignalGraphParams {
     pub project_root: Option<String>,
 }
 
+/// One reactive input to a node, with its origin. Surfaced under
+/// `SignalNode.reads_with_source` so the "what makes this re-run?" view
+/// covers both kinds of reactive read without callers having to merge
+/// `reads` and `context_signals` themselves.
+#[derive(Debug, Serialize, Clone)]
+pub struct SignalRead {
+    pub name: String,
+    /// `"local"` for reads of an in-component `use_signal` /
+    /// `use_memo` / `use_resource` / `use_future` / `use_callback` binding
+    /// the analyser tracked as a first-class node. `"context"` for reads of
+    /// a `use_*`-bound helper whose return type couldn't be resolved
+    /// statically (typically `use_context::<Signal<T>>()`) — still reactive
+    /// when the underlying Signal is written, just opaque to the walker.
+    pub source: &'static str,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct SignalNode {
     pub name: String,
@@ -53,6 +69,15 @@ pub struct SignalNode {
     /// "what re-triggers this closure?" want subscription points, not
     /// dependency-free emissions.
     pub reads: Vec<String>,
+    /// Combined reactive-input view — `reads` plus every `context_signals`
+    /// entry, each tagged with its origin. Use this when answering "what
+    /// makes this node re-run?": local `use_signal` reads (`source:
+    /// "local"`) and context-provided Signals (`source: "context"`) both
+    /// trigger re-runs, but the original `reads` list omitted the latter
+    /// and was easy to misread as "this captures nothing." Older consumers
+    /// can keep using `reads` / `context_signals` separately.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads_with_source: Vec<SignalRead>,
     /// Signals (other `SignalNode` names) this node's body *writes* — via
     /// `sig.set(…)`, `sig.write()`, `sig.with_mut(…)`, `sig.replace(…)`,
     /// `sig.swap(…)`, `sig.take()`, `sig.set_silent(…)`, `sig = …`, or
@@ -265,11 +290,13 @@ fn analyze_component_body(block: &syn::Block) -> (Vec<SignalNode>, Vec<String>) 
     for (binding_name, kind, line, expr) in pending {
         let (reads, writes) = collect_reads_writes(expr, &known_bindings);
         let context_signals = collect_known_references(expr, &context_bindings);
+        let reads_with_source = merge_reads_with_source(&reads, &context_signals);
         nodes.push(SignalNode {
             name: binding_name,
             kind: kind.into(),
             line,
             reads,
+            reads_with_source,
             writes,
             read_by: Vec::new(),
             written_by: Vec::new(),
@@ -292,11 +319,13 @@ fn analyze_component_body(block: &syn::Block) -> (Vec<SignalNode>, Vec<String>) 
             continue;
         }
         let context_signals = collect_known_references(expr, &context_bindings);
+        let reads_with_source = merge_reads_with_source(&reads, &context_signals);
         nodes.push(SignalNode {
             name: closure_name,
             kind: "closure".into(),
             line,
             reads,
+            reads_with_source,
             writes,
             read_by: Vec::new(),
             written_by: Vec::new(),
@@ -780,12 +809,54 @@ fn is_compound_assign(op: &syn::BinOp) -> bool {
 fn lint_signal_graph(nodes: &[SignalNode]) -> Vec<String> {
     let mut out = Vec::new();
     for n in nodes {
-        if (n.kind == "memo" || n.kind == "effect") && n.reads.is_empty() {
-            out.push(format!(
-                "`{}` is a {} that captures no other signals — it will never re-run on state change",
-                n.name, n.kind
-            ));
+        let no_local_reads = n.reads.is_empty();
+        let has_context_reads = !n.context_signals.is_empty();
+        if (n.kind == "memo" || n.kind == "effect") && no_local_reads {
+            if has_context_reads {
+                // Context-provided Signals (`use_context::<Signal<T>>()` and
+                // friends) ARE reactive — reading one in an effect re-runs the
+                // effect when the underlying Signal is written. Without this
+                // branch we'd emit "never re-runs" on every protected-route
+                // effect that consults `session`. Surface what we know
+                // instead of pretending we know nothing.
+                out.push(format!(
+                    "`{}` is a {} that captures only context signals ({}) — re-runs when those change. Static analysis can't follow `use_context::<…>()` into a concrete Signal, so the regular `reads` view stays empty.",
+                    n.name,
+                    n.kind,
+                    n.context_signals
+                        .iter()
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ));
+            } else {
+                out.push(format!(
+                    "`{}` is a {} that captures no other signals — it will never re-run on state change",
+                    n.name, n.kind
+                ));
+            }
         }
+    }
+    out
+}
+
+/// Merge `reads` (signals the walker resolved to first-class nodes) and
+/// `context_signals` (unresolved `use_*` helpers — typically `use_context::
+/// <Signal<T>>()` returns) into a single list with each entry tagged by
+/// its origin. Local reads first (stable order); context reads next.
+fn merge_reads_with_source(reads: &[String], context_signals: &[String]) -> Vec<SignalRead> {
+    let mut out: Vec<SignalRead> = reads
+        .iter()
+        .map(|n| SignalRead {
+            name: n.clone(),
+            source: "local",
+        })
+        .collect();
+    for ctx in context_signals {
+        out.push(SignalRead {
+            name: ctx.clone(),
+            source: "context",
+        });
     }
     out
 }
@@ -1333,5 +1404,142 @@ fn App() -> Element {
         let cards = nodes.iter().find(|n| n.name == "cards").unwrap();
         assert!(cards.reads.is_empty(), "leaf signals have no reads");
         assert_eq!(cards.read_by, vec!["count".to_string()]);
+    }
+
+    /// dioxus_standup's `Protected` uses a `use_context::<Signal<Session>>()`
+    /// binding inside `use_effect`. Before the fix the lint emitted
+    /// "captures no other signals — will never re-run" because the walker
+    /// can't resolve the context binding into a tracked node. The session
+    /// IS reactive — reading it re-runs the effect on writes — so the
+    /// warning was just wrong. With context_signals populated, the lint
+    /// rephrases instead of suppressing the message entirely.
+    #[test]
+    fn no_never_re_run_warning_when_context_signals_present() {
+        let file = syn::parse_file(
+            r#"
+#[component]
+fn Protected() -> Element {
+    let session = use_context::<Signal<Session>>();
+    use_effect(move || {
+        let _ = session.read();
+    });
+    rsx!{}
+}
+"#,
+        )
+        .unwrap();
+        let item = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                syn::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let (nodes, _) = analyze_component_body(&item.block);
+        let warnings = lint_signal_graph(&nodes);
+        // No warning may say "will never re-run on state change" — that's
+        // the old phrasing the fix targets.
+        assert!(
+            warnings.iter().all(|w| !w.contains("will never re-run")),
+            "context-only effects must not be flagged as dead: {warnings:?}",
+        );
+        // And the rephrased message should mention the context source.
+        let effect_msg = warnings
+            .iter()
+            .find(|w| w.contains("captures only context signals"))
+            .expect("rephrased warning surfaces context dependency");
+        assert!(
+            effect_msg.contains("`session`"),
+            "rephrased message names the context binding: {effect_msg}",
+        );
+    }
+
+    /// Counter-test: a truly dependency-free effect (no local reads, no
+    /// context_signals either) still gets the old warning. Without this we
+    /// could regress to silent dead effects.
+    #[test]
+    fn empty_effect_with_no_context_still_warns() {
+        let file = syn::parse_file(
+            r#"
+#[component]
+fn Demo() -> Element {
+    use_effect(move || {
+        let _ = 1 + 1;
+    });
+    rsx!{}
+}
+"#,
+        )
+        .unwrap();
+        let item = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                syn::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let (nodes, _) = analyze_component_body(&item.block);
+        let warnings = lint_signal_graph(&nodes);
+        assert!(
+            warnings.iter().any(|w| w.contains("will never re-run")),
+            "dependency-free effect must still warn: {warnings:?}",
+        );
+    }
+
+    /// `reads_with_source` collapses `reads` + `context_signals` into a
+    /// single source-tagged list. Pins the encoding so consumers can rely
+    /// on `{name, source}` shape instead of having to merge the two fields
+    /// themselves.
+    #[test]
+    fn reads_with_source_merges_local_and_context() {
+        let file = syn::parse_file(
+            r#"
+#[component]
+fn Demo() -> Element {
+    let cards = use_signal(|| Vec::<String>::new());
+    let session = use_context::<Signal<Session>>();
+    let m = use_memo(move || {
+        let _ = cards.read();
+        let _ = session.read();
+        0u32
+    });
+    let _ = m;
+    rsx!{}
+}
+"#,
+        )
+        .unwrap();
+        let item = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                syn::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let (nodes, _) = analyze_component_body(&item.block);
+        let memo = nodes.iter().find(|n| n.name == "m").expect("memo present");
+        let local: Vec<&str> = memo
+            .reads_with_source
+            .iter()
+            .filter(|r| r.source == "local")
+            .map(|r| r.name.as_str())
+            .collect();
+        let ctx: Vec<&str> = memo
+            .reads_with_source
+            .iter()
+            .filter(|r| r.source == "context")
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(
+            local.contains(&"cards"),
+            "local reads should include cards: {local:?}",
+        );
+        assert!(
+            ctx.contains(&"session"),
+            "context reads should include session: {ctx:?}",
+        );
     }
 }

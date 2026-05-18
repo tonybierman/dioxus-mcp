@@ -50,12 +50,54 @@ pub struct ServerFnSummary {
 
 /// Structured directive a caller can act on programmatically. Used in place
 /// of (or alongside) the freeform `notes` strings so a tool-using loop can
-/// route to the right follow-up without parsing prose. `tool` names another
-/// MCP tool to invoke; `reason` is a short paste-into-PR explanation.
+/// route to the right follow-up without parsing prose.
+///
+/// Exactly one of `tool` and `command` is populated per entry:
+///   - `tool`: the name of another MCP tool the loop can invoke (e.g.
+///     `verify_install`). The caller can branch on this field directly.
+///   - `command`: a shell command the user needs to run themselves
+///     (e.g. `cargo add dioxus-mcp-probe`). Not an MCP tool — the loop
+///     should surface this as instructions, not try to dispatch it.
+///
+/// Older shapes mixed shell hints into `tool:` (e.g. `tool: "cargo add
+/// dioxus-mcp-probe"`). Callers that read both fields and treat
+/// `command:` entries as user-instructions will keep working when those
+/// move to the new field; callers that only read `tool:` will see the
+/// new entries as empty `tool` and ignore them — strictly better than
+/// dispatching `cargo add` as an MCP tool name.
 #[derive(Debug, Serialize)]
 pub struct NextStep {
-    pub tool: String,
+    /// Name of an MCP tool the loop can invoke, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Shell command for the user to run, when there's no MCP tool that
+    /// performs the action (e.g. `cargo add <crate>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     pub reason: String,
+}
+
+impl NextStep {
+    /// Build a tool-style next step. Use this for MCP tools the loop can
+    /// dispatch (`verify_install`, `lint_project`, …).
+    pub fn tool(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            tool: Some(name.into()),
+            command: None,
+            reason: reason.into(),
+        }
+    }
+
+    /// Build a shell-command next step. Use this for actions that need the
+    /// user to run a CLI command outside MCP (`cargo add …`,
+    /// `rustup target add …`).
+    pub fn command(cmd: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            tool: None,
+            command: Some(cmd.into()),
+            reason: reason.into(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -101,17 +143,17 @@ pub async fn server_fn_summary(
         // instructions). We don't conflate them so the caller can skip the
         // second when the first reports success.
         let next_steps = vec![
-            NextStep {
-                tool: "verify_install".into(),
-                reason: format!(
+            NextStep::tool(
+                "verify_install",
+                format!(
                     "no probe log at {} — confirm the probe crate is in Cargo.toml and `dioxus_mcp_probe::install()` is called in `main()` before running the app",
                     live_path.display(),
                 ),
-            },
-            NextStep {
-                tool: "cargo add dioxus-mcp-probe".into(),
-                reason: "if `verify_install` reports the probe crate is absent, add it (run-only step; no MCP tool wraps `cargo add`)".into(),
-            },
+            ),
+            NextStep::command(
+                "cargo add dioxus-mcp-probe",
+                "if `verify_install` reports the probe crate is absent, run this to install it (no MCP tool wraps `cargo add`)",
+            ),
         ];
         return Ok(ServerFnSummaryReport {
             summaries: Vec::new(),
@@ -292,4 +334,39 @@ fn duration_from_iso(start: &str, end: &str) -> Option<u64> {
         return None;
     }
     Some(dur.whole_microseconds() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tool-style next steps serialize with `tool:` populated and no
+    /// `command:`. Loop dispatchers branch on `tool:` to route the
+    /// follow-up to the right MCP endpoint.
+    #[test]
+    fn next_step_tool_constructor_only_populates_tool() {
+        let step = NextStep::tool("verify_install", "confirm probe install");
+        let json = serde_json::to_value(&step).unwrap();
+        assert_eq!(json["tool"], "verify_install");
+        assert!(
+            json.get("command").is_none(),
+            "tool-style steps omit `command:`: {json}",
+        );
+        assert_eq!(json["reason"], "confirm probe install");
+    }
+
+    /// Shell-command next steps serialize with `command:` populated and
+    /// no `tool:`. Callers that only handle `tool:` will skip these, which
+    /// is exactly right — there's no MCP tool that wraps `cargo add`.
+    #[test]
+    fn next_step_command_constructor_only_populates_command() {
+        let step = NextStep::command("cargo add dioxus-mcp-probe", "install probe crate");
+        let json = serde_json::to_value(&step).unwrap();
+        assert_eq!(json["command"], "cargo add dioxus-mcp-probe");
+        assert!(
+            json.get("tool").is_none(),
+            "command-style steps omit `tool:`: {json}",
+        );
+        assert_eq!(json["reason"], "install probe crate");
+    }
 }

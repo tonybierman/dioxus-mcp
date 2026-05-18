@@ -1,7 +1,8 @@
 //! Whole-project lint composite. Runs every lint endpoint
 //! (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`,
-//! `reinvented_widget`, `optimistic_lock_gate`, `components_audit`) over
-//! the crate's `src/` tree and merges the results into one report.
+//! `reinvented_widget`, `optimistic_lock_gate`, `server_state_blocking_locks`,
+//! `components_audit`) over the crate's `src/` tree and merges the results
+//! into one report.
 //!
 //! Designed as a single entry point so callers don't have to discover the
 //! individual lints. Use `include` / `exclude` to scope the run.
@@ -22,9 +23,13 @@ const ALL_LINTS: &[&str] = &[
     "dead_components",
     "prop_drill",
     "signal_lint",
+    "signal_drilled_2_levels",
     "props_lint",
     "reinvented_widget",
     "optimistic_lock_gate",
+    "server_state_blocking_locks",
+    "presence_map_unbounded",
+    "insecure_set_cookie",
     "components_audit",
 ];
 
@@ -33,13 +38,13 @@ pub struct LintProjectParams {
     /// Subset of lints to run. Defaults to every lint:
     /// `check_rsx`, `dead_components`, `prop_drill`, `signal_lint`,
     /// `props_lint`, `reinvented_widget`, `optimistic_lock_gate`,
-    /// `components_audit`.
+    /// `server_state_blocking_locks`, `components_audit`.
     #[serde(default)]
     pub include: Option<Vec<String>>,
     /// Lints to skip (applied after `include`). Same valid names as `include`:
     /// `check_rsx`, `dead_components`, `prop_drill`, `signal_lint`,
     /// `props_lint`, `reinvented_widget`, `optimistic_lock_gate`,
-    /// `components_audit`.
+    /// `server_state_blocking_locks`, `components_audit`.
     #[serde(default)]
     pub exclude: Option<Vec<String>>,
     /// Optional roots forwarded to `dead_components` (extra component names to
@@ -61,6 +66,15 @@ pub struct LintProjectReport {
     pub total_issues: usize,
     /// Per-lint issue counts (in `lints_run` order).
     pub issues_by_lint: Vec<LintCount>,
+    /// Top findings rolled up by `(lint, code, severity)` and sorted by
+    /// severity descending (`error` > `warning` > `info`). Lets callers
+    /// pick the highest-leverage fixes without parsing every lint's body.
+    /// When findings carry no explicit severity, the lint's default tier
+    /// is used (`check_rsx` → `error`; `prop_drill` → mix of `info` /
+    /// `warning`; `reinvented_widget` / `components_audit` → hint, mapped
+    /// to `info`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headline: Vec<HeadlineEntry>,
     /// Files that failed to parse during any lint pass. Deduplicated.
     pub parse_errors: Vec<Value>,
     /// Raw report from each lint, present iff that lint ran. Shape matches the
@@ -74,11 +88,19 @@ pub struct LintProjectReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal_lint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_drilled_2_levels: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub props_lint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reinvented_widget: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optimistic_lock_gate: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_state_blocking_locks: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_map_unbounded: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insecure_set_cookie: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components_audit: Option<Value>,
 }
@@ -87,6 +109,23 @@ pub struct LintProjectReport {
 pub struct LintCount {
     pub lint: String,
     pub issues: usize,
+}
+
+/// One row in the severity-rollup table. Grouping by `(lint, code,
+/// severity)` keeps the row count bounded — a 17-issue project might land
+/// 4-6 rows — and gives the caller "top-3 fixes" without per-finding
+/// parsing.
+#[derive(Debug, Serialize, Clone)]
+pub struct HeadlineEntry {
+    pub lint: String,
+    /// Stable finding code from the underlying lint (e.g.
+    /// `optimistic_lock_gate`, `state_passthrough`, `unset_secure`).
+    /// `None` when the lint emits one finding-shape per issue and doesn't
+    /// distinguish further.
+    pub code: Option<String>,
+    /// `error` | `warning` | `info`. Higher tiers sort first.
+    pub severity: &'static str,
+    pub count: usize,
 }
 
 pub async fn lint_project(
@@ -225,6 +264,26 @@ pub async fn lint_project(
         report.signal_lint = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
+    if want("signal_drilled_2_levels") {
+        let r = crate::tools::lints::signal_drilled_2_levels::signal_drilled_2_levels(
+            state,
+            crate::tools::lints::signal_drilled_2_levels::SignalDrilledParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("signal_drilled_2_levels".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "signal_drilled_2_levels".into(),
+            issues: count,
+        });
+        report.signal_drilled_2_levels = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
     if want("props_lint") {
         let r = crate::tools::lints::props_lint::props_lint(
             state,
@@ -285,6 +344,67 @@ pub async fn lint_project(
         report.optimistic_lock_gate = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
+    if want("server_state_blocking_locks") {
+        let r = crate::tools::lints::server_state_blocking_locks::server_state_blocking_locks(
+            state,
+            crate::tools::lints::server_state_blocking_locks::ServerStateBlockingLocksParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("server_state_blocking_locks".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "server_state_blocking_locks".into(),
+            issues: count,
+        });
+        report.server_state_blocking_locks =
+            Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("presence_map_unbounded") {
+        let r = crate::tools::lints::presence_map_unbounded::presence_map_unbounded(
+            state,
+            crate::tools::lints::presence_map_unbounded::PresenceMapUnboundedParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("presence_map_unbounded".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "presence_map_unbounded".into(),
+            issues: count,
+        });
+        report.presence_map_unbounded = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("insecure_set_cookie") {
+        let r = crate::tools::lints::insecure_set_cookie::insecure_set_cookie(
+            state,
+            crate::tools::lints::insecure_set_cookie::InsecureSetCookieParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("insecure_set_cookie".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "insecure_set_cookie".into(),
+            issues: count,
+        });
+        report.insecure_set_cookie = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
     if want("components_audit") {
         let r = crate::tools::lints::components_audit::components_audit(
             state,
@@ -308,9 +428,229 @@ pub async fn lint_project(
     // Sum from `issues_by_lint` instead of accumulating per-lint, so adding a
     // new lint can't silently drop its count from the headline number.
     report.total_issues = report.issues_by_lint.iter().map(|c| c.issues).sum();
+    report.headline = build_headline(&report);
     report.parse_errors = dedup_parse_errors(parse_errors);
     report.summary = render_summary(&report);
     Ok(report)
+}
+
+/// Walk every embedded per-lint report and roll findings up to
+/// `(lint, code, severity, count)`. Sorting is severity descending then
+/// count descending, so the first row is always the highest-leverage fix.
+///
+/// We bucket lints into three groups based on their finding shape:
+///   1. `findings[]` carrying explicit `severity` + `code`. We use them
+///      verbatim (e.g. `signal_drilled_2_levels`, `insecure_set_cookie`,
+///      `components_audit`, `presence_map_unbounded`).
+///   2. `issues[]` carrying explicit `code` but no severity field. We
+///      assign the lint's default tier — `check_rsx` issues are always
+///      `error`; `signal_lint` / `props_lint` are `warning`.
+///   3. `parents[].passthroughs[]` (only `prop_drill`). We group by
+///      `kind` (state_passthrough vs callback_passthrough) and respect
+///      the per-passthrough `severity` field.
+/// Anything else (`dead_components.dead[]`) lands as a single
+/// `severity: "warning"` bucket using the lint name as code.
+fn build_headline(report: &LintProjectReport) -> Vec<HeadlineEntry> {
+    use std::collections::HashMap;
+
+    let mut buckets: HashMap<(String, Option<String>, &'static str), usize> = HashMap::new();
+    let mut bump = |lint: &str, code: Option<String>, severity: &'static str, n: usize| {
+        if n == 0 {
+            return;
+        }
+        *buckets
+            .entry((lint.to_string(), code, severity))
+            .or_insert(0) += n;
+    };
+
+    if let Some(v) = &report.check_rsx
+        && let Some(arr) = v.get("issues").and_then(|x| x.as_array())
+    {
+        for issue in arr {
+            let code = issue
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            bump("check_rsx", code, "error", 1);
+        }
+    }
+    if let Some(v) = &report.dead_components
+        && let Some(arr) = v.get("dead").and_then(|x| x.as_array())
+    {
+        bump("dead_components", None, "warning", arr.len());
+    }
+    if let Some(v) = &report.prop_drill
+        && let Some(parents) = v.get("parents").and_then(|x| x.as_array())
+    {
+        for parent in parents {
+            let Some(pts) = parent.get("passthroughs").and_then(|x| x.as_array()) else {
+                continue;
+            };
+            for pt in pts {
+                let kind = pt
+                    .get("kind")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("state_passthrough")
+                    .to_string();
+                let sev = match pt.get("severity").and_then(|x| x.as_str()) {
+                    Some("error") => "error",
+                    Some("info") => "info",
+                    _ => "warning",
+                };
+                bump("prop_drill", Some(kind), sev, 1);
+            }
+        }
+    }
+    if let Some(v) = &report.signal_lint
+        && let Some(arr) = v.get("issues").and_then(|x| x.as_array())
+    {
+        for issue in arr {
+            let code = issue
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            bump("signal_lint", code, "warning", 1);
+        }
+    }
+    if let Some(v) = &report.signal_drilled_2_levels
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "warning");
+            bump("signal_drilled_2_levels", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.props_lint
+        && let Some(arr) = v.get("issues").and_then(|x| x.as_array())
+    {
+        for issue in arr {
+            let code = issue
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            bump("props_lint", code, "warning", 1);
+        }
+    }
+    if let Some(v) = &report.reinvented_widget
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            // reinvented_widget has no explicit severity; map confidence:
+            // high → warning (it's the strong DnD-triplet shape), confidence:
+            // medium → info, confidence: low → info. The text inputs newly
+            // marked medium therefore sort above bare-DOM low findings.
+            let sev = match finding.get("confidence").and_then(|x| x.as_str()) {
+                Some("high") => "warning",
+                Some("medium") => "info",
+                _ => "info",
+            };
+            bump(
+                "reinvented_widget",
+                Some("reinvented_widget".into()),
+                sev,
+                1,
+            );
+        }
+    }
+    if let Some(v) = &report.optimistic_lock_gate
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            // optimistic_lock_gate emits confidence:high|medium — both
+            // surface as warning in the rollup (the medium tier is still a
+            // real refactor candidate, just less obvious).
+            bump("optimistic_lock_gate", code, "warning", 1);
+        }
+    }
+    if let Some(v) = &report.server_state_blocking_locks
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            bump("server_state_blocking_locks", code, "info", 1);
+        }
+    }
+    if let Some(v) = &report.presence_map_unbounded
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "info");
+            bump("presence_map_unbounded", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.insecure_set_cookie
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "warning");
+            bump("insecure_set_cookie", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.components_audit
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        bump(
+            "components_audit",
+            Some("hand_rolled_catalog_class".into()),
+            "info",
+            arr.len(),
+        );
+    }
+
+    let mut rows: Vec<HeadlineEntry> = buckets
+        .into_iter()
+        .map(|((lint, code, severity), count)| HeadlineEntry {
+            lint,
+            code,
+            severity,
+            count,
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        severity_rank(b.severity)
+            .cmp(&severity_rank(a.severity))
+            .then(b.count.cmp(&a.count))
+            .then(a.lint.cmp(&b.lint))
+            .then(a.code.cmp(&b.code))
+    });
+    rows
+}
+
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "error" => 3,
+        "warning" => 2,
+        "info" => 1,
+        _ => 0,
+    }
+}
+
+fn severity_str(raw: Option<&str>, default: &'static str) -> &'static str {
+    match raw {
+        Some("error") => "error",
+        Some("warning") => "warning",
+        Some("info") => "info",
+        _ => default,
+    }
 }
 
 fn dedup_parse_errors(errs: Vec<Value>) -> Vec<Value> {
@@ -340,6 +680,20 @@ fn render_summary(report: &LintProjectReport) -> String {
         ));
     }
     out.push('\n');
+    if !report.headline.is_empty() {
+        out.push_str("## Top fixes\n\n");
+        for entry in report.headline.iter().take(3) {
+            let code = entry.code.as_deref().unwrap_or("-");
+            out.push_str(&format!(
+                "- `[{sev}]` `{lint}` / `{code}` × {count}\n",
+                sev = entry.severity,
+                lint = entry.lint,
+                code = code,
+                count = entry.count,
+            ));
+        }
+        out.push('\n');
+    }
     for c in &report.issues_by_lint {
         let badge = if c.issues == 0 { "ok" } else { "issues" };
         out.push_str(&format!("- `{}`: {} ({})\n", c.lint, c.issues, badge));
@@ -364,9 +718,11 @@ mod tests {
                 "dead_components".into(),
                 "prop_drill".into(),
                 "signal_lint".into(),
+                "signal_drilled_2_levels".into(),
                 "props_lint".into(),
                 "reinvented_widget".into(),
                 "optimistic_lock_gate".into(),
+                "server_state_blocking_locks".into(),
                 "components_audit".into(),
             ],
             issues_by_lint: vec![
@@ -387,6 +743,10 @@ mod tests {
                     issues: 1,
                 },
                 LintCount {
+                    lint: "signal_drilled_2_levels".into(),
+                    issues: 2,
+                },
+                LintCount {
                     lint: "props_lint".into(),
                     issues: 0,
                 },
@@ -399,14 +759,106 @@ mod tests {
                     issues: 2,
                 },
                 LintCount {
+                    lint: "server_state_blocking_locks".into(),
+                    issues: 8,
+                },
+                LintCount {
                     lint: "components_audit".into(),
                     issues: 3,
                 },
             ],
-            total_issues: 11,
+            total_issues: 21,
             ..Default::default()
         };
         let expected: usize = report.issues_by_lint.iter().map(|c| c.issues).sum();
         assert_eq!(report.total_issues, expected);
+    }
+
+    /// Regression test for the TODO: `server_state_blocking_locks` was a
+    /// standalone tool but missing from the `lint_project` registry, so the
+    /// one-call sweep silently dropped its findings. The fix is to add the
+    /// lint to `ALL_LINTS`, the include/exclude validator, and the
+    /// issues_by_lint table. This test pins all three.
+    #[test]
+    fn registry_includes_server_state_blocking_locks() {
+        assert!(
+            ALL_LINTS.contains(&"server_state_blocking_locks"),
+            "server_state_blocking_locks must be in ALL_LINTS: {ALL_LINTS:?}",
+        );
+    }
+
+    /// `headline` is sorted severity-desc, then count-desc. A synthetic
+    /// report with one error, two warnings, and three info findings must
+    /// surface the error first regardless of count.
+    #[test]
+    fn headline_sorts_error_before_warning_before_info() {
+        let report = LintProjectReport {
+            insecure_set_cookie: Some(serde_json::json!({
+                "findings": [
+                    {"code": "insecure_set_cookie", "severity": "error"},
+                ]
+            })),
+            signal_drilled_2_levels: Some(serde_json::json!({
+                "findings": [
+                    {"code": "signal_drilled_2_levels", "severity": "warning"},
+                    {"code": "signal_drilled_2_levels", "severity": "warning"},
+                ]
+            })),
+            components_audit: Some(serde_json::json!({
+                "findings": [{}, {}, {}],
+            })),
+            ..Default::default()
+        };
+        let headline = build_headline(&report);
+        assert!(
+            !headline.is_empty(),
+            "headline should be populated: {headline:?}",
+        );
+        assert_eq!(
+            headline[0].severity, "error",
+            "error rows must sort first: {headline:?}",
+        );
+        // Subsequent rows: warning before info.
+        let warn_idx = headline
+            .iter()
+            .position(|h| h.severity == "warning")
+            .unwrap();
+        let info_idx = headline
+            .iter()
+            .position(|h| h.severity == "info")
+            .unwrap();
+        assert!(
+            warn_idx < info_idx,
+            "warning must precede info: {headline:?}",
+        );
+    }
+
+    /// Top-3 fixes are rendered in the markdown summary. Pins the format
+    /// so the caller can scrape "the top fix per project lint run".
+    #[test]
+    fn summary_surfaces_top_3_headline_rows() {
+        let report = LintProjectReport {
+            insecure_set_cookie: Some(serde_json::json!({
+                "findings": [{"code": "insecure_set_cookie", "severity": "error"}]
+            })),
+            signal_drilled_2_levels: Some(serde_json::json!({
+                "findings": [{"code": "signal_drilled_2_levels", "severity": "warning"}]
+            })),
+            ..Default::default()
+        };
+        let headline = build_headline(&report);
+        let with_headline = LintProjectReport {
+            headline,
+            ..report
+        };
+        let summary = render_summary(&with_headline);
+        assert!(
+            summary.contains("Top fixes"),
+            "summary should include the rollup section: {summary}",
+        );
+        assert!(
+            summary.contains("`[error]`"),
+            "error row must appear in summary: {summary}",
+        );
     }
 }

@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::state::State;
-use crate::tools::inspect::project_index::{ProjectIndexParams, ServerArg, project_index};
+use crate::tools::inspect::project_index::{ProjectIndexParams, project_index};
 use crate::tools::inspect::route_map::{RouteMapParams, route_map};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -49,10 +49,10 @@ pub struct ServerFnAuth {
     pub route: String,
     pub file: PathBuf,
     pub line: usize,
-    /// `true` iff the signature includes a `cookies:` extractor (or any arg
-    /// typed `TypedHeader<…Cookie…>`). The convention in 0.7-fullstack apps
-    /// is that the handler body then does `user_from_cookies(&cookies)`
-    /// and rejects unauthenticated calls.
+    /// `true` iff the signature OR the verb-macro attribute includes a
+    /// `cookies:` extractor (or any arg typed `TypedHeader<…Cookie…>`). The
+    /// convention in 0.7-fullstack apps is that the handler body then does
+    /// `user_from_cookies(&cookies)` and rejects unauthenticated calls.
     pub cookie_gated: bool,
 }
 
@@ -114,7 +114,7 @@ pub async fn auth_map(state: &Arc<State>, p: AuthMapParams) -> Result<AuthMapRep
             route: server_fn_route(sf),
             file: sf.file.clone(),
             line: sf.line,
-            cookie_gated: sf.args.iter().any(is_cookie_arg),
+            cookie_gated: sf.is_cookie_gated(),
         })
         .collect();
     let gated_server_fn_count = server_fns.iter().filter(|s| s.cookie_gated).count();
@@ -164,15 +164,4 @@ fn server_fn_route(sf: &crate::tools::inspect::project_index::ServerFnEntry) -> 
         (None, Some(p)) => p.to_string(),
         _ => sf.name.clone(),
     }
-}
-
-/// Same heuristic as `openapi_spec::is_cookie_arg`. Kept inlined here so a
-/// future refactor that splits the openapi crate out doesn't leak its types
-/// into `audit::auth_map`. The two helpers must stay in sync — if you add
-/// a new cookie-arg shape there, mirror it here.
-fn is_cookie_arg(a: &ServerArg) -> bool {
-    if a.name == "cookies" {
-        return true;
-    }
-    a.ty.contains("TypedHeader") && a.ty.contains("Cookie")
 }

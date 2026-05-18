@@ -139,7 +139,7 @@ fn scan_file(ast: &syn::File, file: &Path, out: &mut Vec<ReinventedFinding>) {
         // Track every bare DOM element we want to flag — keyed by catalog
         // name so the same `<select>` appearing twice in one component only
         // surfaces once (the suggestion is the same either way).
-        let mut dom_hits: std::collections::BTreeMap<&'static str, (&'static str, usize)> =
+        let mut dom_hits: std::collections::BTreeMap<&'static str, DomHit> =
             std::collections::BTreeMap::new();
         for body in &collector.rsx_bodies {
             for tt in body.clone() {
@@ -153,20 +153,14 @@ fn scan_file(ast: &syn::File, file: &Path, out: &mut Vec<ReinventedFinding>) {
             }
             scan_dom_elements(body.clone(), &mut dom_hits);
         }
-        for (dom_name, (catalog_name, line)) in dom_hits {
+        for (dom_name, hit) in dom_hits {
             out.push(ReinventedFinding {
-                reinvented: catalog_name,
+                reinvented: hit.catalog_name,
                 component: component.clone(),
                 file: file.to_path_buf(),
-                line,
-                confidence: "low",
-                hint: format!(
-                    "`<{dom_name}>` is a bare DOM element; the catalog ships `{catalog_name}` \
-                     with theming, keyboard navigation, and a11y wiring already done. \
-                     `dx components add {catalog_name}` to install. `confidence: low` because \
-                     specialised forms (e.g. `<input type=\"file\">`) have no catalog \
-                     equivalent — verify the use case before swapping."
-                ),
+                line: hit.line,
+                confidence: hit.confidence,
+                hint: build_dom_hint(dom_name, hit.catalog_name, hit.confidence),
             });
         }
         if has_dragstart && has_dragover && has_drop {
@@ -221,9 +215,19 @@ fn scan_file(ast: &syn::File, file: &Path, out: &mut Vec<ReinventedFinding>) {
 ///
 /// `hits` is keyed by the DOM element name so multiple `<select>` blocks in
 /// one component dedupe to a single finding (the suggestion is the same).
+/// One DOM-element finding waiting to be promoted to a `ReinventedFinding`.
+/// Tracks the catalog name, the line, and the confidence tier — confidence
+/// varies per `<input type="…">` so we can't bake it into `DOM_TO_CATALOG`
+/// alone.
+struct DomHit {
+    catalog_name: &'static str,
+    line: usize,
+    confidence: &'static str,
+}
+
 fn scan_dom_elements(
     ts: proc_macro2::TokenStream,
-    hits: &mut std::collections::BTreeMap<&'static str, (&'static str, usize)>,
+    hits: &mut std::collections::BTreeMap<&'static str, DomHit>,
 ) {
     let trees: Vec<TokenTree> = ts.into_iter().collect();
     let mut i = 0;
@@ -231,22 +235,98 @@ fn scan_dom_elements(
         if let TokenTree::Ident(id) = &trees[i] {
             let s = id.to_string();
             let next = trees.get(i + 1);
-            let is_element = matches!(
-                next,
-                Some(TokenTree::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Brace
-            );
-            if is_element
-                && let Some((_, catalog)) =
+            let group = match next {
+                Some(TokenTree::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Brace => {
+                    Some(g)
+                }
+                _ => None,
+            };
+            if let Some(group) = group
+                && let Some((dom, catalog)) =
                     DOM_TO_CATALOG.iter().find(|(dom, _)| *dom == s.as_str())
                 && !hits.contains_key(*catalog)
             {
-                hits.insert(catalog, (catalog, id.span().start().line));
+                let confidence = confidence_for_dom_element(dom, group);
+                hits.insert(
+                    catalog,
+                    DomHit {
+                        catalog_name: catalog,
+                        line: id.span().start().line,
+                        confidence,
+                    },
+                );
             }
         }
         if let TokenTree::Group(g) = &trees[i] {
             scan_dom_elements(g.stream(), hits);
         }
         i += 1;
+    }
+}
+
+/// Decide the confidence tier for a bare DOM element. Most catalog
+/// equivalents (`<select>`, `<dialog>`, `<textarea>`) are unambiguous
+/// drop-ins → `low` by default (the catalog might still not be the right
+/// fit, e.g. for an embedded WebGL `<dialog>`). `<input>` is the
+/// interesting case: text-flavoured inputs (`text`/`email`/`password`/
+/// `search`) map cleanly to the catalog's `input` widget and get bumped
+/// to `medium` so reviewers can prioritise them over file / range /
+/// color / date inputs that have no direct catalog equivalent.
+fn confidence_for_dom_element(dom: &str, group: &proc_macro2::Group) -> &'static str {
+    if dom != "input" {
+        return "low";
+    }
+    match input_type_attr(group) {
+        Some(t) if matches!(t.as_str(), "text" | "email" | "password" | "search") => "medium",
+        _ => "low",
+    }
+}
+
+/// Pull the literal value of an rsx `r#type: "..."` (or `type: "..."`)
+/// attribute out of an `<input { ... }>` brace group. Returns `None` when
+/// the attribute is missing, dynamic (`r#type: my_var`), or the value
+/// isn't a plain string literal.
+fn input_type_attr(group: &proc_macro2::Group) -> Option<String> {
+    let trees: Vec<TokenTree> = group.stream().into_iter().collect();
+    let mut i = 0;
+    while i < trees.len() {
+        if let TokenTree::Ident(id) = &trees[i] {
+            let name = id.to_string();
+            if (name == "r#type" || name == "type")
+                && matches!(trees.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == ':')
+                && let Some(TokenTree::Literal(lit)) = trees.get(i + 2)
+            {
+                // proc_macro2 stringifies the literal with quotes; let
+                // syn::LitStr give us the runtime value.
+                let raw = lit.to_string();
+                if let Ok(parsed) = syn::parse_str::<syn::LitStr>(&raw) {
+                    return Some(parsed.value().to_ascii_lowercase());
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn build_dom_hint(dom_name: &str, catalog_name: &str, confidence: &'static str) -> String {
+    if confidence == "medium" {
+        format!(
+            "`<{dom_name}>` here is a text-flavoured input (`type=\"text\"`/`email`/\
+             `password`/`search`) — the catalog's `{catalog_name}` widget is a \
+             direct drop-in with theming, label / error wiring, and a11y already \
+             handled. `dx components add {catalog_name}` to install. \
+             `confidence: medium` because the catalog target is unambiguous for \
+             these `type=` values (unlike `file`/`range`/`color`/`date`)."
+        )
+    } else {
+        format!(
+            "`<{dom_name}>` is a bare DOM element; the catalog ships `{catalog_name}` \
+             with theming, keyboard navigation, and a11y wiring already done. \
+             `dx components add {catalog_name}` to install. `confidence: low` because \
+             specialised forms (e.g. `<input type=\"file\">`) have no catalog \
+             equivalent — verify the use case before swapping."
+        )
     }
 }
 
@@ -473,6 +553,79 @@ fn BoardScreen() -> Element {
             "hint should suggest the catalog install command: {}",
             select_finding.hint,
         );
+    }
+
+    /// Text-flavoured `<input type="…">` maps cleanly to the catalog
+    /// `input` widget — promote those findings to `confidence: medium` so
+    /// reviewers can act on them ahead of low-confidence noise. Tests one
+    /// of each canonical `type` value.
+    #[test]
+    fn text_inputs_get_medium_confidence() {
+        for input_type in ["text", "email", "password", "search"] {
+            let dir = tempdir().unwrap();
+            write_file(
+                &dir.path().join("src/form.rs"),
+                &format!(
+                    r#"use dioxus::prelude::*;
+#[component]
+fn Form() -> Element {{
+    rsx! {{
+        input {{
+            r#type: "{input_type}",
+            placeholder: "...",
+            value: "",
+        }}
+    }}
+}}
+"#,
+                ),
+            );
+            let findings = scan(dir.path());
+            let f = findings
+                .iter()
+                .find(|f| f.reinvented == "input")
+                .unwrap_or_else(|| {
+                    panic!("expected an input finding for type={input_type}: {findings:?}")
+                });
+            assert_eq!(
+                f.confidence, "medium",
+                "type={input_type:?} should be medium-confidence: {findings:?}",
+            );
+        }
+    }
+
+    /// Specialised input types (`file`, `range`, `color`, `date`) have no
+    /// direct catalog equivalent — they must stay at `confidence: low` so
+    /// reviewers don't auto-replace them.
+    #[test]
+    fn specialised_inputs_stay_low_confidence() {
+        for input_type in ["file", "range", "color", "date"] {
+            let dir = tempdir().unwrap();
+            write_file(
+                &dir.path().join("src/form.rs"),
+                &format!(
+                    r#"use dioxus::prelude::*;
+#[component]
+fn Form() -> Element {{
+    rsx! {{
+        input {{
+            r#type: "{input_type}",
+        }}
+    }}
+}}
+"#,
+                ),
+            );
+            let findings = scan(dir.path());
+            let f = findings
+                .iter()
+                .find(|f| f.reinvented == "input")
+                .expect("should flag");
+            assert_eq!(
+                f.confidence, "low",
+                "type={input_type:?} should stay low: {findings:?}",
+            );
+        }
     }
 
     /// PascalCase idents (i.e. real Dioxus components like the catalog

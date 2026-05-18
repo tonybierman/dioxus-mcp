@@ -99,6 +99,16 @@ pub struct BuildAndSmokeResult {
     /// `legs` instead — it carries the cargo invocation per axis.
     pub invocation: String,
     pub project_root: PathBuf,
+    /// Wall-clock total for the whole run — the sum of every leg's
+    /// `duration_ms`. Renamed from `duration_ms` to `total_ms` because the
+    /// per-leg numbers also live under `legs[].duration_ms`; a top-level
+    /// `duration_ms` was easy to misread as a single timing. `duration_ms`
+    /// remains as a synonym for backward compatibility — it always carries
+    /// the same value as `total_ms`.
+    pub total_ms: u128,
+    /// @deprecated alias for `total_ms`. Kept so existing callers that
+    /// asserted on `duration_ms` keep working. New code should read
+    /// `total_ms` (or the per-leg `legs[].duration_ms` for the slowest leg).
     pub duration_ms: u128,
     /// Aggregated status across every leg. `"passed"` only when every leg
     /// passed; otherwise the first non-passing status wins (`"failed"`
@@ -263,10 +273,12 @@ pub async fn build_and_smoke(
         ));
     }
 
+    let total_ms = outer_start.elapsed().as_millis();
     Ok(BuildAndSmokeResult {
         invocation: first_invocation.unwrap_or_default(),
         project_root: crate_root,
-        duration_ms: outer_start.elapsed().as_millis(),
+        total_ms,
+        duration_ms: total_ms,
         status: aggregate_status,
         errors_count: aggregate_errors.len(),
         warnings_count: aggregate_warnings.len(),

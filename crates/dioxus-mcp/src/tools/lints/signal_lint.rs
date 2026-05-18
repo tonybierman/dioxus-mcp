@@ -929,14 +929,22 @@ fn check_prop_clone_overuse(
     // twice doesn't get double-flagged on its own.
     let total_clones: usize = clones.values().map(|v| v.len()).sum();
     let prop_count = clones.len();
-    let already_flagged_all = clones.keys().all(|k| per_prop_fired.contains(k.as_str()));
+    // Skip the aggregate when ANY prop in this component already fired the
+    // per-prop rule. The per-prop finding already names the same refactor
+    // (Arc / ReadOnlySignal / shared capture), so the aggregate on top is
+    // redundant noise. iter03's `Column` had `id` ×3 (per-prop fires) plus
+    // `state_passthrough` clones — before the fix, the aggregate fired at
+    // the same line because the threshold only blocked when *every* prop in
+    // the clone map fired per-prop. Tightening to "any per-prop fired"
+    // collapses the duplicate.
+    let any_per_prop_fired = !per_prop_fired.is_empty();
     // Require at least one prop to be cloned twice — "one clone each across
     // five props" is the normal capture-per-closure shape and was producing
     // false positives. The smell is *repeat* clones of the same prop spread
     // across multiple props (e.g. `card_id` ×2 + `column_id` ×2), not "lots
     // of distinct props each captured once."
     let has_repeat_clone = clones.values().any(|v| v.len() >= 2);
-    if total_clones >= 4 && prop_count >= 2 && has_repeat_clone && !already_flagged_all {
+    if total_clones >= 4 && prop_count >= 2 && has_repeat_clone && !any_per_prop_fired {
         let mut summary_parts: Vec<String> = clones
             .iter()
             .map(|(p, l)| format!("`{p}` ×{}", l.len()))
@@ -1243,12 +1251,23 @@ fn check_signal_used_as_fence(
         return;
     }
 
+    // Pre-pass: collect "snapshot bindings" — `let snap = sig()` where the
+    // snap is later compared against a fresh read of the same signal
+    // (`sig() == snap` or `snap == sig()`). Without this the snapshot read
+    // looks like a bare disqualifying read and the lint drops every
+    // optimistic-staleness-gate signal. We accept both the same-body shape
+    // and the cross-body shape — the visitor walks the entire fn block.
+    let target_names: Vec<String> = candidates.iter().map(|(n, _)| n.clone()).collect();
+    let paired_snapshots = collect_paired_snapshots(&f.block, &target_names);
+
     let mut profiles: std::collections::BTreeMap<String, FenceProfile> =
         std::collections::BTreeMap::new();
     let mut v = FenceVisitor {
-        target_names: candidates.iter().map(|(n, _)| n.clone()).collect(),
+        target_names: target_names.clone(),
         profiles: &mut profiles,
         comparison_depth: 0,
+        paired_snapshots: &paired_snapshots,
+        in_paired_snapshot_init: false,
     };
     v.visit_block(&f.block);
 
@@ -1302,6 +1321,16 @@ struct FenceVisitor<'a> {
     /// reads at depth>0 are "ok" (the fence usage); reads at depth=0 are
     /// disqualifying (callers care about the value).
     comparison_depth: usize,
+    /// (signal_name -> {binding_names that hold a snapshot of the signal AND
+    /// pair up with a later `sig() == binding_name` comparison}). When we
+    /// descend into a `let X = sig()` whose X is in this set, we treat the
+    /// inner `sig` read as fence usage instead of disqualifying.
+    paired_snapshots:
+        &'a std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Set whenever the visitor is inside the init expression of a `let X =
+    /// sig()` that pairs with a later compare. Reads observed here don't
+    /// disqualify.
+    in_paired_snapshot_init: bool,
 }
 
 impl<'a> FenceVisitor<'a> {
@@ -1315,6 +1344,31 @@ impl<'a> FenceVisitor<'a> {
 }
 
 impl<'a, 'ast> Visit<'ast> for FenceVisitor<'a> {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        // Snapshot-let detection: if this is a paired `let X = sig()`, walk
+        // the init with `in_paired_snapshot_init = true` so the inner `sig`
+        // read doesn't disqualify the fence shape. We still walk the rest
+        // of the local normally.
+        let paired = paired_snapshot_for(local, self.paired_snapshots);
+        if paired.is_some() {
+            self.in_paired_snapshot_init = true;
+            if let Some(init) = &local.init {
+                self.visit_expr(&init.expr);
+                if let Some((_, diverge)) = &init.diverge {
+                    self.visit_expr(diverge);
+                }
+            }
+            self.in_paired_snapshot_init = false;
+            // Visit attributes/pat as usual (no-op for our patterns).
+            for attr in &local.attrs {
+                self.visit_attribute(attr);
+            }
+            self.visit_pat(&local.pat);
+            return;
+        }
+        syn::visit::visit_local(self, local);
+    }
+
     fn visit_expr_binary(&mut self, eb: &'ast syn::ExprBinary) {
         // syn 2.0 collapses `a += 1` into `ExprBinary` with `BinOp::AddAssign`,
         // not a separate `ExprAssignOp` node. We handle three flavours here:
@@ -1381,14 +1435,157 @@ impl<'a, 'ast> Visit<'ast> for FenceVisitor<'a> {
     fn visit_expr_path(&mut self, ep: &'ast syn::ExprPath) {
         if let Some(name) = path_single_ident(ep) {
             let depth = self.comparison_depth;
+            let in_snapshot = self.in_paired_snapshot_init;
             if let Some(p) = self.entry(&name)
                 && depth == 0
+                && !in_snapshot
             {
-                // Bare ident read outside a comparison — disqualifies.
+                // Bare ident read outside a comparison — disqualifies, unless
+                // we're under a paired `let snap = sig()` snapshot init, in
+                // which case the read is part of the fence shape itself.
                 p.disqualified = true;
             }
         }
         syn::visit::visit_expr_path(self, ep);
+    }
+}
+
+/// Pre-pass over the component body — returns `(signal_name ->
+/// {binding_names that snapshot this signal AND later appear in a
+/// `sig() == binding_name` / `binding_name == sig()` comparison})`.
+///
+/// The detector intentionally treats the snapshot and the compare as the
+/// same "fence read pair" even when they live in different bodies: the
+/// optimistic-staleness-gate shape often spreads the snapshot into a
+/// `use_future` hook body and the compare into the same hook tail. We don't
+/// scope-check the binding (a free `lock` ident in one closure isn't
+/// necessarily the same binding declared in another closure), but the false-
+/// positive rate is low — the binding name has to line up exactly with a
+/// snapshot we collected.
+fn collect_paired_snapshots(
+    block: &syn::Block,
+    target_names: &[String],
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut snapshots: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut compares: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+
+    let mut snap_v = SnapshotCollector {
+        target_names,
+        out: &mut snapshots,
+    };
+    snap_v.visit_block(block);
+    let mut cmp_v = CompareCollector {
+        target_names,
+        out: &mut compares,
+    };
+    cmp_v.visit_block(block);
+
+    // Intersection per-signal: keep only binding names that BOTH snapshot
+    // the signal AND appear in a `sig() == X` comparison.
+    let mut paired: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for (sig, snap_names) in &snapshots {
+        let Some(cmp_names) = compares.get(sig) else {
+            continue;
+        };
+        let intersect: std::collections::HashSet<String> =
+            snap_names.intersection(cmp_names).cloned().collect();
+        if !intersect.is_empty() {
+            paired.insert(sig.clone(), intersect);
+        }
+    }
+    paired
+}
+
+fn paired_snapshot_for(
+    local: &syn::Local,
+    paired: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> Option<(String, String)> {
+    let init = local.init.as_ref()?;
+    let sig_name = signal_call_name(&init.expr)?;
+    let binding_name = match &local.pat {
+        syn::Pat::Ident(p) => p.ident.to_string(),
+        syn::Pat::Type(t) => match &*t.pat {
+            syn::Pat::Ident(p) => p.ident.to_string(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if paired.get(&sig_name)?.contains(&binding_name) {
+        Some((sig_name, binding_name))
+    } else {
+        None
+    }
+}
+
+/// True if `expr` is `sig_name()` — a zero-arg call whose callee is the
+/// bare ident `sig_name`. Returns the ident.
+fn signal_call_name(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Call(c) = expr else {
+        return None;
+    };
+    if !c.args.is_empty() {
+        return None;
+    }
+    let syn::Expr::Path(p) = &*c.func else {
+        return None;
+    };
+    path_single_ident(p)
+}
+
+struct SnapshotCollector<'a> {
+    target_names: &'a [String],
+    out: &'a mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+impl<'a, 'ast> Visit<'ast> for SnapshotCollector<'a> {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let Some(init) = &local.init
+            && let Some(sig_name) = signal_call_name(&init.expr)
+            && self.target_names.iter().any(|n| n == &sig_name)
+        {
+            let binding_name = match &local.pat {
+                syn::Pat::Ident(p) => Some(p.ident.to_string()),
+                syn::Pat::Type(t) => match &*t.pat {
+                    syn::Pat::Ident(p) => Some(p.ident.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(binding) = binding_name {
+                self.out.entry(sig_name).or_default().insert(binding);
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
+}
+
+struct CompareCollector<'a> {
+    target_names: &'a [String],
+    out: &'a mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+impl<'a, 'ast> Visit<'ast> for CompareCollector<'a> {
+    fn visit_expr_binary(&mut self, eb: &'ast syn::ExprBinary) {
+        if matches!(eb.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+            // `sig() == name` (or reversed) — capture (sig, name) pairs.
+            if let Some(sig) = signal_call_name(&eb.left)
+                && self.target_names.iter().any(|n| n == &sig)
+                && let syn::Expr::Path(p) = &*eb.right
+                && let Some(name) = path_single_ident(p)
+            {
+                self.out.entry(sig).or_default().insert(name);
+            } else if let Some(sig) = signal_call_name(&eb.right)
+                && self.target_names.iter().any(|n| n == &sig)
+                && let syn::Expr::Path(p) = &*eb.left
+                && let Some(name) = path_single_ident(p)
+            {
+                self.out.entry(sig).or_default().insert(name);
+            }
+        }
+        syn::visit::visit_expr_binary(self, eb);
     }
 }
 
@@ -2332,6 +2529,45 @@ fn CardItem(card_id: String, column_id: String) -> Element {
         );
     }
 
+    /// iter03 regression: `Column` clones `id` three times (per-prop rule
+    /// fires) AND clones a second prop once (so `prop_count >= 2`). Before
+    /// the fix, the aggregate ALSO fired at the same line because the
+    /// threshold only blocked when *every* prop in the clone map had
+    /// already fired the per-prop rule. We now skip the aggregate the
+    /// moment ANY prop fires per-prop — the per-prop finding already
+    /// names the same refactor.
+    #[test]
+    fn aggregate_silent_when_per_prop_fired_on_any_prop() {
+        let issues = lint_prop_clones(
+            r#"#[component]
+fn Column(id: String, label: String) -> Element {
+    let a = id.clone();
+    let b = id.clone();
+    let c = id.clone();
+    let l = label.clone();
+    let _ = (a, b, c, l);
+    rsx!{}
+}"#,
+        );
+        let per_prop: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "prop_clone_overuse")
+            .collect();
+        assert_eq!(
+            per_prop.len(),
+            1,
+            "per-prop rule should fire for id ×3: {per_prop:?}",
+        );
+        let agg: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "prop_clone_overuse_aggregate")
+            .collect();
+        assert!(
+            agg.is_empty(),
+            "aggregate must NOT double-flag when per-prop already fired: {agg:?}",
+        );
+    }
+
     /// Aggregate stays silent when only one prop has clones (even ≥4 of
     /// them) — that case is already covered by the per-prop rule, and
     /// double-firing would just be noise.
@@ -2809,6 +3045,70 @@ fn BoardBody() -> Element {
             hits[0].message.contains("Cell") || hits[0].message.contains("generation"),
             "should recommend the lighter-weight replacement: {}",
             hits[0].message
+        );
+    }
+
+    /// iter03's canonical shape: snapshot-then-compare on an int signal.
+    /// The bare snapshot read `let lock = local_lock();` would normally
+    /// disqualify the fence shape (callers seem to care about the value),
+    /// but the snapshot is *immediately* used in a `local_lock() == lock`
+    /// comparison — that's the same fence-read pattern, just spread over
+    /// two source lines. Treat it as fence usage instead of dropping the
+    /// finding.
+    #[test]
+    fn flags_snapshot_then_compare_fence_pattern() {
+        let issues = lint_fence(
+            r#"#[component]
+fn BoardBody() -> Element {
+    let mut local_lock = use_signal(|| 0u32);
+    let bump_a = move |_| { local_lock += 1; };
+    let bump_b = move |_| { local_lock += 1; };
+    let check = move |_| {
+        let lock = local_lock();
+        if local_lock() == lock { /* still fresh */ }
+    };
+    let _ = (bump_a, bump_b, check);
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_used_as_fence")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "snapshot-then-compare still IS the fence shape: {issues:?}",
+        );
+    }
+
+    /// Counter-test: a snapshot let-binding whose name is NEVER compared
+    /// back against the signal is just a value read — the lint must still
+    /// disqualify so we don't suppress legitimate `Signal<int>` consumers.
+    #[test]
+    fn ignores_snapshot_read_without_pairing_compare() {
+        let issues = lint_fence(
+            r#"#[component]
+fn Demo() -> Element {
+    let mut count = use_signal(|| 0u32);
+    let bump_a = move |_| { count += 1; };
+    let bump_b = move |_| { count += 1; };
+    let show = move |_| {
+        let now = count();
+        // `now` is just used elsewhere — never compared back to `count()`.
+        let _ = now + 1;
+    };
+    let _ = (bump_a, bump_b, show);
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_used_as_fence")
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "unpaired snapshot means callers care about the value: {hits:?}",
         );
     }
 
