@@ -316,6 +316,43 @@ fn derive_next_actions(
     out
 }
 
+/// Roll the lint_project `headline` field up into a one-line severity
+/// breakdown: `2 error, 5 warning, 3 info, 1 hint`. Hides zero buckets;
+/// `0 total` collapses to "no issues" so the summary line still
+/// renders cleanly on clean projects.
+fn severity_breakdown(l: &crate::tools::lints::lint_project::LintProjectReport) -> String {
+    let mut error = 0usize;
+    let mut warning = 0usize;
+    let mut info = 0usize;
+    let mut hint = 0usize;
+    for h in &l.headline {
+        match h.severity {
+            "error" => error += h.count,
+            "warning" => warning += h.count,
+            "info" => info += h.count,
+            "hint" => hint += h.count,
+            _ => {}
+        }
+    }
+    if error + warning + info + hint == 0 {
+        return "no issues".into();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if error > 0 {
+        parts.push(format!("{error} error"));
+    }
+    if warning > 0 {
+        parts.push(format!("{warning} warning"));
+    }
+    if info > 0 {
+        parts.push(format!("{info} info"));
+    }
+    if hint > 0 {
+        parts.push(format!("{hint} hint"));
+    }
+    parts.join(", ")
+}
+
 /// Maps a lint id (`signal_lint`, `prop_drill`, …) to a short, human-friendly
 /// label used in the one-line tour summary. Kept tiny on purpose — when a
 /// caller wants the full count breakdown they read the `lints` field
@@ -430,7 +467,21 @@ fn render_summary(
         } else {
             format!(" ({})", parts.join(", "))
         };
-        out.push_str(&format!("**Lints**: {} issues{detail}\n", l.total_issues));
+        // Severity breakdown from the `headline` rollup. The total is
+        // hard to read across iterations — iter02's 26 and iter03's 34
+        // hide that iter02 had 4 unfixed `signal_many_writers` warnings
+        // while iter03's count is mostly hints. The severity split makes
+        // that trajectory legible. Suppressed on clean projects so the
+        // line stays bare.
+        let sev_suffix = if l.total_issues == 0 {
+            String::new()
+        } else {
+            format!(" [{}]", severity_breakdown(l))
+        };
+        out.push_str(&format!(
+            "**Lints**: {} issues{}{}\n",
+            l.total_issues, detail, sev_suffix
+        ));
     }
 
     if let Some(i) = index
@@ -526,6 +577,10 @@ mod tests {
             vec_or_owned_prop_passthrough: None,
             magic_id_prefix_for_optimistic: None,
             shared_enum_validation: None,
+            derived_view_no_memo: None,
+            empty_async_error_arm: None,
+            polling_future_no_backoff: None,
+            repeated_auth_extractor: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -563,6 +618,79 @@ mod tests {
         );
     }
 
+    /// iter03 follow-up: the per-lint breakdown alone hides whether
+    /// the issues are warnings (high-leverage) or hints (cosmetic). The
+    /// `[N warning, M info, …]` suffix surfaces the severity split so
+    /// iter-over-iter trajectory is legible.
+    #[test]
+    fn lint_summary_includes_severity_breakdown() {
+        use crate::tools::lints::lint_project::HeadlineEntry;
+        let lint_report = LintProjectReport {
+            summary: String::new(),
+            lints_run: vec!["signal_lint".into(), "components_audit".into()],
+            total_issues: 5,
+            headline: vec![
+                HeadlineEntry {
+                    lint: "signal_lint".into(),
+                    code: Some("signal_many_writers".into()),
+                    severity: "warning",
+                    count: 3,
+                },
+                HeadlineEntry {
+                    lint: "components_audit".into(),
+                    code: Some("uses_class_for_widget".into()),
+                    severity: "hint",
+                    count: 2,
+                },
+            ],
+            issues_by_lint: vec![
+                LintCount {
+                    lint: "signal_lint".into(),
+                    issues: 3,
+                },
+                LintCount {
+                    lint: "components_audit".into(),
+                    issues: 2,
+                },
+            ],
+            parse_errors: Vec::new(),
+            check_rsx: None,
+            dead_components: None,
+            prop_drill: None,
+            signal_lint: None,
+            signal_drilled_2_levels: None,
+            props_lint: None,
+            reinvented_widget: None,
+            optimistic_lock_gate: None,
+            server_state_blocking_locks: None,
+            presence_map_unbounded: None,
+            insecure_set_cookie: None,
+            components_audit: None,
+            duplicate_helper_client_server: None,
+            vec_or_owned_prop_passthrough: None,
+            magic_id_prefix_for_optimistic: None,
+            shared_enum_validation: None,
+            derived_view_no_memo: None,
+            empty_async_error_arm: None,
+            polling_future_no_backoff: None,
+            repeated_auth_extractor: None,
+        };
+        let trunc = TruncationFlags::default();
+        let summary = render_summary(
+            &None,
+            &None,
+            &None,
+            &None,
+            &Some(lint_report),
+            &trunc,
+            false,
+        );
+        assert!(
+            summary.contains("[3 warning, 2 hint]"),
+            "severity breakdown missing: {summary}",
+        );
+    }
+
     /// Clean project (no findings) renders a single "0 issues" line with no
     /// trailing `(…)` — keeps the tour markdown compact when there's
     /// nothing to call out.
@@ -594,6 +722,10 @@ mod tests {
             vec_or_owned_prop_passthrough: None,
             magic_id_prefix_for_optimistic: None,
             shared_enum_validation: None,
+            derived_view_no_memo: None,
+            empty_async_error_arm: None,
+            polling_future_no_backoff: None,
+            repeated_auth_extractor: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -659,6 +791,10 @@ mod tests {
             vec_or_owned_prop_passthrough: None,
             magic_id_prefix_for_optimistic: None,
             shared_enum_validation: None,
+            derived_view_no_memo: None,
+            empty_async_error_arm: None,
+            polling_future_no_backoff: None,
+            repeated_auth_extractor: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc, true);

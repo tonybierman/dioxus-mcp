@@ -103,11 +103,17 @@ pub async fn openapi_spec(
         .unwrap_or("/api")
         .trim_end_matches('/')
         .to_string();
-    let cookie_name = p
-        .session_cookie_name
-        .as_deref()
-        .unwrap_or("session_id")
-        .to_string();
+    // Auto-detect the session cookie name if the caller didn't pass
+    // one. We look for `cookies.get("<name>")` and (as a fallback) any
+    // `Set-Cookie` header literal that contains `Name=…`. Generators
+    // hit one of these for every cookie-gated endpoint; the most-common
+    // literal wins. Only override the default when the auto-detect
+    // returns something — passing `session_cookie_name: "sid"`
+    // explicitly still trumps the heuristic.
+    let cookie_name = match p.session_cookie_name.as_deref() {
+        Some(explicit) => explicit.to_string(),
+        None => detect_session_cookie_name(&files).unwrap_or_else(|| "session_id".to_string()),
+    };
 
     let mut paths = Map::new();
     let mut guessed_paths = Vec::new();
@@ -394,6 +400,117 @@ fn server_fn_path_item(
 /// extractors stop reading as anonymous.
 fn has_cookie_extractor(sf: &ServerFnEntry) -> bool {
     sf.is_cookie_gated()
+}
+
+/// Walk every scanned `.rs` file looking for `cookies.get("<name>")`
+/// calls and `Set-Cookie` header literals. Returns the most-common
+/// cookie name found, or `None` if nothing matched. Generators emit
+/// these literals consistently across the server-fn set (`"sid"` in
+/// iter03, `"session"` in some patterns) so the modal value is a
+/// reliable default.
+fn detect_session_cookie_name(files: &[crate::tools::ast::ScannedFile]) -> Option<String> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for sf in files {
+        let Ok(ast) = &sf.ast else { continue };
+        let mut v = CookieNameVisitor {
+            counts: &mut counts,
+        };
+        syn::visit::Visit::visit_file(&mut v, ast);
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(name, _)| name)
+}
+
+struct CookieNameVisitor<'a> {
+    counts: &'a mut std::collections::HashMap<String, usize>,
+}
+
+impl<'a, 'ast> syn::visit::Visit<'ast> for CookieNameVisitor<'a> {
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        // `cookies.get("sid")` — receiver `cookies`, method `get`,
+        // single string-literal arg. We don't enforce that the
+        // receiver is THE cookie header (`TypedHeader<Cookie>` vs
+        // some other map); if the same literal appears with similar
+        // method names elsewhere, the modal wins anyway.
+        if mc.method == "get"
+            && method_receiver_is_ident(&mc.receiver, "cookies")
+            && let Some(syn::Expr::Lit(lit)) = mc.args.first()
+            && let syn::Lit::Str(s) = &lit.lit
+        {
+            *self.counts.entry(s.value()).or_insert(0) += 1;
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+    fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+        // `Set-Cookie` literals. Match either an explicit
+        // `<name>=<value>;` prefix or a `Name=` clause anywhere in
+        // the literal (HeaderValue::from_static, format!()-emitted,
+        // etc.). We only credit cookies whose name looks plausible
+        // (lowercase letters / digits / underscores / hyphens, ≤32
+        // chars) to keep noise from random literals out.
+        let v = lit.value();
+        if let Some(name) = cookie_name_from_set_cookie(&v) {
+            *self.counts.entry(name).or_insert(0) += 1;
+        }
+    }
+}
+
+fn method_receiver_is_ident(e: &syn::Expr, want: &str) -> bool {
+    match e {
+        syn::Expr::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident == want)
+            .unwrap_or(false),
+        syn::Expr::Reference(r) => method_receiver_is_ident(&r.expr, want),
+        _ => false,
+    }
+}
+
+fn cookie_name_from_set_cookie(s: &str) -> Option<String> {
+    // Recognise `<name>=<value>` at the start of the literal (the
+    // canonical Set-Cookie shape). Reject obvious non-cookie literals
+    // (no `=`, includes spaces in the name part, name too long).
+    let trimmed = s.trim_start();
+    let head = trimmed.split([';', ',']).next()?;
+    let (name, rest) = head.split_once('=')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let name = name.trim();
+    if name.is_empty() || name.len() > 32 {
+        return None;
+    }
+    // Cookie names per RFC 6265 are token chars — accept the practical
+    // subset that's safe to surface as an auto-detected default.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    // Filter known non-cookie literals: HTTP attribute names that look
+    // like `name=value` but aren't a cookie ident (`HttpOnly`,
+    // `Secure`, etc. don't have `=` so they're already excluded).
+    // Also skip attributes that come AFTER the cookie pair.
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "path"
+            | "domain"
+            | "max-age"
+            | "expires"
+            | "samesite"
+            | "secure"
+            | "httponly"
+            | "partitioned"
+    ) {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 fn route_path_item(r: &RouteEntry) -> (String, Value) {
@@ -912,6 +1029,52 @@ fn resolver_unresolved(spec: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Auto-detect: `cookies.get("sid")` in a server fn means the
+    /// session cookie name is `sid`, not the default `session_id`.
+    /// iter03 used `sid`; before this change the openapi tool emitted
+    /// the wrong name and required the caller to override.
+    #[test]
+    fn detect_session_cookie_name_from_cookies_get() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("a.rs"),
+            r#"#[post("/api/ping")]
+async fn ping(cookies: TypedHeader<Cookie>) -> Result<(), ()> {
+    let sid = cookies.get("sid").unwrap_or_default().to_string();
+    let _ = sid;
+    Ok(())
+}
+"#,
+        )
+        .unwrap();
+        let files = walk_rs_files(&src);
+        assert_eq!(detect_session_cookie_name(&files), Some("sid".to_string()));
+    }
+
+    /// Set-Cookie literal recognised: `__Host-sess=abc; Path=/; Secure`
+    /// — name is `__Host-sess` (we accept the conventional `__Host-`
+    /// prefix because cookie names per RFC 6265 can contain ASCII
+    /// alphanumerics, `_`, and `-`).
+    #[test]
+    fn cookie_name_from_set_cookie_handles_attributes() {
+        assert_eq!(
+            cookie_name_from_set_cookie("sid=abc; Path=/; HttpOnly"),
+            Some("sid".to_string())
+        );
+        assert_eq!(
+            cookie_name_from_set_cookie("__Host-sess=abc; Secure"),
+            Some("__Host-sess".to_string())
+        );
+        // Attribute-only literals must be rejected — they look like
+        // `name=value` syntactically but the name isn't a cookie ident.
+        assert_eq!(cookie_name_from_set_cookie("Path=/"), None);
+        assert_eq!(cookie_name_from_set_cookie("Max-Age=600"), None);
+        // Empty values aren't a real cookie; skip.
+        assert_eq!(cookie_name_from_set_cookie("sid="), None);
+    }
 
     /// Result<T, ServerFnError> -> success T, error "ServerFnError" — the
     /// canonical shape every dioxus 0.7 fullstack server fn ends up with.

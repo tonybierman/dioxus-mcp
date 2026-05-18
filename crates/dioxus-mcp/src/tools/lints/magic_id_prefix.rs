@@ -111,7 +111,13 @@ impl<'a, 'ast> Visit<'ast> for MagicIdVisitor<'a> {
             let line = e.method.span().start().line;
             self.findings.push(MagicIdFinding {
                 code: "magic_id_prefix_for_optimistic",
-                severity: "info",
+                // READ side is the consumer that mis-classifies any real
+                // id with the magic prefix — that's a correctness bug,
+                // not a smell. iter03 follow-up bumped this from `info`
+                // to `warning`; the write side stays `info` because it's
+                // generally a stylistic preference (forging vs. typed
+                // marker) rather than a wrong-behavior risk.
+                severity: "warning",
                 confidence: "low",
                 file: self.file.clone(),
                 line,
@@ -119,8 +125,9 @@ impl<'a, 'ast> Visit<'ast> for MagicIdVisitor<'a> {
                 placeholder: prefix.clone(),
                 message: format!(
                     "`.id.starts_with({prefix:?})` branches on a magic prefix to detect a \
-                     client-side optimistic placeholder. Real IDs that happen to start with \
-                     {prefix:?} would be silently mis-classified.",
+                     client-side optimistic placeholder. A real id that happens to start \
+                     with {prefix:?} is silently mis-classified — that's a correctness bug, \
+                     not just a smell.",
                 ),
                 fix: "Add a typed marker: `pending: bool` on the model (set true on \
                       optimistic insert, false / removed on server confirm), or maintain \
@@ -249,7 +256,9 @@ mod tests {
         }
     }
 
-    /// iter03's read-site shape: `card.id.starts_with("tmp-")`. Must fire.
+    /// iter03's read-site shape: `card.id.starts_with("tmp-")`. Must
+    /// fire at `warning` severity — a real id starting with `tmp-`
+    /// would be silently mis-classified, which is a correctness bug.
     #[test]
     fn flags_starts_with_on_id_field() {
         let r = run(r#"fn is_pending(card: &Card) -> bool {
@@ -260,9 +269,15 @@ mod tests {
             r.findings.iter().filter(|f| f.kind == "read").collect();
         assert_eq!(read_hits.len(), 1, "expected one read hit: {r:?}");
         assert_eq!(read_hits[0].placeholder, "tmp-");
+        assert_eq!(
+            read_hits[0].severity, "warning",
+            "read side is a correctness bug, not info-level smell",
+        );
     }
 
-    /// iter03's write-site shape: `format!("tmp-{}", id)`. Must fire.
+    /// iter03's write-site shape: `format!("tmp-{}", id)`. Must fire at
+    /// `info` severity — the write side is a stylistic preference, not
+    /// a wrong-behavior risk.
     #[test]
     fn flags_format_macro_with_placeholder_prefix() {
         let r = run(r#"fn forge(id: &str) -> String {
@@ -273,6 +288,10 @@ mod tests {
             r.findings.iter().filter(|f| f.kind == "write").collect();
         assert_eq!(write_hits.len(), 1, "expected one write hit: {r:?}");
         assert_eq!(write_hits[0].placeholder, "tmp-");
+        assert_eq!(
+            write_hits[0].severity, "info",
+            "write side stays info — stylistic, not correctness",
+        );
     }
 
     /// `.starts_with("foo-")` on a non-`id` field must NOT fire. The

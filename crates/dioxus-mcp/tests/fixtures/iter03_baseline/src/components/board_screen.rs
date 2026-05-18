@@ -20,6 +20,11 @@ fn BoardBody() -> Element {
     // reconciliation server fn. Also triggers `signal_used_as_fence`.
     let mut local_lock = use_signal(|| 0u32);
     let mut status = use_signal(|| None::<String>);
+    // signal_drilled_2_levels: `dragging` is created here via `use_signal`
+    // and forwarded BoardBody → Column → CardItem. BoardBody has no prop
+    // named `dragging` so prop_drill can't see the first hop; the lint's
+    // origin scanner has to synthesize it.
+    let dragging = use_signal(|| None::<String>);
 
     use_future(move || async move {
         loop {
@@ -35,6 +40,20 @@ fn BoardBody() -> Element {
                     status.set(Some(format!("Sync issue: {e}")));
                 }
             }
+            // polling_future_no_backoff: constant 2s interval, no jitter,
+            // no error-path delay extension. iter03's exact shape.
+            gloo_timers::future::TimeoutFuture::new(2000).await;
+        }
+    });
+    // empty_async_error_arm: presence heartbeat that swallows errors —
+    // iter03's `ping_presence` loop, board_screen.rs:55-57.
+    use_future(move || async move {
+        loop {
+            match crate::server::ping_presence().await {
+                Ok(_v) => {}
+                Err(_) => {}
+            }
+            gloo_timers::future::TimeoutFuture::new(3000).await;
         }
     });
 
@@ -90,6 +109,7 @@ fn BoardBody() -> Element {
                 id: (*col_id).to_string(),
                 label: (*col_label).to_string(),
                 cards: column_cards(&cards.read(), col_id),
+                dragging: dragging,
                 on_move: move_card,
                 on_delete: delete_card_action,
             }
@@ -104,6 +124,7 @@ fn Column(
     id: String,
     label: String,
     cards: Vec<Card>,
+    dragging: Signal<Option<String>>,
     on_move: EventHandler<(String, String, i32)>,
     on_delete: EventHandler<String>,
 ) -> Element {
@@ -116,6 +137,7 @@ fn Column(
                     key: "{card.id}",
                     card: card,
                     idx: idx as i32,
+                    dragging: dragging,
                     on_move: on_move,
                     on_delete: on_delete,
                 }
@@ -128,6 +150,7 @@ fn Column(
 fn CardItem(
     card: Card,
     idx: i32,
+    dragging: Signal<Option<String>>,
     on_move: EventHandler<(String, String, i32)>,
     on_delete: EventHandler<String>,
 ) -> Element {
@@ -135,7 +158,7 @@ fn CardItem(
     let is_pending = card.id.starts_with("tmp-");
     let card_id = card.id.clone();
     let card_id_del = card_id.clone();
-    let _ = (idx, on_move, is_pending);
+    let _ = (idx, on_move, is_pending, dragging);
     rsx! {
         div {
             class: if is_pending { "card pending" } else { "card" },

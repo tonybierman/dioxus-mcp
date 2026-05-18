@@ -25,19 +25,22 @@ pub fn user_from_cookies(
     SESSIONS.lock().ok()?.get(sid).cloned()
 }
 
-// duplicate_helper_across_client_and_server: byte-identical to the
-// `normalize_positions` in `components/board_screen.rs`.
-pub fn normalize_positions(list: &mut Vec<Card>) {
+// duplicate_helper_across_client_and_server: body shape identical to the
+// `normalize_positions` in `components/board_screen.rs`. Mirrors the real
+// iter03 where the param is named `board` on the server side and `list`
+// on the client side — the matcher must rewrite the param to a positional
+// placeholder before comparing, otherwise this case goes silent.
+pub fn normalize_positions(board: &mut Vec<Card>) {
     for col in ["todo", "doing", "done"] {
-        let mut idxs: Vec<usize> = list
+        let mut idxs: Vec<usize> = board
             .iter()
             .enumerate()
             .filter(|(_, c)| c.column == col)
             .map(|(i, _)| i)
             .collect();
-        idxs.sort_by_key(|i| list[*i].position);
+        idxs.sort_by_key(|i| board[*i].position);
         for (rank, i) in idxs.into_iter().enumerate() {
-            list[i].position = rank as i32;
+            board[i].position = rank as i32;
         }
     }
 }

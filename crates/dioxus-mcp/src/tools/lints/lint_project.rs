@@ -35,6 +35,10 @@ const ALL_LINTS: &[&str] = &[
     "vec_or_owned_prop_passthrough",
     "magic_id_prefix_for_optimistic",
     "shared_enum_validation",
+    "derived_view_no_memo",
+    "empty_async_error_arm",
+    "polling_future_no_backoff",
+    "repeated_auth_extractor",
 ];
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -115,6 +119,14 @@ pub struct LintProjectReport {
     pub magic_id_prefix_for_optimistic: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_enum_validation: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_view_no_memo: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty_async_error_arm: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub polling_future_no_backoff: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeated_auth_extractor: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -527,6 +539,87 @@ pub async fn lint_project(
         report.shared_enum_validation = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
+    if want("derived_view_no_memo") {
+        let r = crate::tools::lints::derived_view_no_memo::derived_view_no_memo(
+            state,
+            crate::tools::lints::derived_view_no_memo::DerivedViewNoMemoParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("derived_view_no_memo".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "derived_view_no_memo".into(),
+            issues: count,
+        });
+        report.derived_view_no_memo = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("empty_async_error_arm") {
+        let r = crate::tools::lints::empty_async_error_arm::empty_async_error_arm(
+            state,
+            crate::tools::lints::empty_async_error_arm::EmptyAsyncErrorArmParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("empty_async_error_arm".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "empty_async_error_arm".into(),
+            issues: count,
+        });
+        report.empty_async_error_arm = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("polling_future_no_backoff") {
+        let r = crate::tools::lints::polling_future_no_backoff::polling_future_no_backoff(
+            state,
+            crate::tools::lints::polling_future_no_backoff::PollingFutureNoBackoffParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("polling_future_no_backoff".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "polling_future_no_backoff".into(),
+            issues: count,
+        });
+        report.polling_future_no_backoff = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
+    if want("repeated_auth_extractor") {
+        let r = crate::tools::lints::repeated_auth_extractor::repeated_auth_extractor(
+            state,
+            crate::tools::lints::repeated_auth_extractor::RepeatedAuthExtractorParams {
+                project_root: p.project_root.clone(),
+                min_call_sites: None,
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("repeated_auth_extractor".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "repeated_auth_extractor".into(),
+            issues: count,
+        });
+        report.repeated_auth_extractor = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
     // Sum from `issues_by_lint` instead of accumulating per-lint, so adding a
     // new lint can't silently drop its count from the headline number.
     report.total_issues = report.issues_by_lint.iter().map(|c| c.issues).sum();
@@ -767,6 +860,54 @@ fn build_headline(report: &LintProjectReport) -> Vec<HeadlineEntry> {
                 .map(|s| s.to_string());
             let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "info");
             bump("shared_enum_validation", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.derived_view_no_memo
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "warning");
+            bump("derived_view_no_memo", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.empty_async_error_arm
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "warning");
+            bump("empty_async_error_arm", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.polling_future_no_backoff
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "warning");
+            bump("polling_future_no_backoff", code, sev, 1);
+        }
+    }
+    if let Some(v) = &report.repeated_auth_extractor
+        && let Some(arr) = v.get("findings").and_then(|x| x.as_array())
+    {
+        for finding in arr {
+            let code = finding
+                .get("code")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
+            let sev = severity_str(finding.get("severity").and_then(|x| x.as_str()), "info");
+            bump("repeated_auth_extractor", code, sev, 1);
         }
     }
 

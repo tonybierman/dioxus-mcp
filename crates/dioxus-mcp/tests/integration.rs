@@ -1399,6 +1399,23 @@ fn tool_lint_project_iter03_baseline() {
         ("shared_enum_validation", 1),
         ("signal_lint", 1),
         ("insecure_set_cookie", 1),
+        // iter03 collapse: `dragging` is `use_signal`'d in BoardBody and
+        // forwarded BoardBody → Column → CardItem. The lint must
+        // synthesize the origin hop or this regresses to 0.
+        ("signal_drilled_2_levels", 1),
+        // `column_cards(&cards.read(), col_id)` inside BoardBody's rsx
+        // loop — the canonical derived-view-no-memo shape.
+        ("derived_view_no_memo", 1),
+        // `Err(_) => {}` inside the `ping_presence` use_future loop —
+        // iter03's silent-poll-failure shape.
+        ("empty_async_error_arm", 1),
+        // Two polling loops with constant TimeoutFuture::new(N) delays
+        // (board poll @ 2s, presence ping @ 3s) — both thundering-herd
+        // shaped.
+        ("polling_future_no_backoff", 2),
+        // `user_from_cookies(&cookies)` repeated across fetch_board /
+        // create_card / delete_card — the canonical 3+ server-fn shape.
+        ("repeated_auth_extractor", 1),
     ];
     for (lint, min) in expected_min {
         let actual = counts.get(*lint).copied().unwrap_or(0);

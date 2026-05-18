@@ -277,6 +277,64 @@ impl DioxusMcp {
     }
 
     #[tool(
+        description = "Flag an auth-shaped helper fn that's called from ≥3 distinct server fn bodies — `user_from_cookies(&cookies)`, `cookies.get(\"sid\")`, etc. The same identity check repeated across the server surface is the signal that the app wants an Axum `FromRequestParts` extractor: write the auth logic once, get a `Session` / `User` type-level guarantee everywhere it's needed. Emits `info`-severity findings; `who_am_i` / `login` / `logout` endpoints are exempt because those ARE the auth surface. `min_call_sites` (default 3) lowers the threshold for early surfacing."
+    )]
+    async fn repeated_auth_extractor(
+        &self,
+        Parameters(p): Parameters<
+            tools::lints::repeated_auth_extractor::RepeatedAuthExtractorParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::repeated_auth_extractor::repeated_auth_extractor(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Flag a `use_future` / `spawn` polling loop whose tick interval is a constant literal — no error-path backoff, no jitter. Detects `loop { … <server_fn>().await … <sleep>(<int_literal>).await; }` patterns where the sleep is `TimeoutFuture::new`, `tokio::time::sleep`, `gloo_timers::sleep`, or any of the timer-typed constructors. Stays silent when the delay expression is a variable (presumed to encode backoff already) and in sync contexts. Emits `warning` severity with `delay_ms` and `sleep_call` so reviewers can grep the rest of the codebase for the same pattern."
+    )]
+    async fn polling_future_no_backoff(
+        &self,
+        Parameters(p): Parameters<
+            tools::lints::polling_future_no_backoff::PollingFutureNoBackoffParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::polling_future_no_backoff::polling_future_no_backoff(&self.state, p)
+            .await
+        {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Flag an `Err(_) => {}` arm (or `if let Err(_) = … {}`) inside an `async` context — `use_future(|| async move { … })`, `spawn(async move { … })`, an `async fn` body, or any inline `async { … }` block. Swallowing errors here turns a polling loop into a silent failure: the UI looks live, the server is broken. Emits one `warning`-severity finding per offending arm with `shape: match_arm` or `if_let_block`. Stays silent in sync contexts and when the Err arm has any non-empty body."
+    )]
+    async fn empty_async_error_arm(
+        &self,
+        Parameters(p): Parameters<tools::lints::empty_async_error_arm::EmptyAsyncErrorArmParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::empty_async_error_arm::empty_async_error_arm(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Flag a pure derivation fn — one that takes `&[T]` and returns `Vec<T>` (or any owned `Vec<U>`) — when it's invoked from inside an `rsx!` body without `use_memo(…)`. Each render reruns the filter/sort/clone even when neither the source signal nor the selector changed. iter03's `column_cards(&cards.read(), col_id)` called three times per render is the canonical shape. Emits one `warning`-severity finding per (component, callee) pair with `calls_in_rsx_block` so reviewers see the per-render multiplier. Fix is mechanical: `use_memo(move || callee(args))()`. False-positive shape: a deliberately-fresh recomputation (rare); reviewer overrides."
+    )]
+    async fn derived_view_no_memo(
+        &self,
+        Parameters(p): Parameters<tools::lints::derived_view_no_memo::DerivedViewNoMemoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::derived_view_no_memo::derived_view_no_memo(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "Hint when a component hand-rolls a catalog widget via class-attribute conventions. Scans every `#[component] fn` rsx for `class: \"<literal>\"` strings and flags tokens that map to a catalog widget (`modal`/`dialog` → dialog, `tabs`/`tab-strip`/`tablist` → tabs, `accordion` → accordion, `popover` → popover, `tooltip` → tooltip, `calendar` → calendar, `datepicker`/`date-picker` → date_picker, `dropdown`/`dropdown-menu` → dropdown_menu, `toast`/`snackbar` → toast, `sidebar` → sidebar, `drawer` → sheet, `pagination` → pagination, `avatar` → avatar, `badge` → badge, `progress`/`progress-bar` → progress). Skips catalog wrapper files (`src/components/<catalog_name>/`). Dedupes per-component. All findings are `confidence: low` — class names are conventions, not contracts. Complements `reinvented_widget` (bare DOM tags + drag/drop) and `suggest_components` (the pre-write counterpart)."
     )]
     async fn components_audit(

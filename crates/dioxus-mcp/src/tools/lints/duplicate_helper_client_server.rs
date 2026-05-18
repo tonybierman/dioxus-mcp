@@ -155,23 +155,96 @@ fn collect_fn_bodies(
         if is_server_fn_attribute(&f.attrs) || is_component_fn(&f.attrs) {
             continue;
         }
+
+        // Extract parameter idents in order — these get rewritten to
+        // positional placeholders so two helpers that differ only in
+        // arg name (iter03: `list` in components vs `board` in server)
+        // hash to the same body key.
+        let param_map = param_rename_map(&f.sig);
+        let sig_type_key = signature_type_key(&f.sig);
+        let body_tokens = rewrite_idents(f.block.to_token_stream(), &param_map);
+        let body_key = normalize(&body_tokens.to_string());
+
         // Skip extremely short bodies — those are usually wrappers that
         // legitimately differ in their server/client bindings and aren't
         // worth flagging. We measure by token-stream length (after
         // whitespace normalization) rather than statement count, because
         // a single for-loop fn body (one stmt, many tokens) is exactly
         // the duplication shape generators produce.
-        let body_key = normalize(&f.block.to_token_stream().to_string());
         if body_key.len() < 40 {
             continue;
         }
         let name = f.sig.ident.to_string();
-        out.entry((name, body_key)).or_default().push(HelperSite {
+        // Bake the normalized signature into the group key so two helpers
+        // named the same but with different parameter types (e.g. one
+        // takes `&mut Vec<Card>`, the other `&mut Vec<Note>`) don't get
+        // bucketed together.
+        let group_key = format!("{sig_type_key}::{body_key}");
+        out.entry((name, group_key)).or_default().push(HelperSite {
             file: sf.path.clone(),
             line: f.sig.ident.span().start().line,
             side,
         });
     }
+}
+
+/// Build a map from each named parameter ident to a positional placeholder
+/// (`__arg0__`, `__arg1__`, …). Patterns that aren't a plain ident (tuples,
+/// `mut self`, etc.) are skipped — the placeholder substitution only matters
+/// for the simple helper shape we target.
+fn param_rename_map(sig: &syn::Signature) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (idx, arg) in sig.inputs.iter().enumerate() {
+        if let syn::FnArg::Typed(pt) = arg {
+            if let syn::Pat::Ident(pi) = &*pt.pat {
+                map.insert(pi.ident.to_string(), format!("__arg{idx}__"));
+            }
+        }
+    }
+    map
+}
+
+/// Canonicalize the signature down to the type sequence (param types + return
+/// type) so two helpers with identical types but differently-named args
+/// collapse to the same key.
+fn signature_type_key(sig: &syn::Signature) -> String {
+    let mut parts: Vec<String> = sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            syn::FnArg::Typed(pt) => normalize(&pt.ty.to_token_stream().to_string()),
+            syn::FnArg::Receiver(r) => normalize(&r.to_token_stream().to_string()),
+        })
+        .collect();
+    let ret = match &sig.output {
+        syn::ReturnType::Default => "()".to_string(),
+        syn::ReturnType::Type(_, ty) => normalize(&ty.to_token_stream().to_string()),
+    };
+    parts.push(format!("->{ret}"));
+    parts.join("|")
+}
+
+/// Walk a token stream and substitute any `Ident` whose name appears in the
+/// rename map with its placeholder, recursing into `Group` token trees.
+fn rewrite_idents(
+    ts: proc_macro2::TokenStream,
+    map: &HashMap<String, String>,
+) -> proc_macro2::TokenStream {
+    ts.into_iter()
+        .map(|tt| match tt {
+            proc_macro2::TokenTree::Ident(id) => match map.get(&id.to_string()) {
+                Some(rep) => proc_macro2::TokenTree::Ident(proc_macro2::Ident::new(rep, id.span())),
+                None => proc_macro2::TokenTree::Ident(id),
+            },
+            proc_macro2::TokenTree::Group(g) => {
+                let inner = rewrite_idents(g.stream(), map);
+                let mut new_group = proc_macro2::Group::new(g.delimiter(), inner);
+                new_group.set_span(g.span());
+                proc_macro2::TokenTree::Group(new_group)
+            }
+            other => other,
+        })
+        .collect()
 }
 
 fn is_server_fn_attribute(attrs: &[syn::Attribute]) -> bool {
@@ -316,6 +389,75 @@ fn helper(x: i32) -> i32 {
 "#;
         let r = run(&[("components/a.rs", body), ("components/b.rs", body)]);
         assert!(r.findings.is_empty(), "both client-side: {r:?}");
+    }
+
+    /// iter03 real-world regression: arg name differs (`list` vs `board`)
+    /// but the body shape and signature types are identical. Must fire —
+    /// before the rename-the-param normalization, this would group as
+    /// two distinct body keys and stay silent.
+    #[test]
+    fn flags_when_only_param_name_differs() {
+        let client = r#"
+fn normalize_positions(list: &mut Vec<Card>) {
+    for col in ["todo", "doing", "done"] {
+        let mut idxs: Vec<usize> = list
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.column == col)
+            .map(|(i, _)| i)
+            .collect();
+        idxs.sort_by_key(|i| list[*i].position);
+        for (rank, i) in idxs.into_iter().enumerate() {
+            list[i].position = rank as i32;
+        }
+    }
+}
+"#;
+        let server = r#"
+pub fn normalize_positions(board: &mut Vec<Card>) {
+    for col in ["todo", "doing", "done"] {
+        let mut idxs: Vec<usize> = board
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.column == col)
+            .map(|(i, _)| i)
+            .collect();
+        idxs.sort_by_key(|i| board[*i].position);
+        for (rank, i) in idxs.into_iter().enumerate() {
+            board[i].position = rank as i32;
+        }
+    }
+}
+"#;
+        let r = run(&[("components/board.rs", client), ("server/state.rs", server)]);
+        assert_eq!(r.findings.len(), 1, "expected one finding: {r:?}");
+        assert_eq!(r.findings[0].fn_name, "normalize_positions");
+    }
+
+    /// Param type mismatch must NOT collapse to a duplicate even though
+    /// the fn name and body shape line up — `&mut Vec<Card>` is not the
+    /// same helper as `&mut Vec<Note>`.
+    #[test]
+    fn silent_when_param_types_differ() {
+        let client = r#"
+fn shuffle(list: &mut Vec<Card>) {
+    list.sort_by_key(|c| c.position);
+    list.reverse();
+    list.truncate(10);
+}
+"#;
+        let server = r#"
+fn shuffle(list: &mut Vec<Note>) {
+    list.sort_by_key(|c| c.position);
+    list.reverse();
+    list.truncate(10);
+}
+"#;
+        let r = run(&[("components/board.rs", client), ("server/state.rs", server)]);
+        assert!(
+            r.findings.is_empty(),
+            "param type mismatch should stay silent: {r:?}"
+        );
     }
 
     /// `async fn` is excluded — server fns themselves would otherwise

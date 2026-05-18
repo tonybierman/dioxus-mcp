@@ -264,12 +264,21 @@ const CONTEXT_SIGNAL_TRIAD_THRESHOLD: usize = 3;
 fn detect_context_signal_triads(
     files: &[crate::tools::ast::ScannedFile],
 ) -> (Vec<ContextSignalTriad>, ContextSignalTriadsSummary) {
+    use quote::ToTokens;
     let mut modules: Vec<ContextSignalModule> = Vec::new();
+    // Track whether each module's provide_X / use_X bodies match the
+    // canonical signal boilerplate (`use_context_provider(|| Signal::new(…))`
+    // in provide_X, `use_context::<Signal<…>>()` in use_X). The N=2
+    // hint only fires when BOTH modules share this shape; otherwise
+    // the pair could be coincidental.
+    let mut boilerplate: std::collections::HashSet<(std::path::PathBuf, String)> =
+        std::collections::HashSet::new();
     for sf in files {
         let Ok(ast) = &sf.ast else { continue };
-        let mut provides: std::collections::HashMap<String, usize> =
+        let mut provides: std::collections::HashMap<String, (usize, String)> =
             std::collections::HashMap::new();
-        let mut uses: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut uses: std::collections::HashMap<String, (usize, String)> =
+            std::collections::HashMap::new();
         for item in &ast.items {
             let syn::Item::Fn(f) = item else { continue };
             if !matches!(f.vis, syn::Visibility::Public(_)) {
@@ -277,20 +286,24 @@ fn detect_context_signal_triads(
             }
             let name = f.sig.ident.to_string();
             let line = f.sig.ident.span().start().line;
+            let body = collapse_ws(&f.block.to_token_stream().to_string());
             if let Some(suffix) = name.strip_prefix("provide_") {
-                provides.insert(suffix.to_string(), line);
+                provides.insert(suffix.to_string(), (line, body));
             } else if let Some(suffix) = name.strip_prefix("use_") {
-                uses.insert(suffix.to_string(), line);
+                uses.insert(suffix.to_string(), (line, body));
             }
         }
-        for (suffix, provide_line) in &provides {
-            if let Some(use_line) = uses.get(suffix) {
+        for (suffix, (provide_line, p_body)) in &provides {
+            if let Some((use_line, u_body)) = uses.get(suffix) {
                 modules.push(ContextSignalModule {
                     file: sf.path.clone(),
                     name: suffix.clone(),
                     provide_line: *provide_line,
                     use_line: *use_line,
                 });
+                if is_signal_provider_boilerplate(p_body) && is_signal_use_boilerplate(u_body) {
+                    boilerplate.insert((sf.path.clone(), suffix.clone()));
+                }
             }
         }
     }
@@ -305,15 +318,75 @@ fn detect_context_signal_triads(
         threshold: CONTEXT_SIGNAL_TRIAD_THRESHOLD,
         names: names.clone(),
     };
-    if modules.len() < CONTEXT_SIGNAL_TRIAD_THRESHOLD {
-        return (Vec::new(), summary);
+
+    if modules.len() >= CONTEXT_SIGNAL_TRIAD_THRESHOLD {
+        let message = format!(
+            "{} sibling context-signal modules detected ({}). Three or more `provide_X` + `use_X` pairs is a smell — consolidate into a single `Store` (see the `Store` primitive in `get_dsl_spec`) so callers share one provider and one type, instead of N near-identical files.",
+            modules.len(),
+            names.join(", ")
+        );
+        return (vec![ContextSignalTriad { modules, message }], summary);
     }
-    let message = format!(
-        "{} sibling context-signal modules detected ({}). Three or more `provide_X` + `use_X` pairs is a smell — consolidate into a single `Store` (see the `Store` primitive in `get_dsl_spec`) so callers share one provider and one type, instead of N near-identical files.",
-        modules.len(),
-        names.join(", ")
-    );
-    (vec![ContextSignalTriad { modules, message }], summary)
+    // N=2 hint: require BOTH modules to share the canonical signal
+    // boilerplate. iter03 has exactly two such modules (`session`,
+    // `presence`) — neither hits the warning threshold but the pair is
+    // already a smell worth surfacing as a hint.
+    if modules.len() == 2
+        && modules
+            .iter()
+            .all(|m| boilerplate.contains(&(m.file.clone(), m.name.clone())))
+    {
+        let message = format!(
+            "2 sibling context-signal modules detected ({}). Each one is a byte-identical \
+             `use_context_provider(|| Signal::new(…))` + `use_context::<Signal<…>>()` pair — \
+             the boilerplate is already present, just below the N=3 warning threshold. \
+             Consider consolidating into a single `Store` now (see the `Store` primitive in \
+             `get_dsl_spec`) before a third context-signal pair lands and the duplication \
+             becomes harder to unwind.",
+            names.join(", ")
+        );
+        return (vec![ContextSignalTriad { modules, message }], summary);
+    }
+    (Vec::new(), summary)
+}
+
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = false;
+    for c in s.chars() {
+        let c = if c.is_whitespace() { ' ' } else { c };
+        if c == ' ' {
+            if !last_space {
+                out.push(' ');
+            }
+            last_space = true;
+        } else {
+            out.push(c);
+            last_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// True when the body matches the canonical `provide_X` signal-context
+/// shape: contains `use_context_provider` AND `Signal :: new` (or
+/// `Signal::new`) within the same body. Token-level substring match —
+/// good enough for the boilerplate-shape detection because the body is
+/// already known to be a `pub fn provide_<X>` and we don't try to
+/// distinguish other context providers.
+fn is_signal_provider_boilerplate(body: &str) -> bool {
+    let normalized = body.replace(' ', "");
+    normalized.contains("use_context_provider")
+        && (normalized.contains("Signal::new") || normalized.contains("Signal<"))
+}
+
+/// True when the body matches the canonical `use_X` signal-context shape:
+/// `use_context::<Signal<…>>()`.
+fn is_signal_use_boilerplate(body: &str) -> bool {
+    let normalized = body.replace(' ', "");
+    normalized.contains("use_context::<Signal<")
+        || normalized.contains("use_context::<ReadSignal<")
+        || normalized.contains("use_context::<WriteSignal<")
 }
 
 struct LoopVisitor<'a> {
@@ -2406,6 +2479,48 @@ mod hydration_tests {
         let mut names = summary.names.clone();
         names.sort();
         assert_eq!(names, vec!["theme".to_string(), "user".to_string()]);
+    }
+
+    /// iter03 follow-up: when N=2 modules each carry the canonical
+    /// `use_context_provider(|| Signal::new(…))` + `use_context::<Signal<…>>()`
+    /// boilerplate, emit a hint before the third pair lands and makes
+    /// the duplication harder to unwind. The earlier
+    /// `no_triad_below_three_modules` covers the empty-body case where
+    /// the pair is coincidental — that one must remain silent.
+    #[test]
+    fn flags_two_modules_when_both_share_signal_boilerplate() {
+        let files = vec![
+            parse_into_scanned(
+                "src/state/session.rs",
+                r#"use dioxus::prelude::*;
+pub fn provide_session() {
+    use_context_provider(|| Signal::new(None::<String>));
+}
+pub fn use_session() -> Signal<Option<String>> {
+    use_context::<Signal<Option<String>>>()
+}
+"#,
+            ),
+            parse_into_scanned(
+                "src/state/presence.rs",
+                r#"use dioxus::prelude::*;
+pub fn provide_presence() {
+    use_context_provider(|| Signal::new(Vec::<String>::new()));
+}
+pub fn use_presence() -> Signal<Vec<String>> {
+    use_context::<Signal<Vec<String>>>()
+}
+"#,
+            ),
+        ];
+        let (triads, summary) = detect_context_signal_triads(&files);
+        assert_eq!(triads.len(), 1, "expected one N=2 hint: {triads:?}");
+        let names: Vec<&str> = triads[0].modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"session"));
+        assert!(names.contains(&"presence"));
+        assert!(triads[0].message.contains("Store"));
+        assert!(triads[0].message.contains("2 sibling"));
+        assert_eq!(summary.detected, 2);
     }
 
     #[test]

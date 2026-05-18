@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use crate::state::State;
@@ -59,6 +60,15 @@ pub struct OptimisticLockGateFinding {
     /// event handler) — still the same staleness gate, just less obviously.
     pub confidence: &'static str,
     pub message: String,
+    /// Lines where the signal is bumped (`{signal} += …;` or
+    /// `{signal} -= …;`). For `confidence: "high"` findings these
+    /// live in the same hook/closure as the snapshot+gate pair; for
+    /// `medium` they live in sibling event handlers. Surfaced so the
+    /// reviewer can collapse every bump call site at once when lifting
+    /// the gate into a `Store` generation method (without re-grep-ing
+    /// for the signal name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bump_sites: Vec<usize>,
     /// Paste-ready Store skeleton sized to the lock signal. Generators
     /// hit this exact shape (snapshot + bump + compare around a server
     /// fn call); the fix is always "lift the gate into a Store
@@ -204,7 +214,21 @@ fn scan_component(
                 continue;
             };
             high_hits.insert(signal.clone());
+            // Collect EVERY bump site in the full component body — even
+            // the "high" finding wants the full list, because the
+            // consolidation refactor still has to land in every event
+            // handler that bumps the signal.
+            let mut bump_collector = BumpVisitor {
+                signal,
+                saw: false,
+                sites: Vec::new(),
+            };
+            bump_collector.visit_block(&f.block);
+            let mut bump_sites = bump_collector.sites;
+            bump_sites.sort();
+            bump_sites.dedup();
             let snapshot_name = hit.snapshot_name.clone();
+            let bump_locs = format_bump_locs(&bump_sites);
             findings.push(OptimisticLockGateFinding {
                 code: "optimistic_lock_gate",
                 file: file.to_path_buf(),
@@ -215,7 +239,7 @@ fn scan_component(
                 confidence: "high",
                 message: format!(
                     "`{signal}` is hand-rolling the optimistic-lock staleness gate: \
-                     snapshot (`let {snap} = {signal}();`), bump (`{signal} += …;`), \
+                     snapshot (`let {snap} = {signal}();`), bump{bump_locs}, \
                      and a gated reconciliation (`if {signal}() == {snap} {{ … }}`) \
                      inside an async tail. This is the third generated app with the \
                      same shape — extract the pattern into a `Store` generation \
@@ -224,6 +248,7 @@ fn scan_component(
                      place. See the `Store` primitive in `get_dsl_spec`.",
                     snap = snapshot_name,
                 ),
+                bump_sites,
                 fix: lock_gate_store_skeleton(signal, &snapshot_name),
             });
         }
@@ -261,12 +286,20 @@ fn scan_component(
         }
         let Some(hit) = pair else { continue };
         // Bump anywhere in the entire component body (any source, any depth).
-        let mut bump_v = BumpVisitor { signal, saw: false };
+        let mut bump_v = BumpVisitor {
+            signal,
+            saw: false,
+            sites: Vec::new(),
+        };
         bump_v.visit_block(&f.block);
         if !bump_v.saw {
             continue;
         }
+        let mut bump_sites = bump_v.sites;
+        bump_sites.sort();
+        bump_sites.dedup();
         let snapshot_name = hit.snapshot_name.clone();
+        let bump_locs = format_bump_locs(&bump_sites);
         findings.push(OptimisticLockGateFinding {
             code: "optimistic_lock_gate",
             file: file.to_path_buf(),
@@ -278,15 +311,32 @@ fn scan_component(
             message: format!(
                 "`{signal}` looks like the optimistic-lock staleness gate split \
                  across bodies: snapshot + async compare against `{snap}` live in \
-                 one hook/closure, the bump (`{signal} += …;`) lives in another. \
-                 The semantics are still the same — extract into a `Store` \
-                 generation method (e.g. `let rev = store.bump_revision(); … if \
-                 store.matches(rev) {{ … }}`) so the invariant lives in one \
-                 place. See the `Store` primitive in `get_dsl_spec`.",
+                 one hook/closure; the bump (`{signal} += …;`){bump_locs} lives in \
+                 sibling event handlers. The semantics are still the same — \
+                 extract into a `Store` generation method (e.g. `let rev = \
+                 store.bump_revision(); … if store.matches(rev) {{ … }}`) so the \
+                 invariant lives in one place. See the `Store` primitive in \
+                 `get_dsl_spec`.",
                 snap = snapshot_name,
             ),
+            bump_sites,
             fix: lock_gate_store_skeleton(signal, &snapshot_name),
         });
+    }
+}
+
+/// Format a list of bump-site line numbers for inclusion in a finding
+/// message. Empty input yields the empty string (no extra clause);
+/// single-site yields ` at line N`; multi-site yields ` at lines
+/// N, M, …` so the consolidation refactor sees every site at once.
+fn format_bump_locs(sites: &[usize]) -> String {
+    match sites.len() {
+        0 => String::new(),
+        1 => format!(" at line {}", sites[0]),
+        _ => {
+            let s: Vec<String> = sites.iter().map(|n| n.to_string()).collect();
+            format!(" at lines {}", s.join(", "))
+        }
     }
 }
 
@@ -443,7 +493,11 @@ fn detect_in_source(body: &syn::Expr, signal: &str) -> Option<DetectionHit> {
     if snap_v.hits.is_empty() {
         return None;
     }
-    let mut bump_v = BumpVisitor { signal, saw: false };
+    let mut bump_v = BumpVisitor {
+        signal,
+        saw: false,
+        sites: Vec::new(),
+    };
     bump_v.visit_expr(body);
     if !bump_v.saw {
         return None;
@@ -490,6 +544,11 @@ impl<'a, 'ast> Visit<'ast> for SnapshotVisitor<'a> {
 struct BumpVisitor<'a> {
     signal: &'a str,
     saw: bool,
+    /// Lines where the bump occurs. Surfaced in the finding so the
+    /// reviewer sees every call site at once. iter03 had 4–6 bump sites
+    /// scattered across event handlers — the consolidation refactor is
+    /// unambiguous only if all of them are listed.
+    sites: Vec<usize>,
 }
 
 impl<'a, 'ast> Visit<'ast> for BumpVisitor<'a> {
@@ -501,6 +560,9 @@ impl<'a, 'ast> Visit<'ast> for BumpVisitor<'a> {
             && is_int_literal(&eb.right)
         {
             self.saw = true;
+            // Anchor on the left-hand side so the recorded line
+            // matches the visible `signal += …;` site.
+            self.sites.push(eb.left.span().start().line);
         }
         syn::visit::visit_expr_binary(self, eb);
     }
@@ -647,6 +709,64 @@ fn Board() -> Element {
         assert_eq!(findings[0].signal, "local_lock");
         assert_eq!(findings[0].snapshot, "lock");
         assert_eq!(findings[0].code, "optimistic_lock_gate");
+        // bump_sites must list the single bump in the handler.
+        assert_eq!(findings[0].bump_sites.len(), 1, "{:?}", findings[0]);
+        // Message names the line so the consolidation refactor is
+        // unambiguous — no more "the bump lives in another" without a
+        // concrete pointer.
+        assert!(
+            findings[0]
+                .message
+                .contains(&format!("at line {}", findings[0].bump_sites[0])),
+            "message must name the bump line: {}",
+            findings[0].message,
+        );
+    }
+
+    /// Multiple sibling event handlers each bumping the signal — the
+    /// consolidation refactor sees every site at once. Mirrors iter03's
+    /// 4–6 scattered bumps.
+    #[test]
+    fn surfaces_every_bump_site_in_message() {
+        let findings = scan(
+            r#"use dioxus::prelude::*;
+
+#[component]
+fn Board() -> Element {
+    let mut local_lock = use_signal(|| 0u32);
+    let create = move |_| {
+        local_lock += 1;
+        spawn(async move { local_lock += 1; });
+    };
+    let delete = move |_| {
+        local_lock += 1;
+        spawn(async move { local_lock += 1; });
+    };
+    let snapshot_handler = move |_| {
+        let lock = local_lock();
+        spawn(async move {
+            if local_lock() == lock {
+                let _ = ();
+            }
+        });
+    };
+    let _ = (create, delete, snapshot_handler);
+    rsx! {}
+}
+"#,
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let f = &findings[0];
+        assert!(
+            f.bump_sites.len() >= 4,
+            "expected at least 4 bump sites; got {:?}",
+            f.bump_sites,
+        );
+        assert!(
+            f.message.contains("at lines"),
+            "multi-site finding must use plural form: {}",
+            f.message,
+        );
     }
 
     /// Reversed comparison side (`lock == local_lock()`) must also match —
