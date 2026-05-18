@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use syn::visit::Visit;
 
 use crate::state::State;
+use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DeadComponentsParams {
@@ -53,9 +53,9 @@ pub async fn dead_components(
     let crate_root = crate_root(state, p.project_root.as_deref()).await?;
     let src_root = crate_root.join("src");
 
-    let index = crate::tools::project_index::project_index(
+    let index = crate::tools::inspect::project_index::project_index(
         state,
-        crate::tools::project_index::ProjectIndexParams {
+        crate::tools::inspect::project_index::ProjectIndexParams {
             path: None,
             kind: Some("component".into()),
             project_root: p.project_root.clone(),
@@ -63,9 +63,9 @@ pub async fn dead_components(
     )
     .await?;
 
-    let route_roots: HashSet<String> = match crate::tools::route_map::route_map(
+    let route_roots: HashSet<String> = match crate::tools::inspect::route_map::route_map(
         state,
-        crate::tools::route_map::RouteMapParams {
+        crate::tools::inspect::route_map::RouteMapParams {
             router_file: None,
             project_root: p.project_root.clone(),
         },

@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::state::State;
-use crate::tools::project_index::{ProjectIndexParams, ServerFnEntry, project_index};
-use crate::tools::route_map::{RouteEntry, RouteMapParams, route_map};
+use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
+use crate::tools::inspect::project_index::{ProjectIndexParams, ServerFnEntry, project_index};
+use crate::tools::inspect::route_map::{RouteEntry, RouteMapParams, route_map};
 use crate::tools::scaffold::{crate_root, has_derive};
-use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::tighten_type;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

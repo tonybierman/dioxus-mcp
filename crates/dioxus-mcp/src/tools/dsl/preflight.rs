@@ -509,6 +509,80 @@ fn preflight_inner(
     Ok(())
 }
 
+/// Abort early when the doc declares server fns but the project isn't
+/// fullstack-capable. Without this, model / state / etc. files would already
+/// be on disk by the time `create_server_fn` hits its own fullstack gate,
+/// leaving the project in a half-written state. We re-check here even though
+/// the per-primitive scaffolder also gates — preflight gives the caller one
+/// error to fix and zero files to undo.
+pub(super) fn preflight_fullstack(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+) -> Result<(), String> {
+    let added_server_fn = !doc.server_fns.is_empty() || !synth_server_fns.is_empty();
+    if !added_server_fn {
+        return Ok(());
+    }
+    let info = crate::project::ProjectInfo::detect(crate_root);
+    if !info.is_dioxus_project {
+        return Err(format!(
+            "preflight: this run declares server fn(s) but `{}` does not look like a Dioxus project \
+             (no `dioxus` dep in Cargo.toml). Pass `project_root` to a real Dioxus crate or call \
+             `audit_feature_flags` for guidance.",
+            crate_root.display()
+        ));
+    }
+    if info.fullstack_capable() {
+        return Ok(());
+    }
+    let active = &info.dioxus_features;
+    let names: Vec<String> = doc
+        .server_fns
+        .iter()
+        .map(|s| s.name.clone())
+        .chain(synth_server_fns.iter().map(|s| s.name.clone()))
+        .collect();
+    Err(format!(
+        "preflight: this run would write server fn(s) ({}) but the `dioxus` dep's features ({:?}) \
+         don't enable fullstack. Aborting before any files are written so the project is left untouched. \
+         Fix: add `features = [\"fullstack\"]` (or `web`+`server`, or an opt-in `server = [\"dioxus/server\"]` \
+         sibling feature) to the `dioxus` dep in Cargo.toml, then re-run. Call `audit_feature_flags` for the \
+         exact patch.",
+        names.join(", "),
+        active
+    ))
+}
+
+/// Append `next_steps` hints when the doc emitted primitives that depend on
+/// dioxus features the project isn't currently building with. Keeps the
+/// adjacency narrow — we only flag the case the user is one keystroke away
+/// from hitting: added a server fn (explicit or synth) without `fullstack`
+/// (or `server` + `web`) enabled on the `dioxus` dep.
+pub(super) fn surface_feature_gap_hints(
+    doc: &DslDoc,
+    synth_server_fns: &[SynthServerFn],
+    crate_root: &Path,
+    result: &mut crate::tools::scaffold::ScaffoldResult,
+) {
+    let added_server_fn = !doc.server_fns.is_empty() || !synth_server_fns.is_empty();
+    if !added_server_fn {
+        return;
+    }
+    let info = crate::project::ProjectInfo::detect(crate_root);
+    if !info.is_dioxus_project {
+        return;
+    }
+    if info.fullstack_capable() {
+        return;
+    }
+    let active = &info.dioxus_features;
+    result.next_steps.push(format!(
+        "audit hint: this run added server fn(s) but the `dioxus` dep's features ({:?}) don't include `fullstack` (or `server`+`web`, or an opt-in `server = [\"dioxus/server\"]` sibling feature) — call `audit_feature_flags` for the recommended patch, or add `features = [\"fullstack\"]` to the `dioxus` dep so the server-side code compiles",
+        active
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::remove::synthesize_replace_route_removes;

@@ -18,7 +18,7 @@ use quote::ToTokens;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::execute::DX_COMPONENT_CATALOG_ENTRIES;
+use super::dx_components::DX_COMPONENT_CATALOG_ENTRIES;
 use crate::state::State;
 use crate::tools::{ambiguous_attrs_for_element, resolve_in_project, tighten_type};
 

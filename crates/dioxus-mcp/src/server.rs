@@ -31,9 +31,9 @@ impl DioxusMcp {
     )]
     async fn audit_feature_flags(
         &self,
-        Parameters(p): Parameters<tools::audit_feature_flags::AuditFeatureFlagsParams>,
+        Parameters(p): Parameters<tools::audit::audit_feature_flags::AuditFeatureFlagsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let report = tools::audit_feature_flags::audit_feature_flags(&self.state, p).await;
+        let report = tools::audit::audit_feature_flags::audit_feature_flags(&self.state, p).await;
         ok_json(&report)
     }
 
@@ -42,9 +42,9 @@ impl DioxusMcp {
     )]
     async fn check_rsx(
         &self,
-        Parameters(p): Parameters<tools::check_rsx::CheckRsxParams>,
+        Parameters(p): Parameters<tools::lints::check_rsx::CheckRsxParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::check_rsx::check_rsx(&self.state, p).await {
+        match tools::lints::check_rsx::check_rsx(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -55,9 +55,9 @@ impl DioxusMcp {
     )]
     async fn server_fn_call_graph(
         &self,
-        Parameters(p): Parameters<tools::server_fn_call_graph::ServerFnCallGraphParams>,
+        Parameters(p): Parameters<tools::inspect::server_fn_call_graph::ServerFnCallGraphParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::server_fn_call_graph::server_fn_call_graph(&self.state, p).await {
+        match tools::inspect::server_fn_call_graph::server_fn_call_graph(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -68,9 +68,9 @@ impl DioxusMcp {
     )]
     async fn asset_audit(
         &self,
-        Parameters(p): Parameters<tools::asset_audit::AssetAuditParams>,
+        Parameters(p): Parameters<tools::audit::asset_audit::AssetAuditParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::asset_audit::asset_audit(&self.state, p).await {
+        match tools::audit::asset_audit::asset_audit(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -81,9 +81,9 @@ impl DioxusMcp {
     )]
     async fn dead_components(
         &self,
-        Parameters(p): Parameters<tools::dead_components::DeadComponentsParams>,
+        Parameters(p): Parameters<tools::inspect::dead_components::DeadComponentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::dead_components::dead_components(&self.state, p).await {
+        match tools::inspect::dead_components::dead_components(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -94,9 +94,9 @@ impl DioxusMcp {
     )]
     async fn prop_drill(
         &self,
-        Parameters(p): Parameters<tools::prop_drill::PropDrillParams>,
+        Parameters(p): Parameters<tools::inspect::prop_drill::PropDrillParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::prop_drill::prop_drill(&self.state, p).await {
+        match tools::inspect::prop_drill::prop_drill(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -107,9 +107,9 @@ impl DioxusMcp {
     )]
     async fn signal_lint(
         &self,
-        Parameters(p): Parameters<tools::signal_lint::SignalLintParams>,
+        Parameters(p): Parameters<tools::lints::signal_lint::SignalLintParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::signal_lint::signal_lint(&self.state, p).await {
+        match tools::lints::signal_lint::signal_lint(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -120,9 +120,9 @@ impl DioxusMcp {
     )]
     async fn props_lint(
         &self,
-        Parameters(p): Parameters<tools::props_lint::PropsLintParams>,
+        Parameters(p): Parameters<tools::lints::props_lint::PropsLintParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::props_lint::props_lint(&self.state, p).await {
+        match tools::lints::props_lint::props_lint(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -133,9 +133,9 @@ impl DioxusMcp {
     )]
     async fn reinvented_widget(
         &self,
-        Parameters(p): Parameters<tools::reinvented_widget::ReinventedWidgetParams>,
+        Parameters(p): Parameters<tools::lints::reinvented_widget::ReinventedWidgetParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::reinvented_widget::reinvented_widget(&self.state, p).await {
+        match tools::lints::reinvented_widget::reinvented_widget(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -146,9 +146,9 @@ impl DioxusMcp {
     )]
     async fn lint_project(
         &self,
-        Parameters(p): Parameters<tools::lint_project::LintProjectParams>,
+        Parameters(p): Parameters<tools::lints::lint_project::LintProjectParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::lint_project::lint_project(&self.state, p).await {
+        match tools::lints::lint_project::lint_project(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -159,9 +159,9 @@ impl DioxusMcp {
     )]
     async fn project_tour(
         &self,
-        Parameters(p): Parameters<tools::project_tour::ProjectTourParams>,
+        Parameters(p): Parameters<tools::inspect::project_tour::ProjectTourParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::project_tour::project_tour(&self.state, p).await {
+        match tools::inspect::project_tour::project_tour(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -172,9 +172,9 @@ impl DioxusMcp {
     )]
     async fn project_index(
         &self,
-        Parameters(p): Parameters<tools::project_index::ProjectIndexParams>,
+        Parameters(p): Parameters<tools::inspect::project_index::ProjectIndexParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::project_index::project_index(&self.state, p).await {
+        match tools::inspect::project_index::project_index(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -185,9 +185,9 @@ impl DioxusMcp {
     )]
     async fn route_map(
         &self,
-        Parameters(p): Parameters<tools::route_map::RouteMapParams>,
+        Parameters(p): Parameters<tools::inspect::route_map::RouteMapParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::route_map::route_map(&self.state, p).await {
+        match tools::inspect::route_map::route_map(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -198,9 +198,9 @@ impl DioxusMcp {
     )]
     async fn explain_signal_graph(
         &self,
-        Parameters(p): Parameters<tools::explain_signal_graph::ExplainSignalGraphParams>,
+        Parameters(p): Parameters<tools::inspect::explain_signal_graph::ExplainSignalGraphParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::explain_signal_graph::explain_signal_graph(&self.state, p).await {
+        match tools::inspect::explain_signal_graph::explain_signal_graph(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -297,9 +297,9 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     )]
     async fn search_docs(
         &self,
-        Parameters(p): Parameters<tools::search_docs::SearchDocsParams>,
+        Parameters(p): Parameters<tools::docs::search_docs::SearchDocsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::search_docs::search_docs(&self.state, p).await {
+        match tools::docs::search_docs::search_docs(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -310,9 +310,9 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     )]
     async fn find_example(
         &self,
-        Parameters(p): Parameters<tools::find_example::FindExampleParams>,
+        Parameters(p): Parameters<tools::docs::find_example::FindExampleParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::find_example::find_example(&self.state, p).await {
+        match tools::docs::find_example::find_example(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -323,9 +323,9 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     )]
     async fn openapi_spec(
         &self,
-        Parameters(p): Parameters<tools::openapi_spec::OpenapiSpecParams>,
+        Parameters(p): Parameters<tools::audit::openapi_spec::OpenapiSpecParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::openapi_spec::openapi_spec(&self.state, p).await {
+        match tools::audit::openapi_spec::openapi_spec(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -340,9 +340,9 @@ If the user references \"the last run\" or a specific log file, pass `log_path` 
     )]
     async fn runtime_events(
         &self,
-        Parameters(p): Parameters<tools::runtime_events::RuntimeEventsParams>,
+        Parameters(p): Parameters<tools::runtime::runtime_events::RuntimeEventsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::runtime_events::runtime_events(&self.state, p).await {
+        match tools::runtime::runtime_events::runtime_events(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -355,9 +355,9 @@ USE THIS when the user asks: \"What's the latency distribution for <fn>?\", \"Wh
     )]
     async fn server_fn_summary(
         &self,
-        Parameters(p): Parameters<tools::server_fn_summary::ServerFnSummaryParams>,
+        Parameters(p): Parameters<tools::runtime::server_fn_summary::ServerFnSummaryParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::server_fn_summary::server_fn_summary(&self.state, p).await {
+        match tools::runtime::server_fn_summary::server_fn_summary(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -368,9 +368,9 @@ USE THIS when the user asks: \"What's the latency distribution for <fn>?\", \"Wh
     )]
     async fn build_and_smoke(
         &self,
-        Parameters(p): Parameters<tools::build_and_smoke::BuildAndSmokeParams>,
+        Parameters(p): Parameters<tools::build::build_and_smoke::BuildAndSmokeParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::build_and_smoke::build_and_smoke(&self.state, p).await {
+        match tools::build::build_and_smoke::build_and_smoke(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }

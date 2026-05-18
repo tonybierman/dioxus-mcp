@@ -17,8 +17,10 @@ mod templates;
 mod spec;
 pub use spec::*;
 
+mod cargo;
 mod cargo_patch;
 mod describe_component;
+mod dx_components;
 mod execute;
 mod generate;
 mod list_components;
@@ -34,6 +36,7 @@ mod verify_install;
 mod wire;
 
 pub use describe_component::*;
+pub use dx_components::*;
 pub use execute::*;
 pub use list_components::*;
 pub use verify_install::*;
@@ -51,6 +54,7 @@ mod test_imports {
     pub(super) use crate::tools::scaffold::ScaffoldResult;
 
     pub(super) use super::cargo_patch::*;
+    pub(super) use super::dx_components::*;
     pub(super) use super::generate::*;
     pub(super) use super::modify::*;
     pub(super) use super::plan::*;

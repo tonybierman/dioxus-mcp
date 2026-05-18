@@ -11,7 +11,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::execute::DX_COMPONENT_CATALOG_ENTRIES;
+use super::dx_components::DX_COMPONENT_CATALOG_ENTRIES;
 
 /// Per-catalog-entry caveats — known shape limitations the agent should weigh
 /// BEFORE running `dx components add`. Only listed when the widget materially

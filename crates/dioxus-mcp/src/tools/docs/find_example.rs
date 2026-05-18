@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::state::{CachedDoc, State};
-use crate::tools::search_docs::{score_terms, tokenize};
+use crate::tools::docs::search_docs::{score_terms, tokenize};
 
 mod local;
 

@@ -7,8 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::state::State;
+use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::scaffold::{crate_root, has_derive};
-use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::tighten_type;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

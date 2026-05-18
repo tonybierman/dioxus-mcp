@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use syn::visit::Visit;
 
 use crate::state::State;
+use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ReinventedWidgetParams {

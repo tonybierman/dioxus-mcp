@@ -168,7 +168,7 @@ impl ArchetypeSignals {
         // explicit `use` import.
         let components_dir = src_dir.join("components");
         let catalog_names: std::collections::BTreeSet<&'static str> =
-            crate::tools::dsl::execute::dx_component_names().collect();
+            crate::tools::dsl::dx_components::dx_component_names().collect();
         if let Ok(entries) = std::fs::read_dir(&components_dir) {
             for entry in entries.flatten() {
                 if entry.path().is_dir()

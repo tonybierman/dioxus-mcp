@@ -75,7 +75,9 @@ pub async fn server_fn_summary(
     let mut scanned: Vec<PathBuf> = Vec::new();
 
     if !live_path.exists() {
-        notes.push(crate::tools::runtime_events::probe_missing_note(&live_path));
+        notes.push(crate::tools::runtime::runtime_events::probe_missing_note(
+            &live_path,
+        ));
         return Ok(ServerFnSummaryReport {
             summaries: Vec::new(),
             log_files_scanned: scanned,

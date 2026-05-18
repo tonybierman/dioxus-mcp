@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::state::State;
+use crate::tools::ast::walk_rs_files;
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::walk_rs_files;
 
 const ALL_LINTS: &[&str] = &[
     "check_rsx",
@@ -130,9 +130,9 @@ pub async fn lint_project(
                 issues: 0,
             });
         } else {
-            let r = crate::tools::check_rsx::check_rsx(
+            let r = crate::tools::lints::check_rsx::check_rsx(
                 state,
-                crate::tools::check_rsx::CheckRsxParams {
+                crate::tools::lints::check_rsx::CheckRsxParams {
                     file: None,
                     files: Some(files),
                     project_root: p.project_root.clone(),
@@ -151,9 +151,9 @@ pub async fn lint_project(
     }
 
     if want("dead_components") {
-        let r = crate::tools::dead_components::dead_components(
+        let r = crate::tools::inspect::dead_components::dead_components(
             state,
-            crate::tools::dead_components::DeadComponentsParams {
+            crate::tools::inspect::dead_components::DeadComponentsParams {
                 roots: p.dead_component_roots.clone(),
                 project_root: p.project_root.clone(),
             },
@@ -173,9 +173,9 @@ pub async fn lint_project(
     }
 
     if want("prop_drill") {
-        let r = crate::tools::prop_drill::prop_drill(
+        let r = crate::tools::inspect::prop_drill::prop_drill(
             state,
-            crate::tools::prop_drill::PropDrillParams {
+            crate::tools::inspect::prop_drill::PropDrillParams {
                 project_root: p.project_root.clone(),
                 ignore_callbacks: false,
                 kinds: None,
@@ -196,9 +196,9 @@ pub async fn lint_project(
     }
 
     if want("signal_lint") {
-        let r = crate::tools::signal_lint::signal_lint(
+        let r = crate::tools::lints::signal_lint::signal_lint(
             state,
-            crate::tools::signal_lint::SignalLintParams {
+            crate::tools::lints::signal_lint::SignalLintParams {
                 project_root: p.project_root.clone(),
             },
         )
@@ -217,9 +217,9 @@ pub async fn lint_project(
     }
 
     if want("props_lint") {
-        let r = crate::tools::props_lint::props_lint(
+        let r = crate::tools::lints::props_lint::props_lint(
             state,
-            crate::tools::props_lint::PropsLintParams {
+            crate::tools::lints::props_lint::PropsLintParams {
                 project_root: p.project_root.clone(),
             },
         )
@@ -238,9 +238,9 @@ pub async fn lint_project(
     }
 
     if want("reinvented_widget") {
-        let r = crate::tools::reinvented_widget::reinvented_widget(
+        let r = crate::tools::lints::reinvented_widget::reinvented_widget(
             state,
-            crate::tools::reinvented_widget::ReinventedWidgetParams {
+            crate::tools::lints::reinvented_widget::ReinventedWidgetParams {
                 project_root: p.project_root.clone(),
             },
         )

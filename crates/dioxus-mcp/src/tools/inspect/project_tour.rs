@@ -73,9 +73,9 @@ pub async fn project_tour(
     let audit_fut = async {
         if want("audit") {
             Some(
-                crate::tools::audit_feature_flags::audit_feature_flags(
+                crate::tools::audit::audit_feature_flags::audit_feature_flags(
                     state,
-                    crate::tools::audit_feature_flags::AuditFeatureFlagsParams {
+                    crate::tools::audit::audit_feature_flags::AuditFeatureFlagsParams {
                         project_root: p.project_root.clone(),
                     },
                 )
@@ -88,9 +88,9 @@ pub async fn project_tour(
 
     let routes_fut = async {
         if want("routes") {
-            match crate::tools::route_map::route_map(
+            match crate::tools::inspect::route_map::route_map(
                 state,
-                crate::tools::route_map::RouteMapParams {
+                crate::tools::inspect::route_map::RouteMapParams {
                     router_file: None,
                     project_root: p.project_root.clone(),
                 },
@@ -107,9 +107,9 @@ pub async fn project_tour(
 
     let index_fut = async {
         if want("index") {
-            crate::tools::project_index::project_index(
+            crate::tools::inspect::project_index::project_index(
                 state,
-                crate::tools::project_index::ProjectIndexParams {
+                crate::tools::inspect::project_index::ProjectIndexParams {
                     path: None,
                     kind: None,
                     project_root: p.project_root.clone(),
@@ -124,9 +124,9 @@ pub async fn project_tour(
 
     let assets_fut = async {
         if want("assets") {
-            crate::tools::asset_audit::asset_audit(
+            crate::tools::audit::asset_audit::asset_audit(
                 state,
-                crate::tools::asset_audit::AssetAuditParams {
+                crate::tools::audit::asset_audit::AssetAuditParams {
                     assets_dirs: None,
                     project_root: p.project_root.clone(),
                 },
@@ -184,10 +184,10 @@ pub async fn project_tour(
 /// fix-is-obvious cases get surfaced. Anything that needs human judgment (e.g.
 /// "pick a render target") stays in `audit.findings` for the caller to read.
 fn derive_next_actions(
-    audit: &Option<crate::tools::audit_feature_flags::AuditReport>,
-    routes: &Option<crate::tools::route_map::RouteMapReport>,
+    audit: &Option<crate::tools::audit::audit_feature_flags::AuditReport>,
+    routes: &Option<crate::tools::inspect::route_map::RouteMapReport>,
     routes_err: Option<&str>,
-    index: &Option<crate::tools::project_index::ProjectIndexReport>,
+    index: &Option<crate::tools::inspect::project_index::ProjectIndexReport>,
 ) -> Vec<NextAction> {
     let mut out: Vec<NextAction> = Vec::new();
 
@@ -272,10 +272,10 @@ fn derive_next_actions(
 }
 
 fn render_summary(
-    audit: &Option<crate::tools::audit_feature_flags::AuditReport>,
-    routes: &Option<crate::tools::route_map::RouteMapReport>,
-    index: &Option<crate::tools::project_index::ProjectIndexReport>,
-    assets: &Option<crate::tools::asset_audit::AssetAuditReport>,
+    audit: &Option<crate::tools::audit::audit_feature_flags::AuditReport>,
+    routes: &Option<crate::tools::inspect::route_map::RouteMapReport>,
+    index: &Option<crate::tools::inspect::project_index::ProjectIndexReport>,
+    assets: &Option<crate::tools::audit::asset_audit::AssetAuditReport>,
     trunc: &TruncationFlags,
 ) -> String {
     let mut out = String::new();

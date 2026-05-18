@@ -8,8 +8,8 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use crate::state::State;
+use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::scaffold::crate_root;
-use crate::tools::scan::{ParseError, collect_parse_errors, walk_rs_files};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SignalLintParams {
@@ -125,7 +125,7 @@ pub async fn signal_lint(
 /// project's own src tree — those live in dependencies and don't show up
 /// in `walk_rs_files`.
 fn detect_context_signal_triads(
-    files: &[crate::tools::scan::ScannedFile],
+    files: &[crate::tools::ast::ScannedFile],
 ) -> Vec<ContextSignalTriad> {
     let mut modules: Vec<ContextSignalModule> = Vec::new();
     for sf in files {
@@ -554,9 +554,9 @@ mod hydration_tests {
         );
     }
 
-    fn parse_into_scanned(path: &str, src: &str) -> crate::tools::scan::ScannedFile {
+    fn parse_into_scanned(path: &str, src: &str) -> crate::tools::ast::ScannedFile {
         let ast = syn::parse_file(src);
-        crate::tools::scan::ScannedFile {
+        crate::tools::ast::ScannedFile {
             path: std::path::PathBuf::from(path),
             ast,
         }
