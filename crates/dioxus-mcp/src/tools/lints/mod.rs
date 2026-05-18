@@ -5,6 +5,7 @@
 
 pub mod check_rsx;
 pub mod lint_project;
+pub mod optimistic_lock_gate;
 pub mod props_lint;
 pub mod reinvented_widget;
 pub mod server_state_blocking_locks;

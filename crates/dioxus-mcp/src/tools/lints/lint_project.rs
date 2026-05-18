@@ -1,6 +1,7 @@
 //! Whole-project lint composite. Runs every lint endpoint
-//! (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`)
-//! over the crate's `src/` tree and merges the results into one report.
+//! (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`,
+//! `reinvented_widget`, `optimistic_lock_gate`) over the crate's `src/` tree
+//! and merges the results into one report.
 //!
 //! Designed as a single entry point so callers don't have to discover the
 //! individual lints. Use `include` / `exclude` to scope the run.
@@ -23,15 +24,19 @@ const ALL_LINTS: &[&str] = &[
     "signal_lint",
     "props_lint",
     "reinvented_widget",
+    "optimistic_lock_gate",
 ];
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LintProjectParams {
     /// Subset of lints to run. Defaults to every lint:
-    /// `check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`.
+    /// `check_rsx`, `dead_components`, `prop_drill`, `signal_lint`,
+    /// `props_lint`, `reinvented_widget`, `optimistic_lock_gate`.
     #[serde(default)]
     pub include: Option<Vec<String>>,
-    /// Lints to skip (applied after `include`).
+    /// Lints to skip (applied after `include`). Same valid names as `include`:
+    /// `check_rsx`, `dead_components`, `prop_drill`, `signal_lint`,
+    /// `props_lint`, `reinvented_widget`, `optimistic_lock_gate`.
     #[serde(default)]
     pub exclude: Option<Vec<String>>,
     /// Optional roots forwarded to `dead_components` (extra component names to
@@ -69,6 +74,8 @@ pub struct LintProjectReport {
     pub props_lint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reinvented_widget: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimistic_lock_gate: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -253,6 +260,26 @@ pub async fn lint_project(
         report.reinvented_widget = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
+    if want("optimistic_lock_gate") {
+        let r = crate::tools::lints::optimistic_lock_gate::optimistic_lock_gate(
+            state,
+            crate::tools::lints::optimistic_lock_gate::OptimisticLockGateParams {
+                project_root: p.project_root.clone(),
+            },
+        )
+        .await?;
+        let count = r.findings.len();
+        for pe in &r.parse_errors {
+            parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
+        }
+        report.lints_run.push("optimistic_lock_gate".into());
+        report.issues_by_lint.push(LintCount {
+            lint: "optimistic_lock_gate".into(),
+            issues: count,
+        });
+        report.optimistic_lock_gate = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
+    }
+
     // Sum from `issues_by_lint` instead of accumulating per-lint, so adding a
     // new lint can't silently drop its count from the headline number.
     report.total_issues = report.issues_by_lint.iter().map(|c| c.issues).sum();
@@ -314,6 +341,7 @@ mod tests {
                 "signal_lint".into(),
                 "props_lint".into(),
                 "reinvented_widget".into(),
+                "optimistic_lock_gate".into(),
             ],
             issues_by_lint: vec![
                 LintCount {
@@ -340,8 +368,12 @@ mod tests {
                     lint: "reinvented_widget".into(),
                     issues: 1,
                 },
+                LintCount {
+                    lint: "optimistic_lock_gate".into(),
+                    issues: 2,
+                },
             ],
-            total_issues: 6,
+            total_issues: 8,
             ..Default::default()
         };
         let expected: usize = report.issues_by_lint.iter().map(|c| c.issues).sum();

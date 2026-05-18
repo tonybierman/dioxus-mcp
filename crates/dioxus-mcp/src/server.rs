@@ -159,7 +159,20 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Run every project-wide lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`, `reinvented_widget`) over the crate's `src/` tree and merge the results. Returns a markdown summary, per-lint issue counts (`issues_by_lint`), the raw report from each lint under its name, deduplicated `parse_errors`, and a `total_issues` count. `reinvented_widget` findings are hints — counted in `issues_by_lint` but not in `total_issues`. Use `include` / `exclude` to scope (e.g. `include: [\"check_rsx\", \"signal_lint\"]`), and `dead_component_roots` to mark extra components alive."
+        description = "Flag the hand-rolled \"optimistic-lock staleness gate\" pattern in a Dioxus component: a `Signal<integer>` that is snapshotted (`let snap = sig();`), bumped (`sig += 1`), and then compared back against the snapshot (`if sig() == snap { … }`) inside an `async` / `spawn` tail to gate reconciliation. The shape is correct but it has recurred verbatim across multiple generated apps — suggests extracting into a Store generation method (e.g. `let rev = store.bump_revision(); … if store.matches(rev) { … }`) so the invariant lives in one place. Confidence: medium — requires all three shapes to co-occur on the same signal in the same write source."
+    )]
+    async fn optimistic_lock_gate(
+        &self,
+        Parameters(p): Parameters<tools::lints::optimistic_lock_gate::OptimisticLockGateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::optimistic_lock_gate::optimistic_lock_gate(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Run every project-wide lint (`check_rsx`, `dead_components`, `prop_drill`, `signal_lint`, `props_lint`, `reinvented_widget`, `optimistic_lock_gate`) over the crate's `src/` tree and merge the results. Returns a markdown summary, per-lint issue counts (`issues_by_lint`), the raw report from each lint under its name, deduplicated `parse_errors`, and a `total_issues` count. `reinvented_widget` findings are hints — counted in `issues_by_lint` but not in `total_issues`. Use `include` / `exclude` to scope (e.g. `include: [\"check_rsx\", \"signal_lint\"]`), and `dead_component_roots` to mark extra components alive."
     )]
     async fn lint_project(
         &self,
@@ -436,10 +449,10 @@ impl ServerHandler for DioxusMcp {
                  - Project structure (what routes / components / server fns exist) -> \
                    route_map, project_index, project_tour, server_fn_call_graph.\n\
                  - Static analysis (dead code, prop drilling, signal/props lints, \
-                   reinvented widgets, asset audit, feature flags, OpenAPI) -> \
-                   dead_components, prop_drill, signal_lint, props_lint, reinvented_widget, \
-                   asset_audit, audit_feature_flags, openapi_spec, explain_signal_graph, \
-                   lint_project.\n\
+                   reinvented widgets, optimistic-lock gates, asset audit, feature flags, \
+                   OpenAPI) -> dead_components, prop_drill, signal_lint, props_lint, \
+                   reinvented_widget, optimistic_lock_gate, asset_audit, audit_feature_flags, \
+                   openapi_spec, explain_signal_graph, lint_project.\n\
                  - Docs / canonical examples -> search_docs, find_example. RSX check -> \
                    check_rsx. Catalog widget prop / event surface -> describe_component.\n\
                  \n\

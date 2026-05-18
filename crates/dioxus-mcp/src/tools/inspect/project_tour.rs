@@ -328,6 +328,7 @@ fn short_lint_label(lint: &str) -> &'static str {
         "signal_lint" => "signal",
         "props_lint" => "props",
         "reinvented_widget" => "reinvented",
+        "optimistic_lock_gate" => "opt-lock",
         _ => "other",
     }
 }
@@ -514,6 +515,7 @@ mod tests {
             signal_lint: None,
             props_lint: None,
             reinvented_widget: None,
+            optimistic_lock_gate: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -571,6 +573,7 @@ mod tests {
             signal_lint: None,
             props_lint: None,
             reinvented_widget: None,
+            optimistic_lock_gate: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(
@@ -625,6 +628,7 @@ mod tests {
             signal_lint: None,
             props_lint: None,
             reinvented_widget: None,
+            optimistic_lock_gate: None,
         };
         let trunc = TruncationFlags::default();
         let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc, true);
