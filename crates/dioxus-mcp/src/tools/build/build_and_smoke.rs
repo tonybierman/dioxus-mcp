@@ -41,8 +41,12 @@ pub struct BuildAndSmokeParams {
     /// Pass `--no-default-features` to cargo. Default: false.
     #[serde(default)]
     pub no_default_features: Option<bool>,
-    /// Pass `--target wasm32-unknown-unknown`. Default: false. Useful for
-    /// catching client-only compile errors that the host-target check misses.
+    /// Single-leg override for the target axis. When unset, the tool runs
+    /// BOTH legs (host check + `--target wasm32-unknown-unknown`) and
+    /// reports the union of diagnostics — `dx serve` cares about wasm-only
+    /// errors and the host-only check misses them. Set to `false` to run
+    /// only the host leg (faster, fine for purely-server changes); set to
+    /// `true` to run only the wasm leg.
     #[serde(default)]
     pub target_wasm: Option<bool>,
     /// Max wall-clock seconds the cargo invocation may run before this tool
@@ -72,10 +76,11 @@ pub struct Diagnostic {
 }
 
 #[derive(Debug, Serialize)]
-pub struct BuildAndSmokeResult {
-    /// The full cargo invocation that ran, for reproducibility.
+pub struct BuildLegResult {
+    /// `"host"` or `"wasm"` — the axis this leg covered.
+    pub target: &'static str,
+    /// The cargo invocation that ran for this leg.
     pub invocation: String,
-    pub project_root: PathBuf,
     pub duration_ms: u128,
     /// `"passed"` | `"failed"` | `"timed_out"` | `"spawn_failed"`.
     pub status: &'static str,
@@ -83,15 +88,39 @@ pub struct BuildAndSmokeResult {
     pub warnings_count: usize,
     pub errors: Vec<Diagnostic>,
     pub warnings: Vec<Diagnostic>,
-    /// True when the returned `errors` / `warnings` lists were capped under
-    /// `max_messages`.
     pub truncated: bool,
-    /// Top-line reason cargo itself couldn't even start (executable missing,
-    /// not a Cargo project, etc.). When set, `errors` / `warnings` are empty.
     pub fatal: Option<String>,
-    /// Next-step hints, e.g. "re-run with `target_wasm: true` to also catch
-    /// wasm-only errors" when the host-target check passed.
+}
+
+#[derive(Debug, Serialize)]
+pub struct BuildAndSmokeResult {
+    /// First leg's invocation, retained for backward compatibility with the
+    /// single-leg shape callers used to assert on. Real callers should walk
+    /// `legs` instead — it carries the cargo invocation per axis.
+    pub invocation: String,
+    pub project_root: PathBuf,
+    pub duration_ms: u128,
+    /// Aggregated status across every leg. `"passed"` only when every leg
+    /// passed; otherwise the first non-passing status wins (`"failed"`
+    /// > `"timed_out"` > `"spawn_failed"`).
+    pub status: &'static str,
+    /// Sum of errors / warnings across every leg.
+    pub errors_count: usize,
+    pub warnings_count: usize,
+    /// Flat merge of every leg's diagnostics. Each entry is annotated via
+    /// `rendered` (cargo's text) so the source axis stays visible.
+    pub errors: Vec<Diagnostic>,
+    pub warnings: Vec<Diagnostic>,
+    /// True when any leg's `errors` / `warnings` were capped.
+    pub truncated: bool,
+    /// First leg's fatal reason (executable missing, not a Cargo project,
+    /// etc.). When set on leg 1, the subsequent leg is skipped.
+    pub fatal: Option<String>,
+    /// Next-step hints. Empty when both legs ran clean.
     pub next_steps: Vec<String>,
+    /// Per-leg breakdown. Single-leg mode (caller passed `target_wasm`)
+    /// has one entry; default both-legs mode has two.
+    pub legs: Vec<BuildLegResult>,
 }
 
 pub async fn build_and_smoke(
@@ -115,61 +144,138 @@ pub async fn build_and_smoke(
     let timeout_secs = p.timeout_secs.unwrap_or(300);
     let max_messages = p.max_messages.unwrap_or(20);
     let no_default_features = p.no_default_features.unwrap_or(false);
-    let target_wasm = p.target_wasm.unwrap_or(false);
 
-    let mut args: Vec<String> = vec![
-        "check".into(),
-        "--message-format=json".into(),
-        "--quiet".into(),
-    ];
-    if no_default_features {
-        args.push("--no-default-features".into());
-    }
-    if !features.is_empty() {
-        args.push("--features".into());
-        args.push(features.join(","));
-    }
-    if target_wasm {
-        args.push("--target".into());
-        args.push("wasm32-unknown-unknown".into());
+    // Default to running both legs: host check + wasm check. The host leg
+    // catches `cargo build` errors fast (no `dx serve` round-trip) while the
+    // wasm leg catches client-only breakage that `cargo check` for the host
+    // target misses. Callers who explicitly pass `target_wasm: true|false`
+    // get a single leg.
+    let legs_to_run: Vec<&'static str> = match p.target_wasm {
+        None => vec!["host", "wasm"],
+        Some(true) => vec!["wasm"],
+        Some(false) => vec!["host"],
+    };
+
+    let outer_start = Instant::now();
+    let mut legs: Vec<BuildLegResult> = Vec::new();
+    let mut aggregate_errors: Vec<Diagnostic> = Vec::new();
+    let mut aggregate_warnings: Vec<Diagnostic> = Vec::new();
+    let mut aggregate_truncated = false;
+    let mut first_fatal: Option<String> = None;
+    let mut first_invocation: Option<String> = None;
+
+    for leg in &legs_to_run {
+        let mut args: Vec<String> = vec![
+            "check".into(),
+            "--message-format=json".into(),
+            "--quiet".into(),
+        ];
+        if no_default_features {
+            args.push("--no-default-features".into());
+        }
+        if !features.is_empty() {
+            args.push("--features".into());
+            args.push(features.join(","));
+        }
+        if *leg == "wasm" {
+            args.push("--target".into());
+            args.push("wasm32-unknown-unknown".into());
+        }
+        let invocation = format!("cargo {}", args.join(" "));
+        if first_invocation.is_none() {
+            first_invocation = Some(invocation.clone());
+        }
+
+        let started = Instant::now();
+        let (status, fatal, errors, warnings, truncated) =
+            run_and_parse(&crate_root, &args, timeout_secs, max_messages).await;
+        let leg_ms = started.elapsed().as_millis();
+
+        aggregate_errors.extend(errors.iter().cloned());
+        aggregate_warnings.extend(warnings.iter().cloned());
+        aggregate_truncated |= truncated;
+        if first_fatal.is_none() {
+            first_fatal = fatal.clone();
+        }
+
+        let target_label: &'static str = if *leg == "wasm" { "wasm" } else { "host" };
+        legs.push(BuildLegResult {
+            target: target_label,
+            invocation,
+            duration_ms: leg_ms,
+            status,
+            errors_count: errors.len(),
+            warnings_count: warnings.len(),
+            errors,
+            warnings,
+            truncated,
+            fatal,
+        });
+
+        // If the first leg's cargo couldn't even start, skip the second —
+        // it would hit the same failure (e.g. cargo not on PATH).
+        if first_fatal.is_some() {
+            break;
+        }
     }
 
-    let invocation = format!("cargo {}", args.join(" "));
-
-    let started = Instant::now();
-    let (status, fatal, errors, warnings, truncated) =
-        run_and_parse(&crate_root, &args, timeout_secs, max_messages).await;
-    let duration_ms = started.elapsed().as_millis();
+    // Aggregate status: prefer the worst status across legs so a passing
+    // host + failing wasm reports as failed (the user can't `dx serve` it).
+    let aggregate_status: &'static str =
+        legs.iter()
+            .map(|l| l.status)
+            .fold("passed", |acc, s| match (acc, s) {
+                (_, "failed") | ("failed", _) => "failed",
+                (_, "timed_out") | ("timed_out", _) => "timed_out",
+                (_, "spawn_failed") | ("spawn_failed", _) => "spawn_failed",
+                _ => acc,
+            });
 
     let mut next_steps: Vec<String> = Vec::new();
-    if status == "passed" {
-        if !target_wasm {
-            next_steps.push(
-                "host-target check is clean — re-run with `target_wasm: true` \
-                 to also catch wasm-only compile errors before `dx serve`"
-                    .into(),
-            );
-        }
-    } else if status == "timed_out" {
+    if aggregate_status == "timed_out" {
         next_steps.push(format!(
-            "cargo check exceeded the {timeout_secs}s budget; re-run with a higher \
-             `timeout_secs:` on a cold build, or invoke `cargo {}` manually",
-            args.join(" ")
+            "one or more legs of cargo check exceeded the {timeout_secs}s budget; \
+             re-run with a higher `timeout_secs:` on a cold build"
+        ));
+    }
+    if aggregate_status == "failed" {
+        // Surface which leg failed so the caller doesn't have to walk
+        // `legs[].status` themselves to know whether the host or wasm side
+        // is broken.
+        let failed: Vec<&str> = legs
+            .iter()
+            .filter(|l| l.status == "failed")
+            .map(|l| l.target)
+            .collect();
+        if !failed.is_empty() {
+            next_steps.push(format!(
+                "compile errors on leg(s): {} — fix the listed errors before `dx serve`",
+                failed.join(", ")
+            ));
+        }
+    }
+    if legs_to_run.len() == 1 && aggregate_status == "passed" {
+        let only = legs_to_run[0];
+        let other = if only == "host" { "wasm" } else { "host" };
+        next_steps.push(format!(
+            "only the {only} leg ran (`target_wasm:` was passed explicitly); the {other} \
+             leg may still have compile errors — omit `target_wasm` to run both"
         ));
     }
 
     Ok(BuildAndSmokeResult {
-        invocation,
+        invocation: first_invocation.unwrap_or_default(),
         project_root: crate_root,
-        duration_ms,
-        status,
-        errors_count: errors.len(),
-        warnings_count: warnings.len(),
-        errors,
-        warnings,
-        truncated,
-        fatal,
+        duration_ms: outer_start.elapsed().as_millis(),
+        status: aggregate_status,
+        errors_count: aggregate_errors.len(),
+        warnings_count: aggregate_warnings.len(),
+        errors: aggregate_errors,
+        warnings: aggregate_warnings,
+        truncated: aggregate_truncated,
+        fatal: first_fatal,
         next_steps,
+        legs,
     })
 }
 

@@ -1,13 +1,29 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use proc_macro2::TokenTree;
 use quote::ToTokens;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use syn::visit::Visit;
 
 use crate::state::State;
+use crate::tools::ast::walk_rs_files;
 use crate::tools::scaffold::{crate_root, find_routable, has_derive};
 use crate::tools::tighten_type;
+
+/// Known auth-guard HOC component names. A route whose body wraps in any of
+/// these is treated as gated. Sourced from the DSL's `wrap_with` option
+/// (`Protected`) plus the common-by-convention names other projects use.
+const KNOWN_GUARD_HOCS: &[&str] = &[
+    "Protected",
+    "Guarded",
+    "AuthGate",
+    "RequireAuth",
+    "Authenticated",
+    "RequiresLogin",
+];
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RouteMapParams {
@@ -41,6 +57,14 @@ pub struct RouteEntry {
     pub layouts: Vec<String>,
     /// Stack of `#[nest("...")]` prefixes the route is nested under.
     pub nests: Vec<String>,
+    /// Auth-guard HOCs the route component wraps its body in — e.g. `Protected`,
+    /// `Guarded`, `AuthGate`. Empty when the route is ungated, or when the
+    /// component definition couldn't be located (likely a third-party route).
+    /// Answers "which routes require auth?" without grepping. The list is
+    /// stable / alphabetised; multiple entries means the body is wrapped in
+    /// more than one HOC (rare but possible — e.g. `Protected` + `FeatureGate`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guards: Vec<String>,
     /// Line number of the `#[route(...)]` attribute in the source file.
     pub line: usize,
 }
@@ -171,8 +195,20 @@ pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMap
             params,
             layouts: layout_stack.clone(),
             nests: nest_stack.clone(),
+            guards: Vec::new(),
             line,
         });
+    }
+
+    // Walk src/ once and index every `#[component] fn Name` body — we use
+    // this to answer "is `Name` wrapped in a known auth HOC?" without
+    // re-walking once per route. Failure to parse a file just leaves the
+    // component off the index (the route silently falls back to "no guards").
+    let component_guards = scan_component_guards(&crate_root);
+    for route in &mut routes {
+        if let Some(g) = component_guards.get(&route.component) {
+            route.guards = g.clone();
+        }
     }
 
     Ok(RouteMapReport {
@@ -181,6 +217,93 @@ pub async fn route_map(state: &Arc<State>, p: RouteMapParams) -> Result<RouteMap
         routes,
         note: None,
     })
+}
+
+/// Walk every `.rs` file under `crate_root/src`, find `#[component] fn Name`
+/// items, and return a map of `Name → list of known auth-guard HOCs the body
+/// wraps in`. A function maps to a non-empty list only when its body's rsx
+/// invocation contains an outermost-position component ident matching
+/// [`KNOWN_GUARD_HOCS`]. Components not in the index either don't exist in
+/// this crate (third-party route?) or their file failed to parse — both safe
+/// "unknown, fall back to no guards" outcomes.
+fn scan_component_guards(crate_root: &std::path::Path) -> BTreeMap<String, Vec<String>> {
+    let src_root = crate_root.join("src");
+    let files = walk_rs_files(&src_root);
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for sf in &files {
+        let Ok(ast) = &sf.ast else { continue };
+        for item in &ast.items {
+            let syn::Item::Fn(f) = item else { continue };
+            let is_component = f.attrs.iter().any(|a| {
+                a.path()
+                    .segments
+                    .last()
+                    .map(|s| s.ident == "component")
+                    .unwrap_or(false)
+            });
+            if !is_component {
+                continue;
+            }
+            let mut v = RsxGuardVisitor { guards: Vec::new() };
+            v.visit_block(&f.block);
+            v.guards.sort();
+            v.guards.dedup();
+            // Always insert — empty list means "found the component, no
+            // guards detected". This is meaningfully different from
+            // "component not found" (which leaves the key absent and the
+            // caller has no way to tell guard-free apart from missing).
+            out.insert(f.sig.ident.to_string(), v.guards);
+        }
+    }
+    out
+}
+
+/// Walks every `rsx!{ … }` invocation under a component's body and collects
+/// any outermost-position component ident that matches a known guard HOC
+/// name. "Outermost position" is approximated by checking the *first*
+/// `Ident` token of each contiguous statement-level chunk inside the rsx
+/// token stream — that's the receiver of the wrapping `Protected { … }`
+/// form the DSL emits. Nested guards (e.g. `div { Protected { … } }`) are
+/// not collected because they don't actually gate route entry, only the
+/// nested subtree.
+struct RsxGuardVisitor {
+    guards: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for RsxGuardVisitor {
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        let is_rsx = m
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident == "rsx")
+            .unwrap_or(false);
+        if !is_rsx {
+            syn::visit::visit_macro(self, m);
+            return;
+        }
+        collect_top_level_idents(m.tokens.clone(), &mut self.guards);
+        syn::visit::visit_macro(self, m);
+    }
+}
+
+/// Scan a token stream and record every PascalCase-cased ident that appears
+/// at the top level (depth 0). The DSL emits guard wrappers as
+/// `Protected { ... }` — `Protected` is the leading ident, followed by a
+/// `Group` (the braced child block). We add the ident only when it matches
+/// a known guard HOC, and only when it sits at depth 0 of the rsx body.
+fn collect_top_level_idents(ts: proc_macro2::TokenStream, hits: &mut Vec<String>) {
+    for tt in ts {
+        if let TokenTree::Ident(i) = tt {
+            let s = i.to_string();
+            if KNOWN_GUARD_HOCS.contains(&s.as_str()) && !hits.iter().any(|h| h == &s) {
+                hits.push(s);
+            }
+        }
+        // Children of a group (the `{ ... }` body of the guard) are NOT
+        // recursed into — a `Protected` deeper in the tree gates a
+        // sub-region, not the route, and we don't want to over-report.
+    }
 }
 
 fn join_route_path(nests: &[String], path: &str) -> String {
@@ -193,5 +316,122 @@ fn join_route_path(nests: &[String], path: &str) -> String {
         "/".into()
     } else {
         format!("/{}", parts.join("/"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn guards_for(src: &str) -> Vec<String> {
+        let file = syn::parse_file(src).expect("parse");
+        let f = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                syn::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .expect("fn item");
+        let mut v = RsxGuardVisitor { guards: Vec::new() };
+        v.visit_block(&f.block);
+        v.guards.sort();
+        v.guards.dedup();
+        v.guards
+    }
+
+    /// Standup's `BoardScreen` wraps its body in `Protected { ... }` —
+    /// the canonical DSL `wrap_with: Protected` shape. Before the fix
+    /// `route_map` showed `/` as ungated; the body's guard ident now
+    /// shows up under `guards`.
+    #[test]
+    fn detects_protected_hoc_at_outermost_position() {
+        let g = guards_for(
+            r#"
+#[component]
+fn BoardScreen() -> Element {
+    rsx!{
+        Protected {
+            div { "board" }
+        }
+    }
+}
+"#,
+        );
+        assert_eq!(g, vec!["Protected".to_string()]);
+    }
+
+    /// Routes with no guard HOC return an empty list — leaving the field
+    /// off in the serialized response thanks to the `skip_serializing_if`
+    /// attribute on `RouteEntry::guards`.
+    #[test]
+    fn ungated_route_has_no_guards() {
+        let g = guards_for(
+            r#"
+#[component]
+fn Home() -> Element {
+    rsx!{ div { "home" } }
+}
+"#,
+        );
+        assert!(g.is_empty(), "ungated route should report no guards: {g:?}");
+    }
+
+    /// Aliases beyond `Protected` (`Guarded`, `AuthGate`, `RequireAuth`,
+    /// `Authenticated`, `RequiresLogin`) are detected too — these are the
+    /// common-by-convention names other Dioxus projects use.
+    #[test]
+    fn detects_alternate_guard_aliases() {
+        for alias in [
+            "Guarded",
+            "AuthGate",
+            "RequireAuth",
+            "Authenticated",
+            "RequiresLogin",
+        ] {
+            let src = format!(
+                r#"
+#[component]
+fn Screen() -> Element {{
+    rsx!{{
+        {alias} {{
+            div {{ "x" }}
+        }}
+    }}
+}}
+"#
+            );
+            let g = guards_for(&src);
+            assert_eq!(
+                g,
+                vec![alias.to_string()],
+                "alias {alias} should be detected"
+            );
+        }
+    }
+
+    /// A `Protected` ident nested DEEP inside the rsx (under a `div`) does
+    /// not gate route entry — only the leaves below it — so we don't list
+    /// it as a route guard.
+    #[test]
+    fn ignores_nested_guard_inside_other_element() {
+        let g = guards_for(
+            r#"
+#[component]
+fn Demo() -> Element {
+    rsx!{
+        div {
+            Protected {
+                span { "secret" }
+            }
+        }
+    }
+}
+"#,
+        );
+        assert!(
+            g.is_empty(),
+            "guard nested under a non-guard parent must not be reported: {g:?}",
+        );
     }
 }

@@ -129,13 +129,30 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Hint when a component hand-rolls a catalog widget. Today only detects the HTML5 drag/drop triplet (`ondragstart` + `ondragover` + `ondrop` on the same component) and suggests catalog widget `drag_and_drop_list`. Skips catalog wrapper files (`src/components/<catalog_name>/`). Findings are hints, not errors — the catalog widget is a single sortable list, so kanban-style cross-column boards genuinely need the hand-rolled pattern."
+        description = "Hint when a component hand-rolls a catalog widget. Detects: the HTML5 drag/drop triplet (`ondragstart` + `ondragover` + `ondrop` on the same component, `confidence: high`); the drop-target half alone (`confidence: low`); and bare DOM elements with catalog equivalents (`<select>`, `<dialog>`, `<textarea>`, `<input>`, `confidence: low`). Skips catalog wrapper files (`src/components/<catalog_name>/`). Findings are hints, not errors — the drag/drop catalog widget is single-list, and specialised forms (e.g. `<input type=\"file\">`) have no catalog equivalent, so verify the use case before swapping."
     )]
     async fn reinvented_widget(
         &self,
         Parameters(p): Parameters<tools::lints::reinvented_widget::ReinventedWidgetParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::lints::reinvented_widget::reinvented_widget(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Flag `std::sync::Mutex` / `RwLock` (and similar sync locks) called from inside `async` server-fn bodies. Currently safe if the critical section stays fully synchronous, but the first `.await` added while holding the guard will block the Tokio worker thread for the duration of that await. Suggests switching to `tokio::sync::Mutex` / `RwLock` (lock-across-await safe) or moving the section into `tokio::task::spawn_blocking`. Calls inside an existing `spawn_blocking { … }` body are silently skipped — that's the recommended escape hatch."
+    )]
+    async fn server_state_blocking_locks(
+        &self,
+        Parameters(p): Parameters<
+            tools::lints::server_state_blocking_locks::ServerStateBlockingLocksParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::lints::server_state_blocking_locks::server_state_blocking_locks(&self.state, p)
+            .await
+        {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -319,13 +336,26 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     }
 
     #[tool(
-        description = "Generate an OpenAPI 3.1 spec from #[server] functions (POST endpoints) and, optionally, router routes (GET). Schemas for arg/return types are walked from local #[derive(Serialize)] / #[derive(Deserialize)] structs and enums; unresolved type names are reported. Defaults: server_fn_prefix=\"/api\", include_routes=false."
+        description = "Generate an OpenAPI 3.1 spec from #[server] functions (POST endpoints) and, optionally, router routes (GET). Schemas for arg/return types are walked from local #[derive(Serialize)] / #[derive(Deserialize)] structs and enums; unresolved type names are reported. Server fns with a `cookies:` extractor emit `parameters[in: cookie]` plus a `security` ref to a `sessionCookie` scheme (named via `session_cookie_name`, default `session_id`). Defaults: server_fn_prefix=\"/api\", include_routes=false."
     )]
     async fn openapi_spec(
         &self,
         Parameters(p): Parameters<tools::audit::openapi_spec::OpenapiSpecParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::audit::openapi_spec::openapi_spec(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Cross-references `route_map` guards with server-fn cookie extractors and reports per-route + per-server-fn auth status. Surfaces likely mismatches: gated routes whose backing handlers don't check cookies, or cookie-gated handlers behind unguarded routes. Returns `routes[]` (with `guards`, `gated`), `server_fns[]` (with `cookie_gated`), headline counts, and a `mismatches[]` block. A clean report (empty `mismatches`) means client + server agree about which slices need a session."
+    )]
+    async fn auth_map(
+        &self,
+        Parameters(p): Parameters<tools::audit::auth_map::AuthMapParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::audit::auth_map::auth_map(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -364,7 +394,7 @@ USE THIS when the user asks: \"What's the latency distribution for <fn>?\", \"Wh
     }
 
     #[tool(
-        description = "Run `cargo check` against the Dioxus project with a structured diagnostic shape — the closing-the-loop step after `execute_code`. Auto-picks a sensible feature combo (no extras when `fullstack` is already on the dep, `server` for the canonical 0.7 `default=[\"web\"]` + opt-in `server` sibling, `web,server` for older layouts) or accepts an explicit `features:` list. Set `target_wasm: true` to also catch client-only errors via `--target wasm32-unknown-unknown`. Parses `--message-format=json` and returns separate `errors` / `warnings` lists with file/line/column/code + cargo's pre-rendered diagnostic text; both lists are capped via `max_messages` (default 20), and `truncated: true` signals when caps fired. `status` is one of `passed | failed | timed_out | spawn_failed`. Default timeout 300s (override with `timeout_secs`). Does NOT shell out to `dx serve`; this is a static compile check, not an end-to-end serve probe."
+        description = "Run `cargo check` against the Dioxus project with a structured diagnostic shape — the closing-the-loop step after `execute_code`. Auto-picks a sensible feature combo (no extras when `fullstack` is already on the dep, `server` for the canonical 0.7 `default=[\"web\"]` + opt-in `server` sibling, `web,server` for older layouts) or accepts an explicit `features:` list. **Runs BOTH legs by default** (host check + `--target wasm32-unknown-unknown`) so `dx serve`-only wasm errors don't slip past a green host build; pass `target_wasm: false` to run only the host leg (faster, fine for pure-server changes) or `target_wasm: true` to run only the wasm leg. Per-leg detail lands in `legs[]`; `status` aggregates worst-of (host pass + wasm fail → `failed`). Parses `--message-format=json` and returns separate `errors` / `warnings` lists with file/line/column/code + cargo's pre-rendered diagnostic text; both lists are capped via `max_messages` (default 20), and `truncated: true` signals when caps fired. `status` is one of `passed | failed | timed_out | spawn_failed`. Default timeout 300s per leg (override with `timeout_secs`). Does NOT shell out to `dx serve`; this is a static compile check, not an end-to-end serve probe."
     )]
     async fn build_and_smoke(
         &self,

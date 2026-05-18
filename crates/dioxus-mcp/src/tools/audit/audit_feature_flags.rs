@@ -169,12 +169,31 @@ pub async fn audit_feature_flags(state: &Arc<State>, p: AuditFeatureFlagsParams)
             .collect();
         let has_web = names.iter().any(|n| n == "web");
         let has_server = names.iter().any(|n| n == "server");
+        let server_feature_defined = features.contains_key("server");
         if has_web && has_server {
             findings.push(Finding {
                             level: "warning",
                             message: "[features] default = [\"web\", \"server\"] activates both render targets at once — a common source of build confusion".into(),
                             fix: Some("set default = [\"web\"] (or [\"server\"]) and pass the other via --features when needed".into()),
                         });
+        } else if has_web && !has_server && server_feature_defined && has_fullstack {
+            // Standard 0.7 fullstack layout: `default = ["web"]` plus an
+            // opt-in `server = ["dioxus/server"]` sibling. The TODO called
+            // this out — users new to the pattern hit "`cargo build` skips
+            // the server fn bodies" and assume their config is broken.
+            // It isn't; they just need to enable `server` when running the
+            // server binary. Surface as `info` (not a warning) so it's
+            // searchable without scaring users with a green build.
+            findings.push(Finding {
+                level: "info",
+                message: "`default = [\"web\"]` is correct for `cargo build` of the wasm bundle, \
+                          but the `server = [\"dioxus/server\"]` feature must be enabled \
+                          explicitly to compile the server-side handler bodies".into(),
+                fix: Some(
+                    "run `cargo run --features server` (host build) or `dx serve --platform fullstack` (which enables `server` for you)"
+                        .into(),
+                ),
+            });
         }
     }
 

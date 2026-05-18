@@ -30,6 +30,12 @@ pub struct OpenapiSpecParams {
     pub include_routes: bool,
     /// Override the file containing the Routable enum (forwarded to route_map).
     pub router_file: Option<String>,
+    /// Cookie name to emit under `parameters[].name` and the matching
+    /// `securitySchemes.sessionCookie.name` for every server fn that takes a
+    /// `cookies:` extractor. Defaults to `session_id` — the DSL `Resource`
+    /// primitive's default. Override when the app uses a different cookie
+    /// (e.g. `sid`, `auth_token`).
+    pub session_cookie_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,16 +101,25 @@ pub async fn openapi_spec(
         .unwrap_or("/api")
         .trim_end_matches('/')
         .to_string();
+    let cookie_name = p
+        .session_cookie_name
+        .as_deref()
+        .unwrap_or("session_id")
+        .to_string();
 
     let mut paths = Map::new();
     let mut guessed_paths = Vec::new();
+    let mut uses_session_cookie = false;
 
     for sf in &index.server_fns {
         let (path, guessed) = server_fn_path(&prefix, sf);
         if guessed {
             guessed_paths.push(sf.name.clone());
         }
-        let item = server_fn_path_item(sf, &mut resolver);
+        let item = server_fn_path_item(sf, &mut resolver, &cookie_name);
+        if has_cookie_extractor(sf) {
+            uses_session_cookie = true;
+        }
         paths.insert(path, item);
     }
 
@@ -118,6 +133,26 @@ pub async fn openapi_spec(
     resolver.ensure_server_fn_error();
     let schemas = resolver.into_schemas();
 
+    // Components block. The schemas map always renders; `securitySchemes`
+    // appears only when at least one server fn takes a `cookies:` extractor —
+    // emitting it unconditionally would imply the API is cookie-gated even
+    // for cookie-free apps.
+    let mut components = Map::new();
+    components.insert("schemas".into(), Value::Object(schemas));
+    if uses_session_cookie {
+        components.insert(
+            "securitySchemes".into(),
+            json!({
+                "sessionCookie": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": cookie_name,
+                    "description": "Session cookie checked by `user_from_cookies` on the server.",
+                }
+            }),
+        );
+    }
+
     let spec = json!({
         "openapi": "3.1.0",
         "info": {
@@ -125,9 +160,7 @@ pub async fn openapi_spec(
             "version": version,
         },
         "paths": paths,
-        "components": {
-            "schemas": schemas,
-        },
+        "components": Value::Object(components),
     });
 
     let mut unresolved: Vec<String> = resolver_unresolved(&spec);
@@ -227,10 +260,22 @@ fn server_fn_path(prefix: &str, sf: &ServerFnEntry) -> (String, bool) {
     }
 }
 
-fn server_fn_path_item(sf: &ServerFnEntry, resolver: &mut TypeResolver) -> Value {
+fn server_fn_path_item(
+    sf: &ServerFnEntry,
+    resolver: &mut TypeResolver,
+    cookie_name: &str,
+) -> Value {
     let mut properties = Map::new();
     let mut required: Vec<String> = Vec::new();
+    let cookie_gated = has_cookie_extractor(sf);
     for a in &sf.args {
+        // Auth-extractor args (`cookies: TypedHeader<Cookie>`) are surfaced
+        // separately as a cookie security parameter, not a body field — emitting
+        // them under `requestBody.properties` would tell consumers to POST the
+        // typed-header struct as JSON, which is wrong.
+        if cookie_gated && is_cookie_arg(a) {
+            continue;
+        }
         let (schema, optional) = resolver.resolve(&a.ty);
         properties.insert(a.name.clone(), schema);
         if !optional {
@@ -283,6 +328,23 @@ fn server_fn_path_item(sf: &ServerFnEntry, resolver: &mut TypeResolver) -> Value
     let mut op = Map::new();
     op.insert("operationId".into(), json!(sf.name));
     op.insert("summary".into(), json!(summary));
+    if cookie_gated {
+        // Per OpenAPI 3.1: cookie auth lives under `parameters[in: cookie]`
+        // PLUS a `security` entry pointing at the corresponding scheme. The
+        // parameter entry alone advertises the cookie; the security entry is
+        // what makes generated clients actually send it. Keep both.
+        op.insert(
+            "parameters".into(),
+            json!([{
+                "in": "cookie",
+                "name": cookie_name,
+                "required": true,
+                "schema": {"type": "string"},
+                "description": "Session cookie; the handler rejects requests where `user_from_cookies` returns None.",
+            }]),
+        );
+        op.insert("security".into(), json!([{"sessionCookie": []}]));
+    }
     if has_body {
         op.insert(
             "requestBody".into(),
@@ -321,6 +383,23 @@ fn server_fn_path_item(sf: &ServerFnEntry, resolver: &mut TypeResolver) -> Value
     let mut item = Map::new();
     item.insert(method.to_string(), Value::Object(op));
     Value::Object(item)
+}
+
+/// True when the server-fn signature includes a Dioxus auth-extractor arg.
+/// We accept either shape: a bare `cookies` arg name (the convention the DSL
+/// emits) or any arg whose type stringifies to mention both `TypedHeader` and
+/// `Cookie` (the canonical type when users hand-write the extractor with a
+/// non-`cookies` ident, e.g. `let session: TypedHeader<Cookie>`).
+fn has_cookie_extractor(sf: &ServerFnEntry) -> bool {
+    sf.args.iter().any(is_cookie_arg)
+}
+
+fn is_cookie_arg(a: &crate::tools::inspect::project_index::ServerArg) -> bool {
+    if a.name == "cookies" {
+        return true;
+    }
+    let ty = a.ty.as_str();
+    ty.contains("TypedHeader") && ty.contains("Cookie")
 }
 
 fn route_path_item(r: &RouteEntry) -> (String, Value) {
@@ -897,7 +976,7 @@ mod tests {
             return_type: "Result<Option<String>, ServerFnError>".into(),
         };
         let mut resolver = TypeResolver::default();
-        let path_item = server_fn_path_item(&sf, &mut resolver);
+        let path_item = server_fn_path_item(&sf, &mut resolver, "session_id");
 
         // Drill down into `responses.200.content.application/json.schema`.
         let schema = path_item
@@ -927,6 +1006,120 @@ mod tests {
         );
     }
 
+    /// Standup `who_am_i` shape: a `get` server fn whose extractor list
+    /// includes `cookies: axum_extra::TypedHeader<headers::Cookie>`. Before
+    /// the fix, the emitted spec showed it as anonymous; the gate was
+    /// invisible to client generators and reviewers alike. Now the
+    /// operation gets a `parameters[in: cookie]` entry plus a `security`
+    /// reference to the project-level `sessionCookie` scheme.
+    #[test]
+    fn cookie_extractor_emits_cookie_parameter_and_security_ref() {
+        use crate::tools::inspect::project_index::ServerArg;
+        let sf = ServerFnEntry {
+            file: std::path::PathBuf::from("src/server/auth.rs"),
+            line: 12,
+            name: "who_am_i".into(),
+            method: Some("get".into()),
+            server_name: None,
+            route_path: Some("/api/me".into()),
+            args: vec![ServerArg {
+                name: "cookies".into(),
+                ty: "TypedHeader<headers::Cookie>".into(),
+            }],
+            return_type: "Result<String, ServerFnError>".into(),
+        };
+        let mut resolver = TypeResolver::default();
+        let path_item = server_fn_path_item(&sf, &mut resolver, "session_id");
+
+        let op = path_item.get("get").expect("get op present");
+        let params = op
+            .get("parameters")
+            .and_then(|v| v.as_array())
+            .expect("cookie-gated op must declare parameters");
+        assert_eq!(
+            params.len(),
+            1,
+            "expected exactly one cookie parameter: {params:?}"
+        );
+        let p = &params[0];
+        assert_eq!(
+            p.get("in"),
+            Some(&json!("cookie")),
+            "parameter must be `in: cookie`: {p}"
+        );
+        assert_eq!(
+            p.get("name"),
+            Some(&json!("session_id")),
+            "parameter must name the session cookie: {p}",
+        );
+        assert_eq!(
+            p.get("required"),
+            Some(&json!(true)),
+            "session cookie is required: {p}"
+        );
+
+        let sec = op
+            .get("security")
+            .and_then(|v| v.as_array())
+            .expect("security ref must be present so generators send the cookie: {op}");
+        assert_eq!(sec.len(), 1);
+        assert!(
+            sec[0].get("sessionCookie").is_some(),
+            "security ref must point at the sessionCookie scheme: {sec:?}",
+        );
+    }
+
+    /// A POST server fn with a `cookies:` extractor AND a real body arg
+    /// keeps the body schema clean — the cookie is surfaced only under
+    /// `parameters`, never as a JSON-body property. Before the fix the
+    /// generated spec would have told consumers to POST the typed-header
+    /// struct as JSON, which would 415 on every call.
+    #[test]
+    fn cookie_extractor_not_listed_as_request_body_property() {
+        use crate::tools::inspect::project_index::ServerArg;
+        let sf = ServerFnEntry {
+            file: std::path::PathBuf::from("src/server/cards.rs"),
+            line: 7,
+            name: "create_card".into(),
+            method: Some("post".into()),
+            server_name: None,
+            route_path: Some("/api/cards".into()),
+            args: vec![
+                ServerArg {
+                    name: "cookies".into(),
+                    ty: "TypedHeader<headers::Cookie>".into(),
+                },
+                ServerArg {
+                    name: "title".into(),
+                    ty: "String".into(),
+                },
+            ],
+            return_type: "Result<u32, ServerFnError>".into(),
+        };
+        let mut resolver = TypeResolver::default();
+        let path_item = server_fn_path_item(&sf, &mut resolver, "session_id");
+
+        let schema = path_item
+            .get("post")
+            .and_then(|v| v.get("requestBody"))
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.get("application/json"))
+            .and_then(|v| v.get("schema"))
+            .expect("body schema present for post");
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("body has properties: {schema}");
+        assert!(
+            props.contains_key("title"),
+            "real body field stays in: {props:?}"
+        );
+        assert!(
+            !props.contains_key("cookies"),
+            "cookie extractor must NOT appear in the request body: {props:?}",
+        );
+    }
+
     /// Counter-test: a plain `Result<String, ServerFnError>` keeps the
     /// non-nullable schema. Without this, an over-eager wrap would mark
     /// every success schema nullable.
@@ -943,7 +1136,7 @@ mod tests {
             return_type: "Result<String, ServerFnError>".into(),
         };
         let mut resolver = TypeResolver::default();
-        let path_item = server_fn_path_item(&sf, &mut resolver);
+        let path_item = server_fn_path_item(&sf, &mut resolver, "session_id");
         let schema = path_item
             .get("post")
             .and_then(|v| v.get("responses"))

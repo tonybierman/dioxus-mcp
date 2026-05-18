@@ -1,14 +1,21 @@
 //! `reinvented_widget`: spot components hand-rolling UI patterns the catalog
 //! already covers.
 //!
-//! Today the lint only checks for the HTML5 drag-and-drop triplet
-//! (`ondragstart` + `ondragover` + `ondrop`). When all three fire from the
-//! same component AND the file isn't a catalog wrapper, we emit a hint
-//! pointing at `drag_and_drop_list`. This is a HINT, not an error — the
-//! catalog `drag_and_drop_list` is a single sortable list (see
-//! `list_components` → `limitations`), so kanban-style boards with multiple
-//! drop targets genuinely need the hand-rolled pattern. The hint is meant to
-//! flag "did you check the catalog?" not "you got it wrong."
+//! Today the lint checks for two shapes:
+//!
+//! 1. The HTML5 drag-and-drop triplet (`ondragstart` + `ondragover` +
+//!    `ondrop`) — full triplet emits `confidence: high`, the drop-target
+//!    half on its own emits `confidence: low` (kanban-column shape).
+//! 2. Bare DOM elements whose catalog equivalent exists (`<select>`,
+//!    `<dialog>`, `<textarea>`, `<input>`) — `confidence: low`. The
+//!    hand-rolled DOM forms are correct, just not the catalog-blessed
+//!    primitive that ships with theming / a11y / keyboard navigation.
+//!
+//! All findings are HINTS, not errors. The drag-and-drop catalog widget
+//! is a single sortable list (see `list_components` → `limitations`), so
+//! kanban-style boards with multiple drop targets genuinely need the
+//! hand-rolled pattern. Same for `<input type="file">` and other
+//! specialised forms the catalog doesn't model.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -104,6 +111,25 @@ fn is_catalog_wrapper(path: &Path, src_root: &Path) -> bool {
     crate::tools::dsl::dx_component_names().any(|n| n == widget_name)
 }
 
+/// HTML elements whose direct catalog equivalent ships with the dx-components
+/// catalog. The lint flags each occurrence at `confidence: low` — the bare
+/// DOM form is functionally correct, just unstyled and missing the catalog's
+/// keyboard / a11y / theming defaults. The mapping is intentionally
+/// conservative: only elements where the catalog widget is a *direct*
+/// drop-in (a styled `<select>` etc.), not "a Tabs widget could replace
+/// these radio buttons."
+const DOM_TO_CATALOG: &[(&str, &str)] = &[
+    ("select", "select"),
+    ("dialog", "dialog"),
+    ("textarea", "textarea"),
+    // `<input>` is broader (text vs checkbox vs radio vs file vs date), so
+    // we suggest the closest single-type catalog widget (`input`) and let
+    // the agent pick a more specific one (`checkbox`, `radio_group`,
+    // `date_picker`, `slider`) when the `type=` says so. Confidence stays
+    // low because <input type=file> has no catalog equivalent.
+    ("input", "input"),
+];
+
 fn scan_file(ast: &syn::File, file: &Path, out: &mut Vec<ReinventedFinding>) {
     for item in &ast.items {
         let syn::Item::Fn(f) = item else { continue };
@@ -128,16 +154,38 @@ fn scan_file(ast: &syn::File, file: &Path, out: &mut Vec<ReinventedFinding>) {
         let mut has_dragover = false;
         let mut has_drop = false;
         let mut first_line: Option<usize> = None;
+        // Track every bare DOM element we want to flag — keyed by catalog
+        // name so the same `<select>` appearing twice in one component only
+        // surfaces once (the suggestion is the same either way).
+        let mut dom_hits: std::collections::BTreeMap<&'static str, (&'static str, usize)> =
+            std::collections::BTreeMap::new();
         for body in &collector.rsx_bodies {
             for tt in body.clone() {
                 scan_event_handlers(
-                    tt,
+                    tt.clone(),
                     &mut has_dragstart,
                     &mut has_dragover,
                     &mut has_drop,
                     &mut first_line,
                 );
             }
+            scan_dom_elements(body.clone(), &mut dom_hits);
+        }
+        for (dom_name, (catalog_name, line)) in dom_hits {
+            out.push(ReinventedFinding {
+                reinvented: catalog_name,
+                component: component.clone(),
+                file: file.to_path_buf(),
+                line,
+                confidence: "low",
+                hint: format!(
+                    "`<{dom_name}>` is a bare DOM element; the catalog ships `{catalog_name}` \
+                     with theming, keyboard navigation, and a11y wiring already done. \
+                     `dx components add {catalog_name}` to install. `confidence: low` because \
+                     specialised forms (e.g. `<input type=\"file\">`) have no catalog \
+                     equivalent — verify the use case before swapping."
+                ),
+            });
         }
         if has_dragstart && has_dragover && has_drop {
             let line = first_line.unwrap_or_else(|| f.sig.ident.span().start().line);
@@ -179,6 +227,44 @@ fn scan_file(ast: &syn::File, file: &Path, out: &mut Vec<ReinventedFinding>) {
                     .into(),
             });
         }
+    }
+}
+
+/// Walk an rsx token stream looking for `<dom_element> { ... }` shapes whose
+/// catalog equivalent we want to suggest. The detection is purely structural:
+/// an `Ident` immediately followed by a `Group { ... }` with brace delimiter
+/// is an rsx element. We DON'T descend into the group as a child-element
+/// position (we want all matches), but we DO skip the `if let X = ident:`
+/// case by ignoring idents followed by `:` (those are props/handlers).
+///
+/// `hits` is keyed by the DOM element name so multiple `<select>` blocks in
+/// one component dedupe to a single finding (the suggestion is the same).
+fn scan_dom_elements(
+    ts: proc_macro2::TokenStream,
+    hits: &mut std::collections::BTreeMap<&'static str, (&'static str, usize)>,
+) {
+    let trees: Vec<TokenTree> = ts.into_iter().collect();
+    let mut i = 0;
+    while i < trees.len() {
+        if let TokenTree::Ident(id) = &trees[i] {
+            let s = id.to_string();
+            let next = trees.get(i + 1);
+            let is_element = matches!(
+                next,
+                Some(TokenTree::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Brace
+            );
+            if is_element
+                && let Some((_, catalog)) =
+                    DOM_TO_CATALOG.iter().find(|(dom, _)| *dom == s.as_str())
+                && !hits.contains_key(*catalog)
+            {
+                hits.insert(catalog, (catalog, id.span().start().line));
+            }
+        }
+        if let TokenTree::Group(g) = &trees[i] {
+            scan_dom_elements(g.stream(), hits);
+        }
+        i += 1;
     }
 }
 
@@ -367,6 +453,101 @@ fn Zone() -> Element {
 "#,
         );
         assert!(scan(dir.path()).is_empty());
+    }
+
+    /// Standup `BoardScreen`'s compose form uses a bare `<select>` for the
+    /// column picker; the catalog ships `select`. Before the fix the lint
+    /// only caught drag-and-drop, so this hand-rolled DOM form slipped
+    /// through. Now it emits a `confidence: low` finding pointing at the
+    /// catalog widget.
+    #[test]
+    fn flags_bare_select_with_catalog_equivalent() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join("src/board_screen.rs"),
+            r#"use dioxus::prelude::*;
+#[component]
+fn BoardScreen() -> Element {
+    rsx! {
+        form {
+            select {
+                option { "todo" }
+                option { "doing" }
+            }
+        }
+    }
+}
+"#,
+        );
+        let findings = scan(dir.path());
+        let select_finding = findings
+            .iter()
+            .find(|f| f.reinvented == "select")
+            .expect("bare <select> should be flagged");
+        assert_eq!(select_finding.component, "BoardScreen");
+        assert_eq!(select_finding.confidence, "low");
+        assert!(
+            select_finding.hint.contains("dx components add select"),
+            "hint should suggest the catalog install command: {}",
+            select_finding.hint,
+        );
+    }
+
+    /// PascalCase idents (i.e. real Dioxus components like the catalog
+    /// `Select`) must NOT match the lowercase-DOM rule. Without this guard
+    /// a catalog user (who installed `select` and is rendering `Select {}`)
+    /// would get a noisy false positive.
+    #[test]
+    fn does_not_flag_pascal_case_catalog_components() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join("src/board_screen.rs"),
+            r#"use dioxus::prelude::*;
+#[component]
+fn BoardScreen() -> Element {
+    rsx! {
+        Select {
+            value: "todo",
+        }
+    }
+}
+"#,
+        );
+        assert!(
+            scan(dir.path()).is_empty(),
+            "PascalCase Select must not trigger the lowercase-DOM lint"
+        );
+    }
+
+    /// Multiple `<select>` elements in one component dedupe to a single
+    /// finding — they all surface the same install suggestion, so listing
+    /// each occurrence is noise.
+    #[test]
+    fn dedupes_multiple_bare_selects_in_one_component() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join("src/board_screen.rs"),
+            r#"use dioxus::prelude::*;
+#[component]
+fn BoardScreen() -> Element {
+    rsx! {
+        select {}
+        select {}
+        select {}
+    }
+}
+"#,
+        );
+        let findings = scan(dir.path());
+        let select_findings: Vec<&ReinventedFinding> = findings
+            .iter()
+            .filter(|f| f.reinvented == "select")
+            .collect();
+        assert_eq!(
+            select_findings.len(),
+            1,
+            "three occurrences must dedupe to one finding: {findings:?}"
+        );
     }
 
     #[test]

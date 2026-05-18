@@ -45,8 +45,14 @@ pub struct CheckRsxFileReport {
 
 #[derive(Debug, Serialize)]
 pub struct CheckRsxReport {
-    /// In single-file mode, the file scanned. In batch mode, the first file.
-    pub file: PathBuf,
+    /// File scanned, in single-file mode only. In batch mode this is omitted
+    /// — `per_file[i].file` carries the per-file paths, and surfacing a
+    /// single "first file" at the top level was misleading callers
+    /// (`lint_project` was pointing at the first `.rs` file alphabetically,
+    /// often a router.rs with 0 rsx blocks, while every actual finding lived
+    /// inside `per_file`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
     /// Sum of rsx! blocks across all scanned files.
     pub rsx_block_count: usize,
     /// Names of every lint that ran on the file(s). Lets a caller distinguish
@@ -93,7 +99,6 @@ pub async fn check_rsx(state: &Arc<State>, p: CheckRsxParams) -> Result<CheckRsx
         per_file.push(report);
     }
 
-    let first = per_file[0].file.clone();
     let total_blocks: usize = per_file.iter().map(|r| r.rsx_block_count).sum();
     let issues: Vec<RsxIssue> = if batch_mode {
         per_file
@@ -121,7 +126,14 @@ pub async fn check_rsx(state: &Arc<State>, p: CheckRsxParams) -> Result<CheckRsx
     };
 
     Ok(CheckRsxReport {
-        file: first,
+        // Single-file mode: surface the scanned file. Batch mode: omit, so
+        // callers (notably `lint_project`) don't see a misleading "first
+        // file" pointer that bears no relationship to where the findings are.
+        file: if batch_mode {
+            None
+        } else {
+            Some(per_file[0].file.clone())
+        },
         rsx_block_count: total_blocks,
         checks_run: CHECKS_RUN,
         issues,

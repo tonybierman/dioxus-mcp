@@ -48,11 +48,27 @@ pub struct ServerFnSummary {
     pub pending: usize,
 }
 
+/// Structured directive a caller can act on programmatically. Used in place
+/// of (or alongside) the freeform `notes` strings so a tool-using loop can
+/// route to the right follow-up without parsing prose. `tool` names another
+/// MCP tool to invoke; `reason` is a short paste-into-PR explanation.
+#[derive(Debug, Serialize)]
+pub struct NextStep {
+    pub tool: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ServerFnSummaryReport {
     pub summaries: Vec<ServerFnSummary>,
     pub log_files_scanned: Vec<PathBuf>,
     pub notes: Vec<String>,
+    /// Structured follow-up directives. Populated when the tool degraded
+    /// (e.g. the probe log isn't present): the caller can branch on
+    /// `next_steps[].tool == "verify_install"` instead of regex-matching
+    /// the prose in `notes`. Empty for healthy reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_steps: Vec<NextStep>,
 }
 
 pub async fn server_fn_summary(
@@ -78,10 +94,30 @@ pub async fn server_fn_summary(
         notes.push(crate::tools::runtime::runtime_events::probe_missing_note(
             &live_path,
         ));
+        // Structured equivalent of the prose note so a tool-using loop can
+        // auto-route. Two steps because the user-facing fix has two
+        // ordered phases: confirm the probe is wired (`verify_install`)
+        // and, if not, add the dependency (`execute_code` / install
+        // instructions). We don't conflate them so the caller can skip the
+        // second when the first reports success.
+        let next_steps = vec![
+            NextStep {
+                tool: "verify_install".into(),
+                reason: format!(
+                    "no probe log at {} — confirm the probe crate is in Cargo.toml and `dioxus_mcp_probe::install()` is called in `main()` before running the app",
+                    live_path.display(),
+                ),
+            },
+            NextStep {
+                tool: "cargo add dioxus-mcp-probe".into(),
+                reason: "if `verify_install` reports the probe crate is absent, add it (run-only step; no MCP tool wraps `cargo add`)".into(),
+            },
+        ];
         return Ok(ServerFnSummaryReport {
             summaries: Vec::new(),
             log_files_scanned: scanned,
             notes,
+            next_steps,
         });
     }
 
@@ -201,6 +237,7 @@ pub async fn server_fn_summary(
         summaries,
         log_files_scanned: scanned,
         notes,
+        next_steps: Vec::new(),
     })
 }
 

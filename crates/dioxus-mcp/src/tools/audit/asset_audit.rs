@@ -30,9 +30,24 @@ pub struct MissingAsset {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UnreferencedAsset {
+    /// Crate-relative path to the file (forward-slashed) — e.g. `assets/header.svg`.
+    pub path: String,
+    /// Actionable next step. Always one of two strings so callers can branch
+    /// on the value without parsing prose: `"delete"` (recommend removal —
+    /// the file isn't referenced anywhere) or `"reference"` (a hint to wire
+    /// it in if it was added intentionally). The detector can't tell the
+    /// two intents apart, so we surface the choice rather than commit to one.
+    pub suggestion: &'static str,
+    /// Free-text expansion of `suggestion` — safe to paste into a PR
+    /// comment or a TODO. Names the file and the two options.
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct AssetAuditReport {
     pub assets_dirs: Vec<PathBuf>,
-    pub unreferenced_files: Vec<String>,
+    pub unreferenced_files: Vec<UnreferencedAsset>,
     pub missing_assets: Vec<MissingAsset>,
     pub dynamic_assets_skipped: usize,
     pub referenced_count: usize,
@@ -99,7 +114,7 @@ pub async fn asset_audit(
     }
 
     let referenced_count = referenced.len();
-    let mut unreferenced_files: Vec<String> = files_listed
+    let mut unreferenced_paths: Vec<String> = files_listed
         .iter()
         .filter(|f| {
             !referenced.contains(*f)
@@ -108,7 +123,24 @@ pub async fn asset_audit(
         })
         .cloned()
         .collect();
-    unreferenced_files.sort();
+    unreferenced_paths.sort();
+    // Wrap each unreferenced file in a structured suggestion. The detector
+    // can't tell whether the file is dead code or an intentional addition
+    // that hasn't been wired in yet, so `suggestion: "delete or reference"`
+    // is two-headed by design — callers branch on which intent applies.
+    let unreferenced_files: Vec<UnreferencedAsset> = unreferenced_paths
+        .into_iter()
+        .map(|path| UnreferencedAsset {
+            message: format!(
+                "`{path}` is not referenced by any `asset!()` macro in src/. \
+                 Either delete the file (if it's dead) or wire it into the relevant \
+                 rsx with `asset!(\"/{}\")` (if it was added intentionally).",
+                path.trim_start_matches('/'),
+            ),
+            path,
+            suggestion: "delete or reference",
+        })
+        .collect();
 
     Ok(AssetAuditReport {
         assets_dirs: asset_dir_paths,

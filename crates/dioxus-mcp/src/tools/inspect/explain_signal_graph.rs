@@ -7,15 +7,24 @@ use serde::{Deserialize, Serialize};
 use syn::visit::Visit;
 
 use crate::state::State;
+use crate::tools::ast::{ParseError, collect_parse_errors, walk_rs_files};
 use crate::tools::resolve_in_project;
+use crate::tools::scaffold::crate_root;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ExplainSignalGraphParams {
-    pub file: String,
-    /// Optional component name. If omitted, every #[component] in the file is analyzed.
+    /// Path to a single `.rs` file. When omitted, every `.rs` file under
+    /// `<project_root>/src/` is analysed — useful for one-shot project-wide
+    /// signal-graph audits without the caller having to discover files first.
+    /// Absolute, or relative to the crate root.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Optional component name. If omitted, every #[component] in the scanned
+    /// file(s) is analyzed.
     pub component: Option<String>,
-    /// Absolute path to the Dioxus project root. Required when `file` is relative and the
-    /// server was not started in the target project directory.
+    /// Absolute path to the Dioxus project root. Defaults to the cwd the MCP
+    /// server was started in. Used both to resolve a relative `file:` and to
+    /// drive the project-wide walk when `file` is omitted.
     pub project_root: Option<String>,
 }
 
@@ -87,6 +96,11 @@ pub struct SignalNode {
 #[derive(Debug, Serialize)]
 pub struct ComponentGraph {
     pub component: String,
+    /// File the component lives in. Always populated so callers handling
+    /// project-wide scans don't have to walk back to `files[].file`.
+    /// In single-file mode this duplicates `ExplainSignalGraphReport::file`,
+    /// which is fine — the cost is a single PathBuf per component.
+    pub file: PathBuf,
     pub nodes: Vec<SignalNode>,
     /// Names of context-provided / hook-bound bindings (anything matched by
     /// `let X = use_*();` where `use_*` isn't one of the well-known hooks)
@@ -103,19 +117,67 @@ pub struct ComponentGraph {
 
 #[derive(Debug, Serialize)]
 pub struct ExplainSignalGraphReport {
-    pub file: PathBuf,
+    /// The file scanned in single-file mode. `None` when the report was
+    /// produced by walking the whole `src/` tree (no `file:` parameter).
+    /// `components[].file` always names the actual file each component lives
+    /// in, so consumers can rely on per-component paths in both modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
     pub components: Vec<ComponentGraph>,
+    /// Files that failed to `syn::parse_file` during a project-wide scan.
+    /// Always empty in single-file mode — a parse failure there is fatal
+    /// (returned as `Err`) since the caller asked for a specific file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_errors: Vec<ParseError>,
 }
 
 pub async fn explain_signal_graph(
     state: &Arc<State>,
     p: ExplainSignalGraphParams,
 ) -> Result<ExplainSignalGraphReport, String> {
-    let path = resolve_in_project(state, &p.file, p.project_root.as_deref()).await;
-    let src = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let file = syn::parse_file(&src).map_err(|e| format!("rust parse error: {e}"))?;
+    if let Some(file_arg) = &p.file {
+        let path = resolve_in_project(state, file_arg, p.project_root.as_deref()).await;
+        let src = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let file = syn::parse_file(&src).map_err(|e| format!("rust parse error: {e}"))?;
+        let components = analyze_file(&file, &path, p.component.as_deref());
+        return Ok(ExplainSignalGraphReport {
+            file: Some(path),
+            components,
+            parse_errors: Vec::new(),
+        });
+    }
 
+    // Project-wide mode: walk `<crate_root>/src/**` and analyse every
+    // `.rs` file. Parse failures are collected (not fatal) so a single bad
+    // file doesn't take out the whole report — same pattern as `signal_lint`.
+    let root = crate_root(state, p.project_root.as_deref()).await?;
+    let src_root = root.join("src");
+    let files = walk_rs_files(&src_root);
+    let mut components = Vec::new();
+    for sf in &files {
+        let Ok(ast) = &sf.ast else { continue };
+        let mut per_file = analyze_file(ast, &sf.path, p.component.as_deref());
+        components.append(&mut per_file);
+    }
+    let parse_errors = collect_parse_errors(&files);
+
+    Ok(ExplainSignalGraphReport {
+        file: None,
+        components,
+        parse_errors,
+    })
+}
+
+/// Walk every `#[component] fn …` item in `file`, optionally filtered by
+/// `component_filter`, and return a `ComponentGraph` per match. Shared
+/// between the single-file and project-wide entry paths so the per-component
+/// analysis behaves identically in both modes.
+fn analyze_file(
+    file: &syn::File,
+    path: &std::path::Path,
+    component_filter: Option<&str>,
+) -> Vec<ComponentGraph> {
     let mut out = Vec::new();
     for item in &file.items {
         let syn::Item::Fn(f) = item else { continue };
@@ -130,26 +192,22 @@ pub async fn explain_signal_graph(
             continue;
         }
         let name = f.sig.ident.to_string();
-        if let Some(filter) = &p.component
-            && &name != filter
+        if let Some(filter) = component_filter
+            && name != filter
         {
             continue;
         }
-
         let (nodes, context_signal_reads) = analyze_component_body(&f.block);
         let warnings = lint_signal_graph(&nodes);
         out.push(ComponentGraph {
             component: name,
+            file: path.to_path_buf(),
             nodes,
             context_signal_reads,
             warnings,
         });
     }
-
-    Ok(ExplainSignalGraphReport {
-        file: path,
-        components: out,
-    })
+    out
 }
 
 fn analyze_component_body(block: &syn::Block) -> (Vec<SignalNode>, Vec<String>) {
@@ -647,6 +705,22 @@ fn collect_reads_writes(expr: &syn::Expr, known: &[String]) -> (Vec<String>, Vec
             }
             syn::visit::visit_expr_assign(self, ea);
         }
+        fn visit_expr_binary(&mut self, eb: &'ast syn::ExprBinary) {
+            // syn 2.0 represents `sig += 1` as `ExprBinary` with `BinOp::AddAssign`
+            // (and the matching variants for `-=`, `*=`, `/=`, `%=`, `^=`, `&=`,
+            // `|=`, `<<=`, `>>=`). All ten variants mutate the lhs, so the
+            // receiver counts as a write — exactly like `sig = sig + 1` would.
+            // Skip the lhs walk (the ident is the write target, not a read) and
+            // recurse into the rhs (`sig += other()` still reads `other`).
+            if is_compound_assign(&eb.op) {
+                if let Some(name) = root_ident(&eb.left) {
+                    self.note_write(&name);
+                    self.visit_expr(&eb.right);
+                    return;
+                }
+            }
+            syn::visit::visit_expr_binary(self, eb);
+        }
         fn visit_ident(&mut self, i: &'ast syn::Ident) {
             let s = i.to_string();
             if self.known.iter().any(|k| k == &s) && !self.reads.iter().any(|r| r == &s) {
@@ -682,6 +756,25 @@ fn root_ident(expr: &syn::Expr) -> Option<String> {
         syn::Expr::Unary(u) => root_ident(&u.expr),
         _ => None,
     }
+}
+
+/// True for every compound-assignment `BinOp` variant in syn 2.0 (`+=`, `-=`,
+/// `*=`, `/=`, `%=`, `^=`, `&=`, `|=`, `<<=`, `>>=`). Each variant mutates the
+/// lhs, so the lhs binding has to be attributed as a write.
+fn is_compound_assign(op: &syn::BinOp) -> bool {
+    matches!(
+        op,
+        syn::BinOp::AddAssign(_)
+            | syn::BinOp::SubAssign(_)
+            | syn::BinOp::MulAssign(_)
+            | syn::BinOp::DivAssign(_)
+            | syn::BinOp::RemAssign(_)
+            | syn::BinOp::BitXorAssign(_)
+            | syn::BinOp::BitAndAssign(_)
+            | syn::BinOp::BitOrAssign(_)
+            | syn::BinOp::ShlAssign(_)
+            | syn::BinOp::ShrAssign(_)
+    )
 }
 
 fn lint_signal_graph(nodes: &[SignalNode]) -> Vec<String> {
@@ -1184,6 +1277,44 @@ fn Demo() -> Element {
         assert!(
             !nodes.iter().any(|n| n.name == "on_click"),
             "closure with no signal touches should NOT be a node"
+        );
+    }
+
+    /// Standup `BoardScreen` mutates `local_lock` six times with `local_lock += 1`
+    /// from across multiple closures. syn 2.0 represents that as `ExprBinary`
+    /// with `BinOp::AddAssign` — not the `ExprAssign` node the prior walker
+    /// expected — so `written_by` came back empty. Pin the compound-assign
+    /// path so the writes show up in both the node's `writes` and the inverse
+    /// `written_by`.
+    #[test]
+    fn compound_assignment_counts_as_write() {
+        let nodes = analyze(
+            r#"
+#[component]
+fn BoardScreen() -> Element {
+    let mut local_lock = use_signal(|| 0u32);
+    let bump_one = move |_| { local_lock += 1; };
+    let bump_two = move |_| { local_lock -= 1; };
+    let scale = move |_| { local_lock *= 2; };
+    rsx!{}
+}
+"#,
+        );
+        let by_name = |n: &str| nodes.iter().find(|x| x.name == n).cloned();
+        let bump_one = by_name("bump_one").expect("bump_one closure should be a node");
+        assert!(
+            bump_one.writes.iter().any(|w| w == "local_lock"),
+            "`local_lock += 1` should appear as a write on the enclosing closure: writes = {:?}",
+            bump_one.writes
+        );
+        let local_lock = by_name("local_lock").unwrap();
+        let mut wb = local_lock.written_by.clone();
+        wb.sort();
+        assert!(
+            wb.contains(&"bump_one".to_string())
+                && wb.contains(&"bump_two".to_string())
+                && wb.contains(&"scale".to_string()),
+            "local_lock should be written_by every compound-assigning closure (+=, -=, *=): {wb:?}"
         );
     }
 

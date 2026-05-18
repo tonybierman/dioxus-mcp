@@ -136,6 +136,46 @@ fn tool_project_tour() {
     assert!(r["assets"].is_object(), "assets missing");
 }
 
+/// `auth_map` composes `route_map` and `project_index` into one report.
+/// The fixture sample-project has no guarded routes and no cookie-gated
+/// server fns, so the report shows both surfaces as unauthenticated with
+/// no mismatches — the "all open" baseline. Validates the shape and that
+/// the join across the two underlying tools survives serialisation.
+#[test]
+fn tool_auth_map() {
+    let r = call_tool("auth_map", json!({}));
+    let routes = r["routes"].as_array().unwrap();
+    assert!(!routes.is_empty(), "expected at least one route: {r}");
+    // Every route should have the `gated` boolean alongside `guards`.
+    for route in routes {
+        assert!(
+            route.get("gated").is_some(),
+            "route missing `gated`: {route}"
+        );
+        assert!(
+            route.get("guards").is_some(),
+            "route missing `guards`: {route}"
+        );
+    }
+
+    let server_fns = r["server_fns"].as_array().unwrap();
+    for sf in server_fns {
+        assert!(
+            sf.get("cookie_gated").is_some(),
+            "server fn missing `cookie_gated`: {sf}",
+        );
+    }
+
+    // Sample-project has no guards and no cookie extractors, so headline
+    // counts are zero AND mismatches is empty (no auth = no mismatch).
+    assert_eq!(r["gated_route_count"], 0);
+    assert_eq!(r["gated_server_fn_count"], 0);
+    assert!(
+        r["mismatches"].as_array().unwrap().is_empty(),
+        "no auth on either side = no mismatch flagged: {r}",
+    );
+}
+
 #[test]
 fn tool_route_map() {
     let r = call_tool("route_map", json!({}));
@@ -238,22 +278,38 @@ fn tool_asset_audit() {
     // Args mirror the TOOLS.md example. `public` doesn't exist in the
     // fixture; the tool silently ignores missing asset dirs.
     let r = call_tool("asset_audit", json!({"assets_dirs": ["assets", "public"]}));
-    let unreferenced: Vec<&str> = r["unreferenced_files"]
-        .as_array()
-        .unwrap()
+    let unreferenced_full = r["unreferenced_files"].as_array().unwrap();
+    let unreferenced_paths: Vec<&str> = unreferenced_full
         .iter()
-        .map(|s| s.as_str().unwrap())
+        .map(|s| s["path"].as_str().unwrap())
         .collect();
     assert!(
-        unreferenced.contains(&"assets/orphan.css"),
-        "unreferenced: {unreferenced:?}"
+        unreferenced_paths.contains(&"assets/orphan.css"),
+        "unreferenced: {unreferenced_paths:?}"
     );
     // logo.png is referenced via asset!() nested *inside* an rsx! body —
     // make sure the macro-token walker resolves it (it must not appear as
     // unreferenced).
     assert!(
-        !unreferenced.contains(&"assets/logo.png"),
-        "logo.png is referenced inside rsx!(...): {unreferenced:?}",
+        !unreferenced_paths.contains(&"assets/logo.png"),
+        "logo.png is referenced inside rsx!(...): {unreferenced_paths:?}",
+    );
+    // Each unreferenced entry carries the actionable suggestion + a
+    // paste-into-PR message naming the file. The two-headed
+    // `delete or reference` shape is intentional — the detector can't
+    // distinguish dead files from intentional additions that haven't
+    // been wired in yet.
+    let orphan = unreferenced_full
+        .iter()
+        .find(|e| e["path"] == "assets/orphan.css")
+        .expect("orphan.css entry present");
+    assert_eq!(
+        orphan["suggestion"], "delete or reference",
+        "expected the two-headed suggestion: {orphan}",
+    );
+    assert!(
+        orphan["message"].as_str().unwrap().contains("orphan.css"),
+        "message should name the file: {orphan}",
     );
     let missing = r["missing_assets"].as_array().unwrap();
     assert!(
@@ -501,6 +557,54 @@ fn tool_explain_signal_graph() {
     assert!(
         nodes.iter().any(|n| n["kind"] == "memo"),
         "expected at least one memo node: {nodes:?}"
+    );
+}
+
+/// Project-wide mode: omit `file:` and let `explain_signal_graph` walk
+/// `<project_root>/src/`. The TODO called out the prior shape — callers had
+/// to pre-discover files because `file:` was required. Now omitting it
+/// gives back every component the walker found, each tagged with its
+/// originating file.
+#[test]
+fn tool_explain_signal_graph_project_wide_mode() {
+    let r = call_tool("explain_signal_graph", json!({}));
+    let comps = r["components"].as_array().unwrap();
+    assert!(
+        !comps.is_empty(),
+        "project-wide scan should surface at least one component: {r}"
+    );
+    // The fixture sample-project has both `Home` and `UserPage` —
+    // confirming the walk reaches multiple files, not just one.
+    let names: Vec<&str> = comps
+        .iter()
+        .filter_map(|c| c["component"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"Home"),
+        "Home component should appear in project-wide scan: {names:?}"
+    );
+    assert!(
+        names.contains(&"UserPage"),
+        "UserPage component should appear in project-wide scan: {names:?}"
+    );
+
+    // Every component must carry its `file:` so callers can route findings
+    // back to the source without an out-of-band map.
+    for c in comps {
+        let file = c["file"]
+            .as_str()
+            .unwrap_or_else(|| panic!("component graph missing `file`: {c}"));
+        assert!(
+            file.ends_with(".rs"),
+            "file: should point at the originating .rs path: {file}"
+        );
+    }
+
+    // Top-level `file:` is absent in project-wide mode (it's the marker
+    // that distinguishes the two modes for the caller).
+    assert!(
+        r.get("file").is_none() || r["file"].is_null(),
+        "project-wide scan must not surface a top-level `file:` field: {r}"
     );
 }
 
@@ -1115,8 +1219,11 @@ server_fns:
 
 #[test]
 fn tool_execute_code_server_fn_extractors() {
-    // Extractors must land in BOTH the route attribute argument list AND the
-    // function signature, so cookie-bearing handlers stop forcing a hand-edit.
+    // Extractors land in the verb-macro attribute ONLY. The Dioxus 0.7.9
+    // macro binds each extractor ident into the fn body's scope itself, so
+    // repeating it in the signature breaks `FromRequest` for the body tuple
+    // (the matching unit tests in `dsl::tests::modify_and_persistence` pin
+    // the same rule). User-supplied body args still go in the signature.
     let tmp = copy_fixture_to_temp();
     let yaml = r#"version: "1"
 server_fns:
@@ -1143,8 +1250,8 @@ server_fns:
         "attribute should carry the extractor: {fetch}"
     );
     assert!(
-        fetch.contains("cookies: TypedHeader<Cookie>,"),
-        "signature should carry the extractor: {fetch}"
+        !fetch.contains("cookies: TypedHeader<Cookie>,"),
+        "extractor must NOT be repeated in the fn signature (macro binds it): {fetch}"
     );
 
     let post = std::fs::read_to_string(tmp.path().join("src/server/post_message.rs")).unwrap();
@@ -1154,14 +1261,24 @@ server_fns:
         ),
         "multi-extractor attribute: {post}"
     );
-    // Extractors come before user args in the signature.
+    // User-supplied body args (`body: String`) still land in the signature;
+    // extractors stay attribute-only.
     let sig_start = post.find("pub async fn post_message(").unwrap();
-    let sig = &post[sig_start..];
-    let cookies_at = sig.find("cookies: TypedHeader<Cookie>").unwrap();
-    let body_at = sig.find("body: String").unwrap();
+    let sig_end = post[sig_start..]
+        .find(") -> Result")
+        .expect("signature has the standard return-type tail");
+    let sig = &post[sig_start..sig_start + sig_end];
     assert!(
-        cookies_at < body_at,
-        "extractors must precede user args in signature: {sig}"
+        sig.contains("body: String"),
+        "user-supplied body arg must remain in the signature: {sig}"
+    );
+    assert!(
+        !sig.contains("cookies:"),
+        "cookies extractor must NOT appear in the signature (macro binds it): {sig}"
+    );
+    assert!(
+        !sig.contains("state:"),
+        "state extractor must NOT appear in the signature (macro binds it): {sig}"
     );
 }
 

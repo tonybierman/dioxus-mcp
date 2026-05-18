@@ -892,10 +892,12 @@ fn check_prop_clone_overuse(
         }
     }
 
+    let mut per_prop_fired: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for (prop, lines) in &clones {
         if lines.len() < 3 {
             continue;
         }
+        per_prop_fired.insert(prop.as_str());
         let line_list = lines
             .iter()
             .map(|l| l.to_string())
@@ -913,6 +915,50 @@ fn check_prop_clone_overuse(
             ),
             file: file.to_path_buf(),
             line: lines[0],
+            component: Some(f.sig.ident.to_string()),
+        });
+    }
+
+    // Aggregate "many-clones across multiple props" pass. Standup's `CardItem`
+    // cloned `card_id` twice AND `column_id` twice — total of four clones into
+    // separate `let` bindings — yet escaped the per-prop rule because no single
+    // prop hit the 3-count threshold. The aggregate signal is the same: each
+    // `move` closure captures its own clone, the props are by-value rather than
+    // by-handle, and the refactor (Arc / ReadOnlySignal / shared capture) is
+    // the same. Threshold is ≥4 clones across ≥2 props so a single prop cloned
+    // twice doesn't get double-flagged on its own.
+    let total_clones: usize = clones.values().map(|v| v.len()).sum();
+    let prop_count = clones.len();
+    let already_flagged_all = clones.keys().all(|k| per_prop_fired.contains(k.as_str()));
+    // Require at least one prop to be cloned twice — "one clone each across
+    // five props" is the normal capture-per-closure shape and was producing
+    // false positives. The smell is *repeat* clones of the same prop spread
+    // across multiple props (e.g. `card_id` ×2 + `column_id` ×2), not "lots
+    // of distinct props each captured once."
+    let has_repeat_clone = clones.values().any(|v| v.len() >= 2);
+    if total_clones >= 4 && prop_count >= 2 && has_repeat_clone && !already_flagged_all {
+        let mut summary_parts: Vec<String> = clones
+            .iter()
+            .map(|(p, l)| format!("`{p}` ×{}", l.len()))
+            .collect();
+        summary_parts.sort();
+        let first_line = clones
+            .values()
+            .flat_map(|v| v.iter().copied())
+            .min()
+            .unwrap_or(0);
+        issues.push(SignalIssue {
+            code: "prop_clone_overuse_aggregate",
+            message: format!(
+                "this component clones props into separate `let` bindings {total_clones} times \
+                 across {prop_count} props ({list}). No single prop hit the 3-clone per-prop \
+                 threshold, but the same closure-capture refactor applies — switch to \
+                 `Rc<str>` / `Arc<T>` props, lift into a `ReadOnlySignal<T>`, or share a single \
+                 capture across the closures.",
+                list = summary_parts.join(", "),
+            ),
+            file: file.to_path_buf(),
+            line: first_line,
             component: Some(f.sig.ident.to_string()),
         });
     }
@@ -1059,6 +1105,18 @@ fn collect_signal_writes(expr: &syn::Expr, signal_bindings: &[String]) -> Vec<St
             syn::visit::visit_expr_assign(self, ea);
         }
         fn visit_expr_binary(&mut self, eb: &'ast syn::ExprBinary) {
+            // syn 2.0 represents `sig += 1` as `ExprBinary` with `BinOp::AddAssign`
+            // (and the matching variants for the other nine compound forms). Each
+            // mutates the lhs binding, so we attribute it as a write — without
+            // this, `signal_many_writers` was blind to mutators written as
+            // `local_lock += 1` (every compound-assigning closure looked
+            // signal-free).
+            if is_compound_assign(&eb.op)
+                && let Some(name) = single_ident(&eb.left)
+                && self.signals.iter().any(|s| s == &name)
+            {
+                self.hits.insert(name);
+            }
             syn::visit::visit_expr_binary(self, eb);
         }
         fn visit_expr_unary(&mut self, eu: &'ast syn::ExprUnary) {
@@ -1655,6 +1713,28 @@ fn single_ident(expr: &syn::Expr) -> Option<String> {
     None
 }
 
+/// True for every compound-assignment `BinOp` variant in syn 2.0 (`+=`, `-=`,
+/// `*=`, `/=`, `%=`, `^=`, `&=`, `|=`, `<<=`, `>>=`). syn 2.0 collapsed the
+/// separate `ExprAssignOp` node from syn 1.x into `ExprBinary`, so
+/// compound-assignment writes show up under `visit_expr_binary` with one of
+/// these ops — the visitor has to recognise them or the lhs reference reads
+/// as inert.
+fn is_compound_assign(op: &syn::BinOp) -> bool {
+    matches!(
+        op,
+        syn::BinOp::AddAssign(_)
+            | syn::BinOp::SubAssign(_)
+            | syn::BinOp::MulAssign(_)
+            | syn::BinOp::DivAssign(_)
+            | syn::BinOp::RemAssign(_)
+            | syn::BinOp::BitXorAssign(_)
+            | syn::BinOp::BitAndAssign(_)
+            | syn::BinOp::BitOrAssign(_)
+            | syn::BinOp::ShlAssign(_)
+            | syn::BinOp::ShrAssign(_)
+    )
+}
+
 #[cfg(test)]
 mod hydration_tests {
     use super::*;
@@ -2202,6 +2282,117 @@ fn Demo(a: String, b: String, c: String) -> Element {
         );
     }
 
+    /// Standup `CardItem` shape: `card_id` cloned twice AND `column_id`
+    /// cloned twice — four clones total across two props, but neither prop
+    /// hits the 3-clone per-prop threshold. The aggregate signal is the same
+    /// (one closure captures per binding); fire `prop_clone_overuse_aggregate`
+    /// once with a summary that names each prop and its count.
+    #[test]
+    fn flags_aggregate_when_multiple_props_each_below_threshold() {
+        let issues = lint_prop_clones(
+            r#"#[component]
+fn CardItem(card_id: String, column_id: String) -> Element {
+    let card_for_a = card_id.clone();
+    let card_for_b = card_id.clone();
+    let col_for_a = column_id.clone();
+    let col_for_b = column_id.clone();
+    let _ = (card_for_a, card_for_b, col_for_a, col_for_b);
+    rsx!{}
+}"#,
+        );
+        let agg: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "prop_clone_overuse_aggregate")
+            .collect();
+        assert_eq!(
+            agg.len(),
+            1,
+            "aggregate must fire when ≥4 total clones across ≥2 props: {issues:?}"
+        );
+        assert!(
+            agg[0].message.contains("`card_id` ×2"),
+            "names card_id and count: {}",
+            agg[0].message
+        );
+        assert!(
+            agg[0].message.contains("`column_id` ×2"),
+            "names column_id and count: {}",
+            agg[0].message
+        );
+
+        // And the per-prop rule must NOT have also fired, since neither prop
+        // hit 3 clones individually.
+        let per_prop: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "prop_clone_overuse")
+            .collect();
+        assert!(
+            per_prop.is_empty(),
+            "per-prop rule must stay silent below its own threshold: {per_prop:?}"
+        );
+    }
+
+    /// Aggregate stays silent when only one prop has clones (even ≥4 of
+    /// them) — that case is already covered by the per-prop rule, and
+    /// double-firing would just be noise.
+    #[test]
+    fn aggregate_silent_when_only_one_prop_clones() {
+        let issues = lint_prop_clones(
+            r#"#[component]
+fn Demo(id: String) -> Element {
+    let a = id.clone();
+    let b = id.clone();
+    let c = id.clone();
+    let d = id.clone();
+    let _ = (a, b, c, d);
+    rsx!{}
+}"#,
+        );
+        let agg: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "prop_clone_overuse_aggregate")
+            .collect();
+        assert!(
+            agg.is_empty(),
+            "aggregate must defer to the per-prop rule when only one prop is involved: {agg:?}"
+        );
+        let per_prop: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "prop_clone_overuse")
+            .collect();
+        assert_eq!(
+            per_prop.len(),
+            1,
+            "per-prop rule should fire for the 4-clone case: {per_prop:?}"
+        );
+    }
+
+    /// Aggregate stays silent for one clone per prop across many props —
+    /// the threshold is total ≥4 clones, and "one each" is the baseline
+    /// normal shape.
+    #[test]
+    fn aggregate_silent_with_one_clone_each_across_many_props() {
+        let issues = lint_prop_clones(
+            r#"#[component]
+fn Demo(a: String, b: String, c: String, d: String, e: String) -> Element {
+    let _a = a.clone();
+    let _b = b.clone();
+    let _c = c.clone();
+    let _d = d.clone();
+    let _e = e.clone();
+    rsx!{}
+}"#,
+        );
+        let agg: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "prop_clone_overuse_aggregate")
+            .collect();
+        assert!(
+            agg.is_empty(),
+            "one clone per prop is the baseline; aggregate must not flag: {agg:?}"
+        );
+    }
+
     /// Clones of locals or non-prop bindings shouldn't flag — only prop
     /// names from the fn signature count.
     #[test]
@@ -2504,6 +2695,44 @@ fn Demo() -> Element {
         assert!(
             hits.is_empty(),
             "two writers is below the threshold: {hits:?}"
+        );
+    }
+
+    /// dioxus_standup `BoardScreen` shape: every mutator writes `local_lock`
+    /// via `local_lock += 1` rather than `.set` / `.with_mut`. syn 2.0 lowers
+    /// that to `ExprBinary` with `BinOp::AddAssign`, not `ExprAssign`, so the
+    /// old walker silently missed every site and `signal_many_writers` never
+    /// fired. Pin the compound-assign path so three closures bumping the
+    /// signal with `+=` is enough to trip the lint.
+    #[test]
+    fn flags_signal_written_only_via_compound_assigns() {
+        let issues = lint_many_writers(
+            r#"#[component]
+fn BoardScreen() -> Element {
+    let mut local_lock = use_signal(|| 0u32);
+    let submit_card = move |_| { local_lock += 1; };
+    let delete_card = move |_| { local_lock += 1; };
+    let commit_move = move |_| { local_lock += 1; };
+    let _ = (submit_card, delete_card, commit_move);
+    rsx!{}
+}"#,
+        );
+        let hits: Vec<&SignalIssue> = issues
+            .iter()
+            .filter(|i| i.code == "signal_many_writers")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "three closures bumping `local_lock` with `+=` should trip the lint: {issues:?}"
+        );
+        let msg = &hits[0].message;
+        assert!(msg.contains("`local_lock`"), "names the signal: {msg}");
+        assert!(
+            msg.contains("submit_card")
+                && msg.contains("delete_card")
+                && msg.contains("commit_move"),
+            "lists each compound-assigning closure: {msg}"
         );
     }
 

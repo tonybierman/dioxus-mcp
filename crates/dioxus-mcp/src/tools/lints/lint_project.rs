@@ -117,9 +117,10 @@ pub async fn lint_project(
 
         if files.is_empty() {
             // Empty src/ — record an empty report rather than erroring (the
-            // single-file form would reject an empty file list).
+            // single-file form would reject an empty file list). No `file:`
+            // field: batch mode never surfaces one (see `CheckRsxReport::file`
+            // — the top-level pointer was misleading callers in real runs).
             report.check_rsx = Some(serde_json::json!({
-                "file": src_root,
                 "rsx_block_count": 0,
                 "issues": [],
                 "per_file": [],
