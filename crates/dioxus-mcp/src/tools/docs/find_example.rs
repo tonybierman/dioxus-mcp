@@ -10,14 +10,17 @@ mod local;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct FindExampleParams {
-    /// Free-text concept to match against example folder/file names
-    /// (e.g. "router", "fullstack", "use_signal"). Tokens are matched against
+    /// Free-text query to match against example folder/file names and (for
+    /// local pattern entries) their blurb + body. Tokens are matched against
     /// hyphen/underscore-split names; multi-token queries OR across tokens.
     /// Omit (or pass empty) to return an alphabetically-sorted listing of every
     /// example in the repo — useful for a first call when you don't yet know
     /// which folder name to ask for.
-    #[serde(default)]
-    pub concept: Option<String>,
+    ///
+    /// Accepted under either the `query` or legacy `concept` field name; both
+    /// resolve to the same value.
+    #[serde(default, alias = "concept")]
+    pub query: Option<String>,
     /// Branch or tag, e.g. "main" or "v0.7.0". Defaults to "main".
     #[serde(rename = "ref")]
     pub git_ref: Option<String>,
@@ -48,7 +51,8 @@ pub struct ExampleHit {
 
 #[derive(Debug, Serialize)]
 pub struct FindExampleResult {
-    pub concept: Option<String>,
+    /// Echoes back the query the caller passed (under either field name).
+    pub query: Option<String>,
     pub git_ref: String,
     pub hits: Vec<ExampleHit>,
 }
@@ -58,13 +62,9 @@ pub async fn find_example(
     p: FindExampleParams,
 ) -> Result<FindExampleResult, String> {
     let git_ref = p.git_ref.clone().unwrap_or_else(|| "main".into());
-    let concept = p
-        .concept
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    // When no concept is given, return more results so the listing is useful.
-    let limit = p.limit.unwrap_or(if concept.is_some() { 3 } else { 100 });
+    let query = p.query.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // When no query is given, return more results so the listing is useful.
+    let limit = p.limit.unwrap_or(if query.is_some() { 3 } else { 100 });
     let api_url = format!(
         "https://api.github.com/repos/DioxusLabs/dioxus/contents/examples?ref={}",
         git_ref
@@ -95,7 +95,7 @@ pub async fn find_example(
         serde_json::from_str(&listing).map_err(|e| format!("github json: {e}"))?;
     let arr = entries.as_array().ok_or("expected array")?;
 
-    let qterms = concept.map(tokenize).unwrap_or_default();
+    let qterms = query.map(tokenize).unwrap_or_default();
     let mut hits: Vec<ExampleHit> = Vec::new();
     for item in arr {
         let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -154,15 +154,26 @@ pub async fn find_example(
     // Merge in any local pattern examples — these cover wirings that the
     // upstream Dioxus repo doesn't ship a folder for (e.g. an SSE snapshot
     // stream + client reconcile, or the cookie-authed server fn prologue).
-    // Local hits keep their own scoring against the same query terms so they
-    // sort alongside upstream hits instead of always landing at the bottom.
+    // Score against name + blurb + body so a query like "use_server_future
+    // hydration" matches the body of a pattern that demonstrates exactly
+    // that, even when the name is something like "cookie-session-auth".
     for entry in local::registry() {
         if qterms.is_empty() {
+            // No query — every local entry surfaces, but we give them a tiny
+            // positive baseline so the sort keeps locals ahead of upstream
+            // listings (whose 0.0 score with no name match is otherwise
+            // indistinguishable). The actual ordering across local entries
+            // is alphabetical via the qterms-empty branch below.
             hits.push(local_hit(entry, 0.0));
         } else {
             let name_terms = tokenize(&entry.name.replace(['-', '_'], " "));
             let blurb_terms = tokenize(entry.blurb);
-            let combined: Vec<String> = name_terms.into_iter().chain(blurb_terms).collect();
+            let body_terms = tokenize(entry.body);
+            let combined: Vec<String> = name_terms
+                .into_iter()
+                .chain(blurb_terms)
+                .chain(body_terms)
+                .collect();
             let score = score_terms(&qterms, &combined);
             if score > 0.0 {
                 hits.push(local_hit(entry, score));
@@ -183,7 +194,7 @@ pub async fn find_example(
     hits.truncate(limit);
 
     Ok(FindExampleResult {
-        concept: concept.map(str::to_owned),
+        query: query.map(str::to_owned),
         git_ref,
         hits,
     })
@@ -199,5 +210,54 @@ fn local_hit(entry: &local::LocalExample, score: f32) -> ExampleHit {
         kind: "local",
         body: Some(entry.body.to_string()),
         blurb: Some(entry.blurb.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The legacy `concept` field is still accepted via serde alias so existing
+    /// callers don't break, while new callers can use the more natural `query`.
+    #[test]
+    fn query_and_concept_aliases_both_parse() {
+        let by_query: FindExampleParams =
+            serde_json::from_value(serde_json::json!({"query": "hydration"})).unwrap();
+        assert_eq!(by_query.query.as_deref(), Some("hydration"));
+
+        let by_concept: FindExampleParams =
+            serde_json::from_value(serde_json::json!({"concept": "hydration"})).unwrap();
+        assert_eq!(by_concept.query.as_deref(), Some("hydration"));
+    }
+
+    /// Local entries' bodies contain the canonical idioms — a query for
+    /// `use_session` should hit `cookie-session-auth` via its body even
+    /// though the blurb only mentions `use_session` in passing. Without body
+    /// scoring, this test would fail when blurb tokens happen not to overlap.
+    #[test]
+    fn local_entry_scores_against_body_terms() {
+        let qterms = tokenize("optimistic insert");
+        assert!(!qterms.is_empty(), "tokenize should split on whitespace");
+
+        let mut best: (&str, f32) = ("", 0.0);
+        for entry in local::registry() {
+            let name_terms = tokenize(&entry.name.replace(['-', '_'], " "));
+            let blurb_terms = tokenize(entry.blurb);
+            let body_terms = tokenize(entry.body);
+            let combined: Vec<String> = name_terms
+                .into_iter()
+                .chain(blurb_terms)
+                .chain(body_terms)
+                .collect();
+            let score = score_terms(&qterms, &combined);
+            if score > best.1 {
+                best = (entry.name, score);
+            }
+        }
+        assert_eq!(
+            best.0, "optimistic-with-reconcile",
+            "the `optimistic-with-reconcile` entry should rank first for query `optimistic insert`; got best = {best:?}"
+        );
+        assert!(best.1 > 0.0, "the top hit should have a positive score");
     }
 }

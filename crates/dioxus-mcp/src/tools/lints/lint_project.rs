@@ -140,7 +140,6 @@ pub async fn lint_project(
             )
             .await?;
             let count = r.issues.len();
-            report.total_issues += count;
             report.lints_run.push("check_rsx".into());
             report.issues_by_lint.push(LintCount {
                 lint: "check_rsx".into(),
@@ -163,7 +162,6 @@ pub async fn lint_project(
         for pe in &r.parse_errors {
             parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
         }
-        report.total_issues += count;
         report.lints_run.push("dead_components".into());
         report.issues_by_lint.push(LintCount {
             lint: "dead_components".into(),
@@ -186,7 +184,6 @@ pub async fn lint_project(
         for pe in &r.parse_errors {
             parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
         }
-        report.total_issues += count;
         report.lints_run.push("prop_drill".into());
         report.issues_by_lint.push(LintCount {
             lint: "prop_drill".into(),
@@ -207,7 +204,6 @@ pub async fn lint_project(
         for pe in &r.parse_errors {
             parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
         }
-        report.total_issues += count;
         report.lints_run.push("signal_lint".into());
         report.issues_by_lint.push(LintCount {
             lint: "signal_lint".into(),
@@ -228,7 +224,6 @@ pub async fn lint_project(
         for pe in &r.parse_errors {
             parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
         }
-        report.total_issues += count;
         report.lints_run.push("props_lint".into());
         report.issues_by_lint.push(LintCount {
             lint: "props_lint".into(),
@@ -249,9 +244,6 @@ pub async fn lint_project(
         for pe in &r.parse_errors {
             parse_errors.push(serde_json::to_value(pe).unwrap_or(Value::Null));
         }
-        // reinvented_widget findings are hints, not errors — keep them out
-        // of `total_issues` so the headline counter still reflects "fix me"
-        // signal only. The per-lint count below still surfaces them.
         report.lints_run.push("reinvented_widget".into());
         report.issues_by_lint.push(LintCount {
             lint: "reinvented_widget".into(),
@@ -260,6 +252,9 @@ pub async fn lint_project(
         report.reinvented_widget = Some(serde_json::to_value(&r).unwrap_or(Value::Null));
     }
 
+    // Sum from `issues_by_lint` instead of accumulating per-lint, so adding a
+    // new lint can't silently drop its count from the headline number.
+    report.total_issues = report.issues_by_lint.iter().map(|c| c.issues).sum();
     report.parse_errors = dedup_parse_errors(parse_errors);
     report.summary = render_summary(&report);
     Ok(report)
@@ -297,4 +292,58 @@ fn render_summary(report: &LintProjectReport) -> String {
         out.push_str(&format!("- `{}`: {} ({})\n", c.lint, c.issues, badge));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches the regression the standup self-evaluation surfaced: a new
+    /// lint added to `ALL_LINTS` but missed by the per-lint `+= count`
+    /// accumulator left `total_issues` off by however many findings that
+    /// lint produced. Computing the total from `issues_by_lint` at the end
+    /// makes it impossible to forget.
+    #[test]
+    fn total_issues_matches_issues_by_lint_sum() {
+        let report = LintProjectReport {
+            lints_run: vec![
+                "check_rsx".into(),
+                "dead_components".into(),
+                "prop_drill".into(),
+                "signal_lint".into(),
+                "props_lint".into(),
+                "reinvented_widget".into(),
+            ],
+            issues_by_lint: vec![
+                LintCount {
+                    lint: "check_rsx".into(),
+                    issues: 0,
+                },
+                LintCount {
+                    lint: "dead_components".into(),
+                    issues: 0,
+                },
+                LintCount {
+                    lint: "prop_drill".into(),
+                    issues: 4,
+                },
+                LintCount {
+                    lint: "signal_lint".into(),
+                    issues: 1,
+                },
+                LintCount {
+                    lint: "props_lint".into(),
+                    issues: 0,
+                },
+                LintCount {
+                    lint: "reinvented_widget".into(),
+                    issues: 1,
+                },
+            ],
+            total_issues: 6,
+            ..Default::default()
+        };
+        let expected: usize = report.issues_by_lint.iter().map(|c| c.issues).sum();
+        assert_eq!(report.total_issues, expected);
+    }
 }

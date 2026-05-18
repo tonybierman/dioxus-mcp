@@ -9,7 +9,11 @@ use crate::state::State;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ProjectTourParams {
-    /// Sections to include. Defaults to all: ["audit", "routes", "index", "assets"].
+    /// Sections to include. Default = the cheap set:
+    /// `["audit", "routes", "index", "assets"]`.
+    /// `"lints"` is an opt-in extra (runs every lint over `src/`) — pass it
+    /// explicitly via `include` to add the one-line lint summary to the
+    /// tour. Keep it off when you just want the quick architecture readout.
     #[serde(default)]
     pub include: Option<Vec<String>>,
     /// Sections to exclude (applied after `include`).
@@ -29,6 +33,11 @@ pub struct ProjectTourReport {
     pub routes: Option<Value>,
     pub index: Option<Value>,
     pub assets: Option<Value>,
+    /// Full `lint_project` report when `"lints"` was opted-in via the
+    /// `include` param. Skipped from the JSON when absent so the default
+    /// tour stays compact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lints: Option<Value>,
     pub truncated: TruncationFlags,
     /// Concrete follow-up actions derived from audit findings — each entry
     /// pairs a short human-readable description with an executable hint
@@ -61,12 +70,17 @@ pub async fn project_tour(
     p: ProjectTourParams,
 ) -> Result<ProjectTourReport, String> {
     let all_sections: Vec<&str> = vec!["audit", "routes", "index", "assets"];
+    let explicit_include = p.include.is_some();
     let included: HashSet<String> = match p.include {
         Some(v) => v.into_iter().collect(),
         None => all_sections.iter().map(|s| s.to_string()).collect(),
     };
     let excluded: HashSet<String> = p.exclude.unwrap_or_default().into_iter().collect();
     let want = |s: &str| included.contains(s) && !excluded.contains(s);
+    // Opt-in only: the default tour skips lints to keep the call cheap.
+    // A caller that explicitly passes `include: ["..."]` and lists "lints"
+    // turns it on; the absence of an `include` param leaves it off.
+    let want_lints = explicit_include && want("lints");
 
     let max = p.max_items_per_section.unwrap_or(50);
 
@@ -138,8 +152,29 @@ pub async fn project_tour(
         }
     };
 
-    let (audit, (mut routes, routes_err), mut index, mut assets) =
-        tokio::join!(audit_fut, routes_fut, index_fut, assets_fut);
+    // Lint run is opt-in (multi-pass static analysis is the most expensive
+    // section). When skipped we don't even resolve the future, so the cost
+    // is zero. `LintProjectParams { include: None, .. }` runs every lint.
+    let lints_fut = async {
+        if want_lints {
+            crate::tools::lints::lint_project::lint_project(
+                state,
+                crate::tools::lints::lint_project::LintProjectParams {
+                    include: None,
+                    exclude: None,
+                    dead_component_roots: None,
+                    project_root: p.project_root.clone(),
+                },
+            )
+            .await
+            .ok()
+        } else {
+            None
+        }
+    };
+
+    let (audit, (mut routes, routes_err), mut index, mut assets, lints) =
+        tokio::join!(audit_fut, routes_fut, index_fut, assets_fut, lints_fut);
 
     let mut trunc = TruncationFlags::default();
     if let Some(rm) = routes.as_mut()
@@ -165,7 +200,7 @@ pub async fn project_tour(
         trunc.unreferenced_assets = true;
     }
 
-    let summary = render_summary(&audit, &routes, &index, &assets, &trunc);
+    let summary = render_summary(&audit, &routes, &index, &assets, &lints, &trunc);
     let next_actions = derive_next_actions(&audit, &routes, routes_err.as_deref(), &index);
 
     Ok(ProjectTourReport {
@@ -174,6 +209,7 @@ pub async fn project_tour(
         routes: routes.map(|r| serde_json::to_value(r).unwrap_or(Value::Null)),
         index: index.map(|i| serde_json::to_value(i).unwrap_or(Value::Null)),
         assets: assets.map(|a| serde_json::to_value(a).unwrap_or(Value::Null)),
+        lints: lints.map(|l| serde_json::to_value(l).unwrap_or(Value::Null)),
         truncated: trunc,
         next_actions,
     })
@@ -271,11 +307,28 @@ fn derive_next_actions(
     out
 }
 
+/// Maps a lint id (`signal_lint`, `prop_drill`, …) to a short, human-friendly
+/// label used in the one-line tour summary. Kept tiny on purpose — when a
+/// caller wants the full count breakdown they read the `lints` field
+/// directly. The label drops the `_lint` suffix for brevity.
+fn short_lint_label(lint: &str) -> &'static str {
+    match lint {
+        "check_rsx" => "rsx",
+        "dead_components" => "dead",
+        "prop_drill" => "prop drill",
+        "signal_lint" => "signal",
+        "props_lint" => "props",
+        "reinvented_widget" => "reinvented",
+        _ => "other",
+    }
+}
+
 fn render_summary(
     audit: &Option<crate::tools::audit::audit_feature_flags::AuditReport>,
     routes: &Option<crate::tools::inspect::route_map::RouteMapReport>,
     index: &Option<crate::tools::inspect::project_index::ProjectIndexReport>,
     assets: &Option<crate::tools::audit::asset_audit::AssetAuditReport>,
+    lints: &Option<crate::tools::lints::lint_project::LintProjectReport>,
     trunc: &TruncationFlags,
 ) -> String {
     let mut out = String::new();
@@ -343,6 +396,25 @@ fn render_summary(
         ));
     }
 
+    if let Some(l) = lints {
+        // Per-lint breakdown of only the lints that found at least one
+        // issue — keeps the summary line short on clean projects ("Lints:
+        // 0 issues") and dense on dirty ones ("Lints: 6 issues (1 signal,
+        // 4 prop drill, 1 reinvented)"). Short labels match the lint name.
+        let parts: Vec<String> = l
+            .issues_by_lint
+            .iter()
+            .filter(|c| c.issues > 0)
+            .map(|c| format!("{} {}", c.issues, short_lint_label(&c.lint)))
+            .collect();
+        let detail = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        };
+        out.push_str(&format!("**Lints**: {} issues{detail}\n", l.total_issues));
+    }
+
     if let Some(i) = index
         && i.components.is_empty()
         && i.server_fns.is_empty()
@@ -367,4 +439,135 @@ fn render_summary(
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::lints::lint_project::{LintCount, LintProjectReport};
+
+    /// Standup's actual lint counts (from the TODO header):
+    /// `check_rsx 0 + dead_components 0 + prop_drill 4 + signal_lint 1 +
+    /// props_lint 0 + reinvented_widget 1` = 6 total. The tour summary
+    /// must surface the breakdown ("4 prop drill, 1 signal, 1 reinvented")
+    /// and keep the headline number consistent with `total_issues`.
+    #[test]
+    fn lint_summary_one_liner_matches_per_lint_breakdown() {
+        let lint_report = LintProjectReport {
+            summary: String::new(),
+            lints_run: vec![
+                "check_rsx".into(),
+                "dead_components".into(),
+                "prop_drill".into(),
+                "signal_lint".into(),
+                "props_lint".into(),
+                "reinvented_widget".into(),
+            ],
+            total_issues: 6,
+            issues_by_lint: vec![
+                LintCount {
+                    lint: "check_rsx".into(),
+                    issues: 0,
+                },
+                LintCount {
+                    lint: "dead_components".into(),
+                    issues: 0,
+                },
+                LintCount {
+                    lint: "prop_drill".into(),
+                    issues: 4,
+                },
+                LintCount {
+                    lint: "signal_lint".into(),
+                    issues: 1,
+                },
+                LintCount {
+                    lint: "props_lint".into(),
+                    issues: 0,
+                },
+                LintCount {
+                    lint: "reinvented_widget".into(),
+                    issues: 1,
+                },
+            ],
+            parse_errors: Vec::new(),
+            check_rsx: None,
+            dead_components: None,
+            prop_drill: None,
+            signal_lint: None,
+            props_lint: None,
+            reinvented_widget: None,
+        };
+        let trunc = TruncationFlags::default();
+        let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc);
+        assert!(
+            summary.contains("**Lints**: 6 issues"),
+            "headline should match total_issues: {summary}"
+        );
+        // Per-lint detail uses the short labels and includes only lints
+        // that found at least one issue.
+        assert!(
+            summary.contains("4 prop drill"),
+            "should include prop drill count: {summary}"
+        );
+        assert!(
+            summary.contains("1 signal"),
+            "should include signal count: {summary}"
+        );
+        assert!(
+            summary.contains("1 reinvented"),
+            "should include reinvented count: {summary}"
+        );
+        // Zero-issue lints stay OUT of the breakdown so the line stays
+        // readable on a clean project.
+        assert!(
+            !summary.contains("0 rsx") && !summary.contains("0 props"),
+            "zero-issue lints must not appear in the breakdown: {summary}"
+        );
+    }
+
+    /// Clean project (no findings) renders a single "0 issues" line with no
+    /// trailing `(…)` — keeps the tour markdown compact when there's
+    /// nothing to call out.
+    #[test]
+    fn lint_summary_clean_project_has_no_trailing_paren() {
+        let lint_report = LintProjectReport {
+            summary: String::new(),
+            lints_run: vec!["signal_lint".into()],
+            total_issues: 0,
+            issues_by_lint: vec![LintCount {
+                lint: "signal_lint".into(),
+                issues: 0,
+            }],
+            parse_errors: Vec::new(),
+            check_rsx: None,
+            dead_components: None,
+            prop_drill: None,
+            signal_lint: None,
+            props_lint: None,
+            reinvented_widget: None,
+        };
+        let trunc = TruncationFlags::default();
+        let summary = render_summary(&None, &None, &None, &None, &Some(lint_report), &trunc);
+        assert!(
+            summary.contains("**Lints**: 0 issues\n"),
+            "clean project line should be bare: {summary}"
+        );
+        assert!(
+            !summary.contains("**Lints**: 0 issues ("),
+            "no trailing breakdown when nothing fired: {summary}"
+        );
+    }
+
+    /// When no lint report is provided (the default tour, with lints
+    /// opt-out), the summary must not emit a `**Lints**:` line at all.
+    #[test]
+    fn lint_summary_omitted_when_lints_not_run() {
+        let trunc = TruncationFlags::default();
+        let summary = render_summary(&None, &None, &None, &None, &None, &trunc);
+        assert!(
+            !summary.contains("**Lints**"),
+            "no lints section when the tour didn't run them: {summary}"
+        );
+    }
 }

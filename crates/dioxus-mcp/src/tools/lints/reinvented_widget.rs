@@ -35,6 +35,13 @@ pub struct ReinventedFinding {
     pub component: String,
     pub file: PathBuf,
     pub line: usize,
+    /// `"high"` for the full ondragstart+ondragover+ondrop triplet on one
+    /// component (clear hand-rolled drag interaction). `"low"` for partial
+    /// shapes — currently the `ondragover`+`ondrop` drop-target half by
+    /// itself, which often pairs with `ondragstart` on a sibling card
+    /// component (kanban boards). Callers can filter low-confidence
+    /// findings out for noisier dashboards.
+    pub confidence: &'static str,
     /// Free-form hint surfaced to the agent. Includes the catalog
     /// limitations note so callers don't blindly install over the top of a
     /// shape the catalog can't model.
@@ -139,11 +146,36 @@ fn scan_file(ast: &syn::File, file: &Path, out: &mut Vec<ReinventedFinding>) {
                 component,
                 file: file.to_path_buf(),
                 line,
+                confidence: "high",
                 hint: "all three of `ondragstart` / `ondragover` / `ondrop` are wired here. \
                        Catalog widget `drag_and_drop_list` covers single-list reordering with \
                        pointer / keyboard / touch out of the box. Caveat: it does NOT support \
                        cross-list drops, so kanban-style boards with multiple drop targets \
                        genuinely need this hand-rolled pattern — verify shape before installing."
+                    .into(),
+            });
+        } else if has_dragover && has_drop {
+            // Drop-target-only shape: classic kanban column that receives
+            // dropped cards but doesn't initiate drags itself (the cards
+            // do, in a sibling component). Standup's `Column` is this
+            // shape — exactly the case the TODO called out. Lower
+            // confidence because a stray `ondrop`+`ondragover` on a
+            // non-drag-target component (e.g., a file-upload drop zone)
+            // would also match and isn't necessarily a catalog candidate.
+            let line = first_line.unwrap_or_else(|| f.sig.ident.span().start().line);
+            out.push(ReinventedFinding {
+                reinvented: "drag_and_drop_list",
+                component,
+                file: file.to_path_buf(),
+                line,
+                confidence: "low",
+                hint: "drop-target half of HTML5 drag-and-drop (`ondragover` + `ondrop`) is \
+                       wired here without `ondragstart`. Common kanban shape: the card \
+                       component (a sibling) starts the drag, this component receives it. \
+                       Catalog `drag_and_drop_list` covers single-list reordering but does \
+                       NOT support cross-list drops, so a multi-column board legitimately \
+                       needs the hand-rolled pattern. Filter `confidence: \"low\"` out if \
+                       you only want the full-triplet hits."
                     .into(),
             });
         }
@@ -255,14 +287,16 @@ fn Board() -> Element {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].reinvented, "drag_and_drop_list");
         assert_eq!(findings[0].component, "Board");
+        assert_eq!(findings[0].confidence, "high");
         assert!(findings[0].hint.contains("cross-list"));
     }
 
     #[test]
-    fn does_not_flag_partial_triplet() {
+    fn does_not_flag_draggable_only_partial() {
         let dir = tempdir().unwrap();
         // Two of three handlers — common shape for a draggable card that
-        // ISN'T also a drop target. Don't flag this.
+        // ISN'T also a drop target (ondragstart + ondragend, no drop).
+        // Don't flag — the drop-target subset is what carries signal.
         write_file(
             &dir.path().join("src/components/card.rs"),
             r#"use dioxus::prelude::*;
@@ -273,6 +307,60 @@ fn Card() -> Element {
             draggable: "true",
             ondragstart: move |_| {},
             ondragend: move |_| {},
+        }
+    }
+}
+"#,
+        );
+        assert!(scan(dir.path()).is_empty());
+    }
+
+    /// Standup `Column` shape: `ondragover` + `ondrop` on a drop-target
+    /// column whose `ondragstart` lives on a sibling card component. The
+    /// TODO called this out as a P3 — should emit a low-confidence finding
+    /// so callers know "this is part of a hand-rolled drag interaction the
+    /// catalog could partially cover."
+    #[test]
+    fn flags_drop_target_only_pair_with_low_confidence() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join("src/components/column.rs"),
+            r#"use dioxus::prelude::*;
+#[component]
+fn Column() -> Element {
+    rsx! {
+        div {
+            ondragover: move |e| { e.prevent_default(); },
+            ondrop: move |_| {},
+        }
+    }
+}
+"#,
+        );
+        let findings = scan(dir.path());
+        assert_eq!(findings.len(), 1, "expected one finding: {findings:?}");
+        assert_eq!(findings[0].confidence, "low");
+        assert!(
+            findings[0].hint.contains("drop-target"),
+            "hint should call out the drop-target shape: {}",
+            findings[0].hint
+        );
+    }
+
+    /// `ondragover` alone (without `ondrop`) is a layout reset / debugging
+    /// pattern, NOT a drag interaction — don't emit even the low-confidence
+    /// finding.
+    #[test]
+    fn does_not_flag_dragover_alone() {
+        let dir = tempdir().unwrap();
+        write_file(
+            &dir.path().join("src/components/zone.rs"),
+            r#"use dioxus::prelude::*;
+#[component]
+fn Zone() -> Element {
+    rsx! {
+        div {
+            ondragover: move |e| { e.prevent_default(); },
         }
     }
 }

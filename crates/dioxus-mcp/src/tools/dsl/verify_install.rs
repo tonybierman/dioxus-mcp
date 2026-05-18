@@ -146,6 +146,13 @@ struct ArchetypeSignals {
     /// `typed-header` feature), this stays `false`.
     uses_bare_headers_crate: bool,
     uses_uuid: bool,
+    /// True when at least one struct/enum field of type `Uuid` (or a generic
+    /// wrapper like `Option<Uuid>`, `Vec<Uuid>`) lives inside a type that
+    /// derives `Serialize` or `Deserialize`. This is what decides whether
+    /// `uuid`'s `serde` feature is *actually* required — a project that only
+    /// uses `Uuid::new_v4().to_string()` and stores ids as `String` doesn't
+    /// need it, even when serde-derived types are present elsewhere.
+    uuid_in_serde_struct: bool,
     uses_assets: bool,
     /// True when the source imports a catalog widget (`use crate::components::<catalog_name>`)
     /// or `src/components/<catalog_name>/` matches a catalog entry. Drives
@@ -198,6 +205,17 @@ impl ArchetypeSignals {
             // be rare (the uuid crate is the only Uuid in common use).
             if text.contains("Uuid") {
                 s.uses_uuid = true;
+                // Parse the file to ask the tighter question: is a Uuid field
+                // reachable from a serde-derived struct/enum? That's what
+                // drives whether uuid's `serde` feature is actually required.
+                // We only parse when we already see `Uuid` in the text — the
+                // parse cost is negligible for project src/ trees.
+                if !s.uuid_in_serde_struct
+                    && let Ok(file) = syn::parse_file(&text)
+                    && file_has_uuid_in_serde_type(&file)
+                {
+                    s.uuid_in_serde_struct = true;
+                }
             }
             if text.contains("asset!(") {
                 s.uses_assets = true;
@@ -481,11 +499,13 @@ fn extend_with_archetype_steps(
         }
     }
 
-    // Uuid in source ⇒ uuid crate with v4 + serde when the project also
-    // serializes models. We only require serde when uuid is used alongside
-    // serde-derived types (the common case in 0.7 fullstack apps).
+    // Uuid in source ⇒ uuid crate with v4 + serde when a Uuid-typed field
+    // actually lives inside a `#[derive(Serialize)] / #[derive(Deserialize)]`
+    // struct or enum. Projects that only use `Uuid::new_v4().to_string()` and
+    // store ids as `String` get just `v4` — the `serde` feature would be dead
+    // weight and was previously a false positive on those codebases.
     if signals.uses_uuid {
-        let needs_serde = signals.has_server || manifest.has("serde") || manifest.has("serde_json");
+        let needs_serde = signals.uuid_in_serde_struct;
         let required: &[&str] = if needs_serde {
             &["v4", "serde"]
         } else {
@@ -710,6 +730,79 @@ fn mentions_bare_headers_path(text: &str) -> bool {
     false
 }
 
+/// Returns `true` when any struct or enum in `file` derives `Serialize` or
+/// `Deserialize` AND has at least one field whose type mentions `Uuid`
+/// (directly, or wrapped in `Option<Uuid>`, `Vec<Uuid>`, `HashMap<_, Uuid>`,
+/// etc.). The walk is shallow — it doesn't chase struct composition — but the
+/// common case (a `pub id: Uuid` field on a `#[derive(Serialize)]` model) is
+/// exactly what triggers the uuid `serde` feature requirement.
+fn file_has_uuid_in_serde_type(file: &syn::File) -> bool {
+    for item in &file.items {
+        match item {
+            syn::Item::Struct(s)
+                if is_serde_derived(&s.attrs) && struct_fields_mention_uuid(&s.fields) =>
+            {
+                return true;
+            }
+            syn::Item::Enum(e) if is_serde_derived(&e.attrs) => {
+                for v in &e.variants {
+                    if struct_fields_mention_uuid(&v.fields) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn is_serde_derived(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        crate::tools::scaffold::discovery::has_derive(a, "Serialize")
+            || crate::tools::scaffold::discovery::has_derive(a, "Deserialize")
+    })
+}
+
+fn struct_fields_mention_uuid(fields: &syn::Fields) -> bool {
+    match fields {
+        syn::Fields::Named(named) => named.named.iter().any(|f| type_mentions_uuid(&f.ty)),
+        syn::Fields::Unnamed(unnamed) => unnamed.unnamed.iter().any(|f| type_mentions_uuid(&f.ty)),
+        syn::Fields::Unit => false,
+    }
+}
+
+/// Recursive `Uuid` check across the type tree — `Uuid` itself matches, as
+/// does any generic argument whose last path segment is `Uuid`. Catches the
+/// `Option<Uuid>` / `Vec<Uuid>` / `HashMap<String, Uuid>` shapes you'd
+/// actually serialize with the uuid `serde` feature.
+fn type_mentions_uuid(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(tp) => {
+            for seg in &tp.path.segments {
+                if seg.ident == "Uuid" {
+                    return true;
+                }
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    for a in &args.args {
+                        if let syn::GenericArgument::Type(inner) = a
+                            && type_mentions_uuid(inner)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        syn::Type::Reference(r) => type_mentions_uuid(&r.elem),
+        syn::Type::Tuple(t) => t.elems.iter().any(type_mentions_uuid),
+        syn::Type::Array(a) => type_mentions_uuid(&a.elem),
+        syn::Type::Slice(s) => type_mentions_uuid(&s.elem),
+        _ => false,
+    }
+}
+
 fn walk_rs_files(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -849,6 +942,86 @@ axum-extra = { version = "0.10", features = ["typed-header"] }
             step.ok,
             "axum-extra w/ typed-header should be enough (the typed-header feature re-exports headers::Cookie); got: {step:?}",
         );
+    }
+
+    #[test]
+    fn uuid_string_id_does_not_require_serde_feature() {
+        // Common dioxus_standup shape: ids are `String` and `Uuid::new_v4()`
+        // is `.to_string()`'d immediately. No serde-derived type has a
+        // `Uuid`-typed field, so the uuid `serde` feature is dead weight.
+        // The previous heuristic (any serde or server presence) false-flagged
+        // this; the tightened check should accept just `v4`.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/model/card.rs"),
+            r#"use serde::{Serialize, Deserialize};
+#[derive(Serialize, Deserialize)]
+pub struct Card { pub id: String, pub title: String }
+"#,
+        );
+        write(
+            &dir.path().join("src/server/create_card.rs"),
+            "pub fn create() -> String { uuid::Uuid::new_v4().to_string() }\n",
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+"#,
+        );
+        let r = run(dir.path());
+        let step = r.steps.iter().find(|s| s.id == "uuid_dep").unwrap();
+        assert!(
+            step.ok,
+            "uuid/v4 alone should satisfy uuid_dep when no serde-derived struct \
+             has a Uuid-typed field; got: {step:?}",
+        );
+    }
+
+    #[test]
+    fn uuid_field_in_serde_struct_requires_serde_feature() {
+        // Counter-test for the refinement above: when a serde-derived struct
+        // *does* carry a `Uuid`-typed field (directly or via `Option<Uuid>` /
+        // `Vec<Uuid>`), the uuid `serde` feature is actually required and the
+        // step should flag a Cargo.toml that only enables `v4`.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("src/model/account.rs"),
+            r#"use serde::{Serialize, Deserialize};
+#[derive(Serialize, Deserialize)]
+pub struct Account { pub id: Uuid, pub linked: Option<Uuid> }
+"#,
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        write(
+            &dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "x"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+"#,
+        );
+        let r = run(dir.path());
+        let step = r.steps.iter().find(|s| s.id == "uuid_dep").unwrap();
+        assert!(
+            !step.ok,
+            "a Uuid field on a serde-derived struct should force the uuid `serde` feature; got: {step:?}",
+        );
+        let fix = step.fix.as_deref().unwrap_or("");
+        assert!(fix.contains("serde"), "fix should mention serde: {fix}");
     }
 
     #[test]

@@ -175,6 +175,48 @@ fn read_crate_metadata(crate_root: &std::path::Path) -> (String, String) {
     (name, version)
 }
 
+/// Peel `Result<T, E>` (or any path ending in `Result`) into its generic args.
+/// Returns `(success_type_str, error_type_str)`. When the return type doesn't
+/// look like a `Result<…>`, returns the input untouched as the success and
+/// `None` for the error — letting callers fall back to the `ServerFnError`
+/// $ref for the 500 schema.
+fn split_server_fn_result(ret: &str) -> (String, Option<String>) {
+    if !ret.contains("Result") || !ret.contains('<') {
+        return (ret.to_string(), None);
+    }
+    let Ok(ty) = syn::parse_str::<syn::Type>(ret.trim()) else {
+        return (ret.to_string(), None);
+    };
+    let syn::Type::Path(tp) = ty else {
+        return (ret.to_string(), None);
+    };
+    let Some(seg) = tp.path.segments.last() else {
+        return (ret.to_string(), None);
+    };
+    if seg.ident != "Result" {
+        return (ret.to_string(), None);
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return (ret.to_string(), None);
+    };
+    let type_args: Vec<&syn::Type> = args
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let Some(ok_ty) = type_args.first() else {
+        return (ret.to_string(), None);
+    };
+    let ok_str = tighten_type(&ok_ty.to_token_stream().to_string());
+    let err_str = type_args
+        .get(1)
+        .map(|t| tighten_type(&t.to_token_stream().to_string()));
+    (ok_str, err_str)
+}
+
 fn server_fn_path(prefix: &str, sf: &ServerFnEntry) -> (String, bool) {
     if let Some(path) = &sf.route_path {
         (path.clone(), false)
@@ -202,7 +244,32 @@ fn server_fn_path_item(sf: &ServerFnEntry, resolver: &mut TypeResolver) -> Value
         request_schema.insert("required".into(), json!(required));
     }
 
-    let (response_schema, _) = resolver.resolve(&sf.return_type);
+    // Server fns commonly return `Result<T, ServerFnError>` (or an alias);
+    // `project_index` already unwraps the `ServerFnResult<T>` alias but a bare
+    // `Result<T, E>` arrives here intact. Peel it: T -> 200 schema, E -> 500
+    // schema. When E is just `ServerFnError`, we keep the canonical $ref
+    // emitted by `ensure_server_fn_error()`; when E names a local serde type
+    // we resolve it normally so the spec reflects the real error shape.
+    let (success_ty, error_ty) = split_server_fn_result(&sf.return_type);
+    // `resolver.resolve` returns `(schema, top_level_optional)`. For
+    // *argument* types the optional flag drives whether the property lands
+    // in `required`; for *return* types the same flag means the value can
+    // be JSON `null`, so we wrap the schema in `nullable(…)` to surface it.
+    // Before this, `who_am_i -> Result<Option<String>, ServerFnError>`
+    // rendered as `{type: "string"}` and lost the null possibility entirely.
+    let (response_schema_raw, response_nullable) = resolver.resolve(&success_ty);
+    let response_schema = if response_nullable {
+        nullable(response_schema_raw)
+    } else {
+        response_schema_raw
+    };
+    let error_schema: Value = match error_ty.as_deref() {
+        Some(e) if e.trim() == "ServerFnError" => {
+            json!({"$ref": "#/components/schemas/ServerFnError"})
+        }
+        Some(e) => resolver.resolve(e).0,
+        None => json!({"$ref": "#/components/schemas/ServerFnError"}),
+    };
 
     let summary = format!(
         "Dioxus server fn `{}` defined at {}:{}",
@@ -244,7 +311,7 @@ fn server_fn_path_item(sf: &ServerFnEntry, resolver: &mut TypeResolver) -> Value
                 "description": "Server function error",
                 "content": {
                     "application/json": {
-                        "schema": {"$ref": "#/components/schemas/ServerFnError"},
+                        "schema": error_schema,
                     }
                 }
             }
@@ -767,4 +834,128 @@ fn resolver_unresolved(spec: &Value) -> Vec<String> {
     }
     walk(spec, &mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Result<T, ServerFnError> -> success T, error "ServerFnError" — the
+    /// canonical shape every dioxus 0.7 fullstack server fn ends up with.
+    #[test]
+    fn split_result_extracts_success_and_error() {
+        let (ok, err) = split_server_fn_result("Result<Board, ServerFnError>");
+        assert_eq!(ok, "Board");
+        assert_eq!(err.as_deref(), Some("ServerFnError"));
+    }
+
+    /// Nested generics on the success side are preserved verbatim — the
+    /// resolver picks them apart further once we hand them back as a string.
+    #[test]
+    fn split_result_preserves_nested_generics() {
+        let (ok, err) = split_server_fn_result("Result<Vec<Card>, ServerFnError>");
+        assert_eq!(ok, "Vec<Card>");
+        assert_eq!(err.as_deref(), Some("ServerFnError"));
+    }
+
+    /// Anything that isn't a `Result<…>` flows through untouched, so plain
+    /// return types (e.g. `String`, when a server fn isn't fallible) keep
+    /// hitting the resolver exactly as they did before.
+    #[test]
+    fn split_result_passes_non_result_types_through() {
+        let (ok, err) = split_server_fn_result("Board");
+        assert_eq!(ok, "Board");
+        assert!(err.is_none());
+    }
+
+    /// A `Result` without explicit type args (shouldn't actually happen on a
+    /// real signature, but we don't want to panic if it does) keeps the
+    /// passthrough behavior so the rest of the spec still emits.
+    #[test]
+    fn split_result_on_unparseable_passes_through() {
+        let (ok, err) = split_server_fn_result("Result");
+        assert_eq!(ok, "Result");
+        assert!(err.is_none());
+    }
+
+    /// Reproduces the standup `who_am_i` case: a server fn whose return
+    /// type is `Result<Option<String>, ServerFnError>`. The TODO called out
+    /// the bug — the resolver dropped the Option entirely and emitted
+    /// `{type: "string"}`. With the `nullable(…)` wrap on top-level
+    /// optional success types, the spec now emits a 3.1-compliant
+    /// `{type: ["string", "null"]}` so consumers can model the absent case.
+    #[test]
+    fn option_return_type_emits_nullable_string() {
+        let sf = ServerFnEntry {
+            file: std::path::PathBuf::from("src/server/auth.rs"),
+            line: 10,
+            name: "who_am_i".into(),
+            method: Some("get".into()),
+            server_name: None,
+            route_path: None,
+            args: Vec::new(),
+            return_type: "Result<Option<String>, ServerFnError>".into(),
+        };
+        let mut resolver = TypeResolver::default();
+        let path_item = server_fn_path_item(&sf, &mut resolver);
+
+        // Drill down into `responses.200.content.application/json.schema`.
+        let schema = path_item
+            .get("get")
+            .and_then(|v| v.get("responses"))
+            .and_then(|v| v.get("200"))
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.get("application/json"))
+            .and_then(|v| v.get("schema"))
+            .expect("200 response schema present");
+
+        // OpenAPI 3.1 nullable shape: `{"type": ["string", "null"]}`.
+        // `nullable(…)` widens `type` to an array — assert on both
+        // members so a regression that loses the `"null"` is caught.
+        let ty = schema.get("type").expect("schema.type present");
+        let ty_arr = ty.as_array().unwrap_or_else(|| {
+            panic!("expected type to widen to an array under Option<T>; got {schema}")
+        });
+        let names: Vec<&str> = ty_arr.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            names.contains(&"string"),
+            "schema should retain the string type; got {ty:?}"
+        );
+        assert!(
+            names.contains(&"null"),
+            "Option<String> in return position must mark the schema nullable; got {ty:?}"
+        );
+    }
+
+    /// Counter-test: a plain `Result<String, ServerFnError>` keeps the
+    /// non-nullable schema. Without this, an over-eager wrap would mark
+    /// every success schema nullable.
+    #[test]
+    fn non_option_return_type_stays_non_nullable() {
+        let sf = ServerFnEntry {
+            file: std::path::PathBuf::from("src/server/echo.rs"),
+            line: 1,
+            name: "echo".into(),
+            method: Some("post".into()),
+            server_name: None,
+            route_path: None,
+            args: Vec::new(),
+            return_type: "Result<String, ServerFnError>".into(),
+        };
+        let mut resolver = TypeResolver::default();
+        let path_item = server_fn_path_item(&sf, &mut resolver);
+        let schema = path_item
+            .get("post")
+            .and_then(|v| v.get("responses"))
+            .and_then(|v| v.get("200"))
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.get("application/json"))
+            .and_then(|v| v.get("schema"))
+            .expect("200 response schema present");
+        assert_eq!(
+            schema.get("type"),
+            Some(&json!("string")),
+            "non-Option return type stays as a plain string schema; got {schema}"
+        );
+    }
 }
