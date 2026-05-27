@@ -947,8 +947,8 @@ mod tests {
     #[test]
     fn theme_stylesheet_emits_root_vars_and_baseline() {
         let reg = crate::registry::builtin();
-        let css = theme_stylesheet(reg.themes.get("dark").unwrap())
-            .expect("dark theme has color tokens");
+        let css =
+            theme_stylesheet(reg.themes.get("dark").unwrap()).expect("dark theme has color tokens");
         assert!(css.contains(":root"));
         assert!(css.contains("--accent: #6aa9ff"), "tokens become CSS vars");
         assert!(

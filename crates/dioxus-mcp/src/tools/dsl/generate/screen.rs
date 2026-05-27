@@ -9,12 +9,14 @@ use minijinja::context;
 use crate::state::State;
 use crate::tools::scaffold::{self, CreateRouteParams, ScaffoldResult};
 
-use super::humanize;
 use super::super::render::*;
 use super::super::templates::*;
 use super::super::types::*;
 use super::super::util::merge;
-use super::screen_templates::{is_builtin_layout_kind, render_screen_template, vanilla_css_starter_for};
+use super::humanize;
+use super::screen_templates::{
+    is_builtin_layout_kind, render_screen_template, vanilla_css_starter_for,
+};
 
 /// Render a screen's source body without writing. Shared between
 /// `generate_screen` (which writes) and `plan_dsl` (which populates dry-run

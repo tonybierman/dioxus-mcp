@@ -451,11 +451,12 @@ fn split_top_level_commas(tokens: &[TokenTree]) -> Vec<Vec<TokenTree>> {
     let mut out = Vec::new();
     let mut cur: Vec<TokenTree> = Vec::new();
     for tt in tokens {
-        if let TokenTree::Punct(p) = tt {
-            if p.as_char() == ',' && p.spacing() == proc_macro2::Spacing::Alone {
-                out.push(std::mem::take(&mut cur));
-                continue;
-            }
+        if let TokenTree::Punct(p) = tt
+            && p.as_char() == ','
+            && p.spacing() == proc_macro2::Spacing::Alone
+        {
+            out.push(std::mem::take(&mut cur));
+            continue;
         }
         cur.push(tt.clone());
     }

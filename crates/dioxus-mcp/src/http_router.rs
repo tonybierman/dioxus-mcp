@@ -32,8 +32,7 @@ type BoxResponse = Response<BoxBody<Bytes, Infallible>>;
 /// warn at startup that the real UI bundle hasn't been built in yet.
 const PLACEHOLDER_MARK: &str = "DIOXUS_MCP_UI_PLACEHOLDER";
 
-static EMBEDDED_UI: include_dir::Dir<'_> =
-    include_dir::include_dir!("$CARGO_MANIFEST_DIR/ui-dist");
+static EMBEDDED_UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/ui-dist");
 
 /// Where UI bytes come from: the compiled-in bundle, or a live directory.
 pub enum UiAssets {
@@ -164,10 +163,10 @@ where
     }
 
     fn call(&mut self, req: Request<B>) -> Self::Future {
-        if req.method() == Method::GET {
-            if let Some(resp) = self.assets.try_serve(req.uri().path()) {
-                return Box::pin(async move { Ok(resp) });
-            }
+        if req.method() == Method::GET
+            && let Some(resp) = self.assets.try_serve(req.uri().path())
+        {
+            return Box::pin(async move { Ok(resp) });
         }
         // Clone-and-swap so the cloned (ready) service is the one called — the
         // standard tower idiom, mirroring http_cors.rs.

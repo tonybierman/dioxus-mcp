@@ -419,10 +419,8 @@ impl<'a> MapUsageVisitor<'a> {
         let name = receiver_root_ident(expr)?;
         if self.targets.contains(&name) {
             Some(name)
-        } else if let Some(target) = self.aliases.get(&name) {
-            Some(target.clone())
         } else {
-            None
+            self.aliases.get(&name).cloned()
         }
     }
 }
@@ -609,10 +607,8 @@ impl<'a> ReadFilterVisitor<'a> {
         let name = receiver_root_ident(expr)?;
         if self.targets.contains(&name) {
             Some(name)
-        } else if let Some(t) = self.aliases.get(&name) {
-            Some(t.clone())
         } else {
-            None
+            self.aliases.get(&name).cloned()
         }
     }
 }

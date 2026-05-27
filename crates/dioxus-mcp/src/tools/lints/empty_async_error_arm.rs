@@ -17,6 +17,7 @@
 //! closure / async-fn body, and within that scope look for:
 //!   * `match <expr> { … Err(<pat>) => { /* empty */ } … }`
 //!   * `if let Err(<pat>) = <expr> { /* empty */ }`
+//!
 //! where the empty body is `{}`, `{ ; }`, or an explicit unit `()`.
 //! The Err pattern's variable binding (`_`, `_e`, `_err`, …) is allowed
 //! — the lint cares about *body* emptiness, not the binding.

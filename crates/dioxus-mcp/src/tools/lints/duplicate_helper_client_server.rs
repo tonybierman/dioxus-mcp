@@ -195,10 +195,10 @@ fn collect_fn_bodies(
 fn param_rename_map(sig: &syn::Signature) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for (idx, arg) in sig.inputs.iter().enumerate() {
-        if let syn::FnArg::Typed(pt) = arg {
-            if let syn::Pat::Ident(pi) = &*pt.pat {
-                map.insert(pi.ident.to_string(), format!("__arg{idx}__"));
-            }
+        if let syn::FnArg::Typed(pt) = arg
+            && let syn::Pat::Ident(pi) = &*pt.pat
+        {
+            map.insert(pi.ident.to_string(), format!("__arg{idx}__"));
         }
     }
     map

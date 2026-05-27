@@ -741,12 +741,12 @@ fn collect_reads_writes(expr: &syn::Expr, known: &[String]) -> (Vec<String>, Vec
             // receiver counts as a write — exactly like `sig = sig + 1` would.
             // Skip the lhs walk (the ident is the write target, not a read) and
             // recurse into the rhs (`sig += other()` still reads `other`).
-            if is_compound_assign(&eb.op) {
-                if let Some(name) = root_ident(&eb.left) {
-                    self.note_write(&name);
-                    self.visit_expr(&eb.right);
-                    return;
-                }
+            if is_compound_assign(&eb.op)
+                && let Some(name) = root_ident(&eb.left)
+            {
+                self.note_write(&name);
+                self.visit_expr(&eb.right);
+                return;
             }
             syn::visit::visit_expr_binary(self, eb);
         }

@@ -101,7 +101,10 @@ fn terminal_payload(id: &str, entry: &ProposalEntry) -> Value {
     }
 }
 
-pub async fn propose_scaffold(state: &Arc<State>, p: ProposeScaffoldParams) -> Result<Value, String> {
+pub async fn propose_scaffold(
+    state: &Arc<State>,
+    p: ProposeScaffoldParams,
+) -> Result<Value, String> {
     state.proposals.gc().await;
 
     // Preview via dry-run. Unparseable YAML errors here — no proposal parked.
@@ -145,10 +148,10 @@ pub async fn propose_scaffold(state: &Arc<State>, p: ProposeScaffoldParams) -> R
         // Register interest, then re-check, to close the lost-wakeup window
         // (Notify::notified registers at creation).
         let notified = state.proposals.notify().notified();
-        if let Some(e) = state.proposals.get(&id).await {
-            if e.is_terminal() {
-                return Ok(terminal_payload(&id, &e));
-            }
+        if let Some(e) = state.proposals.get(&id).await
+            && e.is_terminal()
+        {
+            return Ok(terminal_payload(&id, &e));
         }
         tokio::select! {
             _ = notified => continue,
@@ -170,7 +173,10 @@ pub async fn list_proposals(state: &Arc<State>, p: ListProposalsParams) -> Resul
     Ok(json!({ "proposals": proposals }))
 }
 
-pub async fn resolve_proposal(state: &Arc<State>, p: ResolveProposalParams) -> Result<Value, String> {
+pub async fn resolve_proposal(
+    state: &Arc<State>,
+    p: ResolveProposalParams,
+) -> Result<Value, String> {
     let entry = match state.proposals.get(&p.proposal_id).await {
         Some(e) => e,
         None => return Ok(json!({ "ok": false, "error": "unknown proposal_id" })),
@@ -251,7 +257,9 @@ pub async fn check_proposal(state: &Arc<State>, p: CheckProposalParams) -> Resul
             "note": "No such proposal (it may have been garbage-collected after resolution).",
         })),
         Some(e) if e.is_terminal() => Ok(terminal_payload(&p.proposal_id, &e)),
-        Some(e) => Ok(json!({ "status": "pending", "proposal_id": p.proposal_id, "preview": e.preview })),
+        Some(e) => {
+            Ok(json!({ "status": "pending", "proposal_id": p.proposal_id, "preview": e.preview }))
+        }
     }
 }
 

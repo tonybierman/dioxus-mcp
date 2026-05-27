@@ -132,7 +132,11 @@ impl Proposals {
 
     /// Monotonic, human-readable id (no uuid dependency).
     pub fn mint_id(&self) -> String {
-        format!("p-{}-{}", now_secs(), self.seq.fetch_add(1, Ordering::Relaxed))
+        format!(
+            "p-{}-{}",
+            now_secs(),
+            self.seq.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     /// The shared notifier — awaiters call `.notified()` on it.

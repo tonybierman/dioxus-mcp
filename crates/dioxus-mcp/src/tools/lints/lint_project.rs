@@ -643,6 +643,7 @@ pub async fn lint_project(
 ///   3. `parents[].passthroughs[]` (only `prop_drill`). We group by
 ///      `kind` (state_passthrough vs callback_passthrough) and respect
 ///      the per-passthrough `severity` field.
+///
 /// Anything else (`dead_components.dead[]`) lands as a single
 /// `severity: "warning"` bucket using the lint name as code.
 fn build_headline(report: &LintProjectReport) -> Vec<HeadlineEntry> {

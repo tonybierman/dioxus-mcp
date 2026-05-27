@@ -111,7 +111,8 @@ pub(super) fn build_render_models(
                         class: Some("preview-hint".into()),
                         attrs: Default::default(),
                         children: vec![RenderNode::Text {
-                            text: "freeform screen — see the generated source / Compiled tab".into(),
+                            text: "freeform screen — see the generated source / Compiled tab"
+                                .into(),
                         }],
                     },
                 ],
@@ -123,23 +124,23 @@ pub(super) fn build_render_models(
 
         // Runtime layout: a registered, non-built-in kind with a preview. The
         // generic node-walker on the client renders the instantiated skeleton.
-        if !is_builtin_layout_kind(&template.kind) {
-            if let Some(layout) = layouts.get(&template.kind) {
-                let fields = form_fields(template);
-                models.push(RenderModel {
-                    screen: screen.name.clone(),
-                    kind: template.kind.clone(),
-                    layout: template.kind.clone(),
-                    route: screen.route.clone(),
-                    item_type: template.item_type.clone().unwrap_or_default(),
-                    root_class: Some(root_class),
-                    theme: doc.theme.clone(),
-                    fields: fields.clone(),
-                    nodes: instantiate(&layout.preview, &fields),
-                    behavior: layout.preview.behavior.clone(),
-                    ..Default::default()
-                });
-            }
+        if !is_builtin_layout_kind(&template.kind)
+            && let Some(layout) = layouts.get(&template.kind)
+        {
+            let fields = form_fields(template);
+            models.push(RenderModel {
+                screen: screen.name.clone(),
+                kind: template.kind.clone(),
+                layout: template.kind.clone(),
+                route: screen.route.clone(),
+                item_type: template.item_type.clone().unwrap_or_default(),
+                root_class: Some(root_class),
+                theme: doc.theme.clone(),
+                fields: fields.clone(),
+                nodes: instantiate(&layout.preview, &fields),
+                behavior: layout.preview.behavior.clone(),
+                ..Default::default()
+            });
         }
     }
 
@@ -164,7 +165,11 @@ fn form_fields(template: &DslScreenTemplate) -> Vec<RenderField> {
 /// screen's resolved fields; `CrudList` is left in place for the client's
 /// behavior to render live. Static element/text nodes pass through.
 fn instantiate(skeleton: &PreviewSkeleton, fields: &[RenderField]) -> Vec<RenderNode> {
-    skeleton.nodes.iter().flat_map(|n| expand(n, fields)).collect()
+    skeleton
+        .nodes
+        .iter()
+        .flat_map(|n| expand(n, fields))
+        .collect()
 }
 
 fn expand(node: &RenderNode, fields: &[RenderField]) -> Vec<RenderNode> {
@@ -290,7 +295,10 @@ resources:
         assert!(list.new_route.is_some(), "new route set");
         // root_class mirrors the generated screen's own `screen {snake}` class.
         let root = list.root_class.as_deref().unwrap();
-        assert!(root.starts_with("screen product"), "root_class was {root:?}");
+        assert!(
+            root.starts_with("screen product"),
+            "root_class was {root:?}"
+        );
 
         // The form screen carries input fields, with the id field dropped.
         let form = models
@@ -368,7 +376,9 @@ screens:
                         tag: "form".into(),
                         class: Some("callout".into()),
                         attrs: Default::default(),
-                        children: vec![RenderNode::Slot { slot: Slot::FormFields }],
+                        children: vec![RenderNode::Slot {
+                            slot: Slot::FormFields,
+                        }],
                     }],
                     behavior: Some(Behavior::Static),
                 },

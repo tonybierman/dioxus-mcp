@@ -522,7 +522,12 @@ mod tests {
         }
     }
 
-    fn render_freeform(pascal: &str, snake: &str, wrap: Option<&str>, t: &DslScreenTemplate) -> String {
+    fn render_freeform(
+        pascal: &str,
+        snake: &str,
+        wrap: Option<&str>,
+        t: &DslScreenTemplate,
+    ) -> String {
         render_screen_template(std::env::temp_dir().as_path(), pascal, snake, wrap, &[], t).unwrap()
     }
 
@@ -535,7 +540,10 @@ mod tests {
             &freeform_tpl(None, None),
         );
         assert!(out.contains("#[component]"), "got:\n{out}");
-        assert!(out.contains("pub fn MarkdownEditor() -> Element"), "got:\n{out}");
+        assert!(
+            out.contains("pub fn MarkdownEditor() -> Element"),
+            "got:\n{out}"
+        );
         assert!(
             out.contains("div { class: \"screen markdown_editor\","),
             "expected default shell class, got:\n{out}"
@@ -579,8 +587,14 @@ mod tests {
             out.contains("use crate::components::Dashboard;"),
             "expected wrap import, got:\n{out}"
         );
-        assert!(out.contains("Dashboard {"), "expected wrap element, got:\n{out}");
-        assert!(out.contains("class: \"page-md\""), "expected class override, got:\n{out}");
+        assert!(
+            out.contains("Dashboard {"),
+            "expected wrap element, got:\n{out}"
+        );
+        assert!(
+            out.contains("class: \"page-md\""),
+            "expected class override, got:\n{out}"
+        );
         assert!(
             !out.contains("class: \"screen "),
             "class override should replace the default, got:\n{out}"

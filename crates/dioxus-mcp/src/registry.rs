@@ -260,7 +260,10 @@ mod tests {
         overlay_dir(&mut reg, dir.path());
 
         assert!(reg.layouts.contains_key("kanban"), "new layout added");
-        assert_eq!(reg.layouts["empty"].label, "Blank", "existing layout overridden");
+        assert_eq!(
+            reg.layouts["empty"].label, "Blank",
+            "existing layout overridden"
+        );
         assert_eq!(reg.layouts.len(), 6);
     }
 
@@ -273,16 +276,30 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let layouts = root.path().join(".dioxus-mcp/registry/layouts");
         std::fs::create_dir_all(&layouts).unwrap();
-        std::fs::write(layouts.join("a.toml"), "id = \"hot_alpha\"\ncomplex = false\n").unwrap();
+        std::fs::write(
+            layouts.join("a.toml"),
+            "id = \"hot_alpha\"\ncomplex = false\n",
+        )
+        .unwrap();
 
         let first = load(root.path());
-        assert!(first.layouts.contains_key("hot_alpha"), "project dir is .dioxus-mcp/registry");
+        assert!(
+            first.layouts.contains_key("hot_alpha"),
+            "project dir is .dioxus-mcp/registry"
+        );
         assert!(!first.layouts.contains_key("hot_beta"));
 
-        std::fs::write(layouts.join("b.toml"), "id = \"hot_beta\"\ncomplex = false\n").unwrap();
+        std::fs::write(
+            layouts.join("b.toml"),
+            "id = \"hot_beta\"\ncomplex = false\n",
+        )
+        .unwrap();
         let second = load(root.path());
         assert!(second.layouts.contains_key("hot_alpha"));
-        assert!(second.layouts.contains_key("hot_beta"), "reload picks up the new file");
+        assert!(
+            second.layouts.contains_key("hot_beta"),
+            "reload picks up the new file"
+        );
     }
 
     #[test]
@@ -291,7 +308,11 @@ mod tests {
         let themes = dir.path().join("themes");
         std::fs::create_dir_all(&themes).unwrap();
         std::fs::write(themes.join("bad.toml"), "= = = not valid = = =").unwrap();
-        std::fs::write(themes.join("ok.toml"), "id = \"solarized\"\nlabel = \"Solarized\"\n").unwrap();
+        std::fs::write(
+            themes.join("ok.toml"),
+            "id = \"solarized\"\nlabel = \"Solarized\"\n",
+        )
+        .unwrap();
 
         let got = read_descriptors::<ThemeDescriptor>(&themes);
         assert_eq!(got.len(), 1);

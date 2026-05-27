@@ -425,10 +425,8 @@ fn collect_write_sources(block: &syn::Block) -> Vec<WriteSource<'_>> {
                     out.push(WriteSource { body: &init.expr });
                 }
             }
-            syn::Stmt::Expr(expr, semi) if semi.is_some() => {
-                if is_named_hook_init(expr) {
-                    out.push(WriteSource { body: expr });
-                }
+            syn::Stmt::Expr(expr, semi) if semi.is_some() && is_named_hook_init(expr) => {
+                out.push(WriteSource { body: expr });
             }
             _ => {}
         }

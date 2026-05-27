@@ -282,12 +282,11 @@ fn collect_literal_alternation(p: &syn::Pat) -> BTreeSet<String> {
                     walk(case, out, all_lits);
                 }
             }
-            syn::Pat::Lit(syn::PatLit { lit, .. }) => {
-                if let syn::Lit::Str(s) = lit {
-                    out.insert(s.value());
-                } else {
-                    *all_lits = false;
-                }
+            syn::Pat::Lit(syn::PatLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) => {
+                out.insert(s.value());
             }
             _ => {
                 *all_lits = false;
