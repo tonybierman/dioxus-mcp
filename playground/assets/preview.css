@@ -4,8 +4,8 @@
  * (`screen`, `add`, `{snake}-items`, `delete`). */
 
 .preview-root {
-    background: #ffffff;
-    color: #1a1d24;
+    background: var(--p-bg, #ffffff);
+    color: var(--p-text, #1a1d24);
     border-radius: 8px;
     padding: 20px;
     min-height: 200px;
@@ -31,7 +31,7 @@
 .preview-root form.add input {
     flex: 1;
     padding: 8px 10px;
-    border: 1px solid #c7ccd6;
+    border: 1px solid var(--p-border, #c7ccd6);
     border-radius: 6px;
     font-size: 14px;
 }
@@ -40,8 +40,8 @@
     padding: 8px 14px;
     border: none;
     border-radius: 6px;
-    background: #3b82f6;
-    color: #fff;
+    background: var(--p-accent, #3b82f6);
+    color: var(--p-accent-text, #fff);
     font-size: 14px;
     cursor: pointer;
 }
@@ -64,8 +64,8 @@
     align-items: center;
     gap: 10px;
     padding: 8px 10px;
-    background: #f4f6fa;
-    border: 1px solid #e2e6ee;
+    background: var(--p-surface, #f4f6fa);
+    border: 1px solid var(--p-border, #e2e6ee);
     border-radius: 6px;
 }
 
@@ -75,7 +75,7 @@
 
 .preview-root li span.done {
     text-decoration: line-through;
-    color: #8a92a3;
+    color: var(--p-muted, #8a92a3);
 }
 
 .preview-root button.delete {
@@ -106,7 +106,7 @@
 .preview-root form.resource-form input,
 .preview-root form.resource-form textarea {
     padding: 8px 10px;
-    border: 1px solid #c7ccd6;
+    border: 1px solid var(--p-border, #c7ccd6);
     border-radius: 6px;
     font-size: 14px;
     font-family: inherit;
@@ -124,7 +124,7 @@
 
 /* hints / banners */
 .preview-root .preview-hint {
-    color: #8a92a3;
+    color: var(--p-muted, #8a92a3);
     font-size: 12.5px;
     margin-top: 12px;
 }
@@ -144,7 +144,7 @@
 }
 
 .preview-unknown {
-    color: #8a92a3;
+    color: var(--p-muted, #8a92a3);
     font-style: italic;
 }
 
@@ -172,7 +172,7 @@
 .preview-root .preview-table td {
     text-align: left;
     padding: 8px 10px;
-    border-bottom: 1px solid #e2e6ee;
+    border-bottom: 1px solid var(--p-border, #e2e6ee);
 }
 
 .preview-root .preview-table th {
@@ -182,7 +182,7 @@
 }
 
 .preview-root .preview-table tbody tr:hover {
-    background: #f4f6fa;
+    background: var(--p-surface, #f4f6fa);
 }
 
 /* clickable rows/items wired to the fake router */

@@ -13,6 +13,10 @@ use serde::Deserialize;
 pub struct Doc {
     #[serde(default)]
     pub version: Option<String>,
+    /// Optional theme id (a registry `ThemeDescriptor`). Drives the preview's
+    /// styling; absent = the default unstyled card.
+    #[serde(default)]
+    pub theme: Option<String>,
     #[serde(default)]
     pub screens: Vec<Screen>,
 }

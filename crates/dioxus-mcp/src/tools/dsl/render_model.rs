@@ -42,6 +42,7 @@ pub(super) fn build_render_models(
                 route: screen.route.clone(),
                 item_type: template.item_type.clone().unwrap_or_default(),
                 root_class: Some(root_class),
+                theme: doc.theme.clone(),
                 ..Default::default()
             };
             match template.kind.as_str() {
@@ -92,6 +93,7 @@ pub(super) fn build_render_models(
                     route: screen.route.clone(),
                     item_type: template.item_type.clone().unwrap_or_default(),
                     root_class: Some(root_class),
+                    theme: doc.theme.clone(),
                     fields: fields.clone(),
                     nodes: instantiate(&layout.preview, &fields),
                     behavior: layout.preview.behavior.clone(),

@@ -336,6 +336,25 @@ body {
     font-size: 12px;
 }
 
+/* per-preview "preview theme" override (Author + Inbox panes) */
+.preview-theme-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.preview-theme-bar select {
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-size: 12px;
+}
+
 /* proposals inbox */
 .inbox-item {
     display: block;

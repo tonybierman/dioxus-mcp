@@ -6,6 +6,11 @@ use serde::Deserialize;
 pub struct DslDoc {
     /// Spec version. Must equal "1".
     pub version: String,
+    /// Optional theme id naming a registry `ThemeDescriptor` (e.g. `solarized`).
+    /// Drives the previewed and generated app's styling. The cockpit can
+    /// override it per-review; absent = the default unstyled look.
+    #[serde(default)]
+    pub theme: Option<String>,
     #[serde(default)]
     pub models: Vec<DslModel>,
     #[serde(default)]

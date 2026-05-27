@@ -91,6 +91,14 @@ pub fn Playground() -> Element {
         build_groups(&screens, &models)
     });
 
+    // Preview theming: the doc's `theme:` colors the preview (`--p-*` vars on
+    // `.preview-root`), overridable via the picker. Falls back to the unstyled
+    // card when absent.
+    let reg_ctx = use_context::<Memo<Option<dioxus_mcp_registry::Registry>>>();
+    let preview_theme = use_signal(|| None::<String>);
+    let active_theme = use_memo(move || preview_theme().or_else(|| last_good().theme.clone()));
+    let preview_decls = use_memo(move || preview_theme_decls(&reg_ctx(), &active_theme()));
+
     // Compiled-tab state: Apply writes into the scratch crate; the iframe shows
     // its `dx serve`. `iframe_nonce` busts the iframe cache after an Apply.
     let mut tab = use_signal(|| Tab::Approximate);
@@ -138,6 +146,10 @@ pub fn Playground() -> Element {
                         if let Err(e) = &*parsed.read() {
                             div { class: "pg-parse-banner", "YAML: {e}" }
                         }
+                        if !preview_decls().is_empty() {
+                            document::Style { ".preview-root {{ {preview_decls} }}" }
+                        }
+                        PreviewThemePicker { reg: reg_ctx, selected: preview_theme, doc_theme: last_good().theme }
                         ScreenNavigator { groups }
                     },
                     Tab::Compiled => rsx! {
@@ -262,6 +274,10 @@ pub fn Cockpit() -> Element {
         let _ = reg_tick();
         mcp_client::get_registry().await.ok()
     });
+    // Share the loaded registry with the preview panes so they can resolve a
+    // doc's `theme:` to tokens. (Dedupes via Registry: PartialEq.)
+    let reg_ctx = use_memo(move || registry.read().clone().flatten());
+    use_context_provider(|| reg_ctx);
     let mut theme_id = use_signal(|| "dark".to_string());
 
     // Palette themes (those carrying color tokens) offered in the selector;
@@ -312,6 +328,79 @@ pub fn Cockpit() -> Element {
         match mode() {
             Mode::Author => rsx! { Playground {} },
             Mode::Inbox => rsx! { ProposalsInbox {} },
+        }
+    }
+}
+
+/// Build `--p-*` custom-property declarations for the *preview* from a theme's
+/// color tokens (scoped to `.preview-root`, distinct from the cockpit chrome's
+/// `--*` vars). Empty when the theme id is absent/unknown, so the preview keeps
+/// its default light card via the CSS fallbacks.
+fn preview_theme_decls(
+    reg: &Option<dioxus_mcp_registry::Registry>,
+    theme_id: &Option<String>,
+) -> String {
+    let Some(reg) = reg else {
+        return String::new();
+    };
+    let Some(id) = theme_id else {
+        return String::new();
+    };
+    let Some(theme) = reg.themes.get(id) else {
+        return String::new();
+    };
+    let c = &theme.tokens.color;
+    let mut s = String::new();
+    for (var, key) in [
+        ("--p-bg", "bg"),
+        ("--p-text", "text"),
+        ("--p-border", "border"),
+        ("--p-accent", "accent"),
+        ("--p-surface", "panel"),
+        ("--p-muted", "muted"),
+    ] {
+        if let Some(v) = c.get(key) {
+            s.push_str(&format!("{var}: {v}; "));
+        }
+    }
+    s
+}
+
+/// A "preview theme" selector: overrides the theme used to render the preview,
+/// defaulting to the doc's own `theme:`. Shared by the Author and Inbox panes.
+#[component]
+fn PreviewThemePicker(
+    reg: Memo<Option<dioxus_mcp_registry::Registry>>,
+    selected: Signal<Option<String>>,
+    doc_theme: Option<String>,
+) -> Element {
+    let palettes = use_memo(move || match &*reg.read() {
+        Some(r) => r
+            .themes
+            .values()
+            .filter(|t| !t.tokens.color.is_empty())
+            .map(|t| (t.id.clone(), t.label.clone()))
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    });
+    if palettes().is_empty() {
+        return rsx! {};
+    }
+    let doc_label = doc_theme.clone().unwrap_or_else(|| "unstyled".into());
+    rsx! {
+        div { class: "preview-theme-bar",
+            span { "preview theme:" }
+            select {
+                value: selected().unwrap_or_default(),
+                onchange: move |e| {
+                    let v = e.value();
+                    selected.set(if v.is_empty() { None } else { Some(v) });
+                },
+                option { value: "", "from doc ({doc_label})" }
+                for (id , label) in palettes() {
+                    option { value: "{id}", "{label}" }
+                }
+            }
         }
     }
 }
@@ -367,6 +456,14 @@ fn ProposalsInbox() -> Element {
             .unwrap_or_default();
         build_groups(&screens, &sel_models())
     });
+
+    // Preview theming for the proposal under review: the edited doc's `theme:`,
+    // overridable via the picker.
+    let reg_ctx = use_context::<Memo<Option<dioxus_mcp_registry::Registry>>>();
+    let preview_theme = use_signal(|| None::<String>);
+    let doc_theme = use_memo(move || model::parse_doc(&edit_text()).ok().and_then(|d| d.theme));
+    let active_theme = use_memo(move || preview_theme().or_else(|| doc_theme()));
+    let preview_decls = use_memo(move || preview_theme_decls(&reg_ctx(), &active_theme()));
 
     rsx! {
         header { class: "pg-header",
@@ -450,6 +547,10 @@ fn ProposalsInbox() -> Element {
                         }
                     }
                     h3 { class: "pg-subhead", "Preview of your edited DSL" }
+                    if !preview_decls().is_empty() {
+                        document::Style { ".preview-root {{ {preview_decls} }}" }
+                    }
+                    PreviewThemePicker { reg: reg_ctx, selected: preview_theme, doc_theme: doc_theme() }
                     ScreenNavigator { groups: inbox_groups }
                     h3 { class: "pg-subhead", "DSL" }
                     if let Err(e) = model::parse_doc(&edit_text()) {
