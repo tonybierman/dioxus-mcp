@@ -47,6 +47,34 @@ body {
     height: calc(100vh - 64px);
 }
 
+/* The Proposals inbox has only two panes (list + review), so it uses a single
+ * full-height row instead of the Author tab's 2×2 — otherwise the bottom row
+ * is dead space. */
+.pg-grid-inbox {
+    grid-template-rows: 1fr;
+    /* Narrow the inbox list to a quarter (half its prior 1fr/1fr width) and
+     * give the rest to the review pane. */
+    grid-template-columns: 1fr 3fr;
+}
+
+/* Stack the review pane so the navigator fills the remaining height rather
+ * than shrink-wrapping to its content. */
+.inbox-review {
+    display: flex;
+    flex-direction: column;
+}
+
+.inbox-review .preview-with-nav {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* DSL editor pinned at the bottom keeps its fixed height; the navigator above
+ * absorbs the slack instead of the textarea collapsing. */
+.inbox-review .pg-editor-short {
+    flex: none;
+}
+
 .pg-editor {
     width: 100%;
     height: calc(100% - 28px);

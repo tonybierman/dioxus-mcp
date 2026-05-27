@@ -262,4 +262,9 @@
 
 .preview-with-nav .preview-stage .preview-root {
     border-radius: 0 8px 8px 0;
+    /* fill the stage vertically so the white box doesn't shrink-wrap a short
+     * screen (e.g. an empty Dashboard) and leave the pane half-empty */
+    height: 100%;
+    box-sizing: border-box;
+    overflow-y: auto;
 }

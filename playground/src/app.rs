@@ -297,7 +297,7 @@ fn ProposalsInbox() -> Element {
             h1 { "Proposals" }
             p { "Scaffold proposals awaiting your approval. Edit the DSL before approving to round-trip your changes back to the agent." }
         }
-        div { class: "pg-grid",
+        div { class: "pg-grid pg-grid-inbox",
             section { class: "pg-pane",
                 h2 { "Inbox" }
                 match &*proposals.read() {
@@ -332,15 +332,9 @@ fn ProposalsInbox() -> Element {
                 }
             }
 
-            section { class: "pg-pane",
+            section { class: "pg-pane inbox-review",
                 if let Some(pid) = selected() {
                     h2 { "Review" }
-                    textarea {
-                        class: "pg-editor pg-editor-short",
-                        spellcheck: false,
-                        value: "{edit_text}",
-                        oninput: move |e| edit_text.set(e.value()),
-                    }
                     div { class: "compiled-controls",
                         button {
                             class: "apply-btn",
@@ -380,10 +374,17 @@ fn ProposalsInbox() -> Element {
                         }
                     }
                     h3 { class: "pg-subhead", "Preview of your edited DSL" }
+                    ScreenNavigator { groups: inbox_groups }
+                    h3 { class: "pg-subhead", "DSL" }
                     if let Err(e) = model::parse_doc(&edit_text()) {
                         div { class: "pg-parse-banner", "YAML: {e}" }
                     }
-                    ScreenNavigator { groups: inbox_groups }
+                    textarea {
+                        class: "pg-editor pg-editor-short",
+                        spellcheck: false,
+                        value: "{edit_text}",
+                        oninput: move |e| edit_text.set(e.value()),
+                    }
                 } else {
                     p { class: "pg-status", "Select a proposal on the left to review it." }
                 }
