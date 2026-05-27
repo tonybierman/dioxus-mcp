@@ -375,6 +375,12 @@ pub struct DslScreenTemplate {
     ///     route variant, component file + mod.rs entry, and App wiring are
     ///     still generated — you just supply the markup. With an explicit body
     ///     you own the `rsx!`, so `wrap_with`/`class` apply only to the shell.
+    ///     SCOPE: only `use dioxus::prelude::*;` is in scope — no external
+    ///     crates and no extra `use` lines. For browser capabilities (saving /
+    ///     opening a file, clipboard, downloads) call `document::eval` with a
+    ///     small JS snippet rather than reaching for a native crate like `rfd`
+    ///     (which doesn't exist on a web target anyway). Need a crate? Scaffold
+    ///     the shell here, then add the dep + import in a follow-up edit.
     #[serde(default)]
     pub body: Option<String>,
     /// Optional design-system preset that overrides the default unstyled
