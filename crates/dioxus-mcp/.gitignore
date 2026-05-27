@@ -1,0 +1,5 @@
+# The built UI bundle is a release artifact embedded via include_dir!, not
+# committed (hashed wasm would bloat the repo). A placeholder ui-dist/index.html
+# is committed so the crate always compiles on a fresh clone; scripts/build-ui.sh
+# fills these in for a real build.
+/ui-dist/assets/

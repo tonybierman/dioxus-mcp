@@ -43,6 +43,58 @@ pub struct ScaffoldResult {
     /// predict the output); other primitives stay path-only.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub previews: std::collections::BTreeMap<PathBuf, String>,
+    /// Structured, already-resolved render models for screens a client can't
+    /// reconstruct on its own — specifically the server-synthesized resource
+    /// screens (a `resources:` block expands into list/new/edit screens that
+    /// never appear in the user's `screens:`). Populated by `execute_code` in
+    /// `dry_run: true` mode alongside `previews`. Additive: empty for docs
+    /// without resource slices, so existing clients are unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render_models: Vec<RenderModel>,
+}
+
+/// A resolved, renderable description of one screen. Unlike `previews` (raw RSX
+/// text), this is structured data a browser client can tree-walk directly.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct RenderModel {
+    /// PascalCase screen name.
+    pub screen: String,
+    /// Resolved template kind: `resource_list` | `resource_form` |
+    /// `resource_edit_form`.
+    pub kind: String,
+    /// The screen's route.
+    pub route: String,
+    /// PascalCase model/item type the screen is built around.
+    pub item_type: String,
+    /// Root `div` class the generated screen uses (e.g. `screen product_list`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_class: Option<String>,
+    /// Table columns for `resource_list` (from the model's fields). `ty` is the
+    /// Rust type, so the client can synthesize type-appropriate mock cells.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<RenderField>,
+    /// Form inputs for `resource_form` / `resource_edit_form`. `ty` is the
+    /// input kind (text/email/number/checkbox/textarea/…).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<RenderField>,
+    /// `resource_list`: server fn that returns the rows (shown in the
+    /// "mock data" note).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_endpoint: Option<String>,
+    /// `resource_list`: route to the "new" screen, for the toolbar link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_route: Option<String>,
+}
+
+/// A column or input field within a [`RenderModel`].
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct RenderField {
+    /// snake_case field name.
+    pub name: String,
+    /// Human-readable label (Title Case).
+    pub label: String,
+    /// Rust type (columns) or HTML input kind (fields).
+    pub ty: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

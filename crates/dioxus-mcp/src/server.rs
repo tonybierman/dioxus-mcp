@@ -499,6 +499,58 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
     }
 
     #[tool(
+        description = "Human-in-the-loop alternative to execute_code: submit a DSL doc as a PROPOSAL instead of writing files. It's previewed in the dx-playground cockpit where a human can preview, EDIT the DSL, and Approve or Reject. Blocks up to `wait_secs` (default 300, max 540) for the decision; on timeout returns `{status:\"pending\", proposal_id}` to poll with check_proposal. On approval returns the REAL ScaffoldResult plus `executed_code` — the DSL that ACTUALLY ran, which may differ from yours if the human edited it; treat `executed_code` as ground truth, not your original proposal. Use this when the user asks you to propose changes for their approval / review before writing."
+    )]
+    async fn propose_scaffold(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ProposeScaffoldParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::propose_scaffold(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "List scaffold proposals awaiting a human decision (the cockpit inbox). Returns each proposal's id, created_at, original DSL `code`, and dry-run `preview`. Pass `include_resolved: true` to also see resolved ones. Primarily called by the dx-playground UI."
+    )]
+    async fn list_proposals(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ListProposalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::list_proposals(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Resolve a scaffold proposal (called by the human via the cockpit). action=\"approve\" runs execute_code(dry_run:false) on `edited_code` if given (the round-trip edit) else the original; action=\"reject\" discards it. Wakes any blocked propose_scaffold call with the outcome."
+    )]
+    async fn resolve_proposal(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ResolveProposalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::resolve_proposal(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Poll a scaffold proposal's status/result by id — the non-blocking counterpart to propose_scaffold when it returns `pending`. Returns the same applied/rejected/failed/pending shapes (incl. `executed_code` on success)."
+    )]
+    async fn check_proposal(
+        &self,
+        Parameters(p): Parameters<tools::dsl::CheckProposalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::check_proposal(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
         description = "Live-search dioxuslabs.com docs (scoped to the project's Dioxus version) and return ranked snippets. 15-min cache."
     )]
     async fn search_docs(

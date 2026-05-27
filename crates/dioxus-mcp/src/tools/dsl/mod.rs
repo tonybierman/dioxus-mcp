@@ -27,8 +27,10 @@ mod list_components;
 mod modify;
 mod plan;
 mod preflight;
+mod propose;
 mod remove;
 mod render;
+mod render_model;
 mod resources;
 mod text_edit;
 mod util;
@@ -39,6 +41,7 @@ pub use describe_component::*;
 pub use dx_components::*;
 pub use execute::*;
 pub use list_components::*;
+pub use propose::*;
 pub use verify_install::*;
 
 // Convenience flat re-exports for the test module — tests.rs uses `super::*`

@@ -19,7 +19,10 @@ use rmcp::transport::streamable_http_server::{
 };
 use tracing_subscriber::EnvFilter;
 
+pub(crate) mod http_cors;
+pub(crate) mod http_router;
 pub(crate) mod project;
+pub(crate) mod proposal;
 pub(crate) mod server;
 pub(crate) mod state;
 pub(crate) mod tools;
@@ -44,6 +47,11 @@ pub struct Cli {
 
     #[arg(long)]
     pub project_root: Option<PathBuf>,
+
+    /// In stdio mode, don't also start the embedded cockpit (UI + HTTP) at
+    /// `--bind`. No effect in `--transport http` mode.
+    #[arg(long)]
+    pub no_cockpit: bool,
 
     #[arg(long, default_value = "info")]
     pub log: String,
@@ -70,37 +78,79 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     match cli.transport {
         Transport::Stdio => {
+            // Embed the cockpit (UI + HTTP MCP) alongside stdio unless opted out.
+            // It shares this process's `Arc<State>`, so the agent's stdio
+            // `propose_scaffold` and a browser's HTTP `resolve_proposal` hit one
+            // proposal store. `graceful` so a busy port (another session owns it)
+            // is a warning, not a crash. The task dies with the process when the
+            // stdio session ends.
+            if !cli.no_cockpit {
+                let state = state.clone();
+                let bind = cli.bind.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_http(state, bind, true).await {
+                        tracing::warn!(error = %e, "embedded cockpit exited");
+                    }
+                });
+            }
             let handler = DioxusMcp::new(state);
             let service = handler.serve(stdio()).await?;
             service.waiting().await?;
         }
-        Transport::Http => {
-            let bind = cli.bind.clone();
-            let svc = TowerToHyperService::new(StreamableHttpService::new(
-                {
-                    let state = state.clone();
-                    move || Ok(DioxusMcp::new(state.clone()))
-                },
-                LocalSessionManager::default().into(),
-                Default::default(),
-            ));
-            let listener = tokio::net::TcpListener::bind(&bind).await?;
-            tracing::info!(%bind, "streamable HTTP listening");
-            loop {
-                let io = tokio::select! {
-                    _ = tokio::signal::ctrl_c() => break,
-                    accept = listener.accept() => TokioIo::new(accept?.0),
-                };
-                let svc = svc.clone();
-                tokio::spawn(async move {
-                    let _ = Builder::new(TokioExecutor::default())
-                        .serve_connection(io, svc)
-                        .await;
-                });
-            }
-        }
+        // Standalone/durable: hard-fail on a taken port (this IS the server).
+        Transport::Http => serve_http(state, cli.bind.clone(), false).await?,
     }
 
+    Ok(())
+}
+
+/// Serve the cockpit — the playground UI plus the MCP protocol — over HTTP at
+/// `bind`. Used both as the standalone `--transport http` server and as the
+/// embedded cockpit spawned alongside stdio. When `graceful`, a bind failure
+/// (port already owned by another session's cockpit) logs a warning and returns
+/// `Ok(())` instead of erroring.
+async fn serve_http(state: Arc<State>, bind: String, graceful: bool) -> Result<()> {
+    let ui = crate::http_router::UiAssets::from_env();
+    // UiRouter (static UI) outermost → Cors → MCP. Static GETs never pay
+    // CORS/MCP cost; CORS still wraps MCP for the cross-origin case.
+    let mcp = crate::http_cors::Cors::new(StreamableHttpService::new(
+        {
+            let state = state.clone();
+            move || Ok(DioxusMcp::new(state.clone()))
+        },
+        LocalSessionManager::default().into(),
+        Default::default(),
+    ));
+    let svc = TowerToHyperService::new(crate::http_router::UiRouter::new(mcp, ui.clone()));
+
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(l) => l,
+        Err(e) if graceful => {
+            tracing::warn!(%bind, error = %e, "cockpit port busy — another session likely owns it; running without an embedded cockpit");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    tracing::info!(%bind, "cockpit: UI + MCP at http://{bind}/");
+    if !ui.ui_built() {
+        tracing::warn!(
+            "UI bundle not built in — GET / serves a placeholder. \
+             Run crates/dioxus-mcp/scripts/build-ui.sh and rebuild, \
+             or set DIOXUS_MCP_UI_DIR."
+        );
+    }
+    loop {
+        let io = tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            accept = listener.accept() => TokioIo::new(accept?.0),
+        };
+        let svc = svc.clone();
+        tokio::spawn(async move {
+            let _ = Builder::new(TokioExecutor::default())
+                .serve_connection(io, svc)
+                .await;
+        });
+    }
     Ok(())
 }
 

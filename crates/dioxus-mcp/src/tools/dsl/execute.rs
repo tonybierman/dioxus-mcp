@@ -153,6 +153,10 @@ pub async fn execute_code(
         // `dx_components:` install hints are surfaced in dry-run too so
         // callers can preview the install plan before committing.
         surface_dx_components_hints(&doc, &crate_root, &mut plan);
+        // Structured render models for the server-synthesized resource screens
+        // (list/new/edit) so a browser client can preview a `resources:` slice
+        // it can't reconstruct from the raw doc.
+        plan.render_models = super::render_model::build_render_models(&doc);
         return Ok(plan);
     }
 

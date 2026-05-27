@@ -28,6 +28,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 tower = "0.5"
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+include_dir = "0.7"
 heck = "0.5"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 serde_yml = "0.0.12"
