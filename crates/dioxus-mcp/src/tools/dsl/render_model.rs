@@ -14,9 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use dioxus_mcp_registry::{
-    Behavior, LayoutDescriptor, PreviewSkeleton, RenderNode, Slot,
-};
+use dioxus_mcp_registry::{LayoutDescriptor, PreviewSkeleton, RenderNode, Slot};
 use heck::{ToSnakeCase, ToTitleCase};
 
 use super::generate::is_builtin_layout_kind;
