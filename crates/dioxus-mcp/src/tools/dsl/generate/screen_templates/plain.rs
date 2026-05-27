@@ -160,10 +160,57 @@ pub(crate) fn render_screen_template(
             )
         }
         "client_crud" => render_client_crud_screen(pascal, snake, wrap_pascal, client_stores, t),
+        "freeform" => render_freeform_screen(pascal, snake, wrap_pascal, t),
         other => Err(format!(
-            "unknown screen template kind {other:?} (expected: empty, resource_list, resource_form, client_crud)"
+            "unknown screen template kind {other:?} (expected: empty, resource_list, resource_form, resource_edit_form, client_crud, freeform)"
         )),
     }
+}
+
+/// `kind: freeform` — the escape hatch for non-CRUD screens the closed template
+/// set can't express. Splices the caller-supplied `body` (a full component
+/// body: any setup statements followed by a trailing `rsx! { … }`, with
+/// `use dioxus::prelude::*;` in scope) into a `#[component]`. With no `body` it
+/// falls back to a titled placeholder shell (honoring `wrap_with` / `class`),
+/// so the route variant + component file + mod.rs + App wiring still land and
+/// the screen shows up in the preview navigator.
+fn render_freeform_screen(
+    pascal: &str,
+    snake: &str,
+    wrap_pascal: Option<&str>,
+    t: &DslScreenTemplate,
+) -> Result<String, String> {
+    let root_class = t
+        .class
+        .clone()
+        .unwrap_or_else(|| default_screen_class(snake));
+    render(
+        "freeform_screen",
+        FREEFORM_SCREEN_TPL,
+        context! {
+            pascal => pascal,
+            wrap_pascal => wrap_pascal,
+            root_class => root_class,
+            body => t.body.clone(),
+        },
+    )
+}
+
+/// The screen kinds whose codegen lives in Rust here (`render_screen_template`).
+/// Anything else is a runtime-added layout, rendered from its registry
+/// descriptor's minijinja template by `build_screen_body`.
+pub(crate) const BUILTIN_LAYOUT_KINDS: &[&str] = &[
+    "empty",
+    "resource_list",
+    "resource_form",
+    "resource_edit_form",
+    "client_crud",
+    "freeform",
+];
+
+/// Is `kind` one of the built-in layouts handled by `render_screen_template`?
+pub(crate) fn is_builtin_layout_kind(kind: &str) -> bool {
+    BUILTIN_LAYOUT_KINDS.contains(&kind)
 }
 
 #[cfg(test)]
@@ -454,5 +501,103 @@ mod tests {
             "expected no wrapper, got:\n{out}"
         );
         assert!(!out.contains("use crate::components::"));
+    }
+
+    fn freeform_tpl(body: Option<&str>, class: Option<&str>) -> DslScreenTemplate {
+        DslScreenTemplate {
+            kind: "freeform".into(),
+            endpoint: None,
+            item_type: None,
+            on_submit: None,
+            redirect_to: None,
+            fields: vec![],
+            store: None,
+            label_field: None,
+            checkbox_field: None,
+            class: class.map(Into::into),
+            body: body.map(Into::into),
+            styled: None,
+            compose_style: None,
+            crud: None,
+        }
+    }
+
+    fn render_freeform(
+        pascal: &str,
+        snake: &str,
+        wrap: Option<&str>,
+        t: &DslScreenTemplate,
+    ) -> String {
+        render_screen_template(std::env::temp_dir().as_path(), pascal, snake, wrap, &[], t).unwrap()
+    }
+
+    #[test]
+    fn freeform_without_body_emits_titled_shell() {
+        let out = render_freeform(
+            "MarkdownEditor",
+            "markdown_editor",
+            None,
+            &freeform_tpl(None, None),
+        );
+        assert!(out.contains("#[component]"), "got:\n{out}");
+        assert!(
+            out.contains("pub fn MarkdownEditor() -> Element"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("div { class: \"screen markdown_editor\","),
+            "expected default shell class, got:\n{out}"
+        );
+        assert!(out.contains("h1 { \"MarkdownEditor\" }"), "got:\n{out}");
+    }
+
+    #[test]
+    fn freeform_with_body_splices_it_verbatim() {
+        let body = "let mut src = use_signal(String::new);\n    rsx! {\n        div { class: \"editor\", \"{src}\" }\n    }";
+        let out = render_freeform(
+            "MarkdownEditor",
+            "markdown_editor",
+            None,
+            &freeform_tpl(Some(body), None),
+        );
+        assert!(out.contains("#[component]"), "got:\n{out}");
+        assert!(
+            out.contains("let mut src = use_signal(String::new);"),
+            "expected the body spliced verbatim, got:\n{out}"
+        );
+        assert!(
+            out.contains("div { class: \"editor\", \"{src}\" }"),
+            "expected body rsx spliced, got:\n{out}"
+        );
+        assert!(
+            !out.contains("h1 { \"MarkdownEditor\" }"),
+            "an explicit body should replace the shell, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn freeform_shell_honors_wrap_with_and_class() {
+        let out = render_freeform(
+            "MarkdownEditor",
+            "markdown_editor",
+            Some("Dashboard"),
+            &freeform_tpl(None, Some("page-md")),
+        );
+        assert!(
+            out.contains("use crate::components::Dashboard;"),
+            "expected wrap import, got:\n{out}"
+        );
+        assert!(
+            out.contains("Dashboard {"),
+            "expected wrap element, got:\n{out}"
+        );
+        assert!(
+            out.contains("class: \"page-md\""),
+            "expected class override, got:\n{out}"
+        );
+        assert!(
+            !out.contains("class: \"screen "),
+            "class override should replace the default, got:\n{out}"
+        );
     }
 }

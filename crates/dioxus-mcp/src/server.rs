@@ -419,7 +419,7 @@ impl DioxusMcp {
     // by `execute_code` internally to materialize each DSL primitive.
 
     #[tool(
-        description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, ClientStore, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for server-backed features. ClientStore + Screen `kind: client_crud` covers client-only in-memory state with no server fn round-trip."
+        description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, ClientStore, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for server-backed features. ClientStore + Screen `kind: client_crud` covers client-only in-memory state with no server fn round-trip. For a non-CRUD screen the templates don't cover (markdown editor, dashboard, custom canvas), use Screen `kind: freeform` and write the rsx body in `template.body` — don't shoehorn it into `client_crud` (that yields a todo-shaped app)."
     )]
     async fn get_dsl_spec(
         &self,
@@ -438,7 +438,21 @@ impl DioxusMcp {
         &self,
         Parameters(p): Parameters<tools::dsl::ListComponentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::dsl::list_components(p).await {
+        let reg = self.state.registry();
+        match tools::dsl::list_components(&reg.components, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Return the merged theme/component/layout registry (built-in defaults overlaid by runtime descriptors) as JSON. Primarily for the embedded cockpit: drives the theme selector, the navigator's per-layout labels/ranks, and the generic screen preview. Loaded fresh from disk on every call, so descriptors hot-reload (no server restart). Add `*.toml` descriptors under `~/.config/dioxus-mcp/registry/{themes,components,layouts}/` (canonical — applies to every project regardless of cwd) or `<project_root>/.dioxus-mcp/registry/...` (project-specific, highest precedence; or set `DIOXUS_MCP_REGISTRY_DIR`)."
+    )]
+    async fn get_registry(
+        &self,
+        Parameters(p): Parameters<tools::dsl::GetRegistryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::get_registry(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -451,7 +465,8 @@ impl DioxusMcp {
         &self,
         Parameters(p): Parameters<tools::dsl::SuggestComponentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::dsl::suggest_components(p).await {
+        let reg = self.state.registry();
+        match tools::dsl::suggest_components(&reg.components, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -484,7 +499,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Use this whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Materializes a file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, next_steps, and (when applicable) collisions. \
+        description = "Use this whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Materializes a file set from a single YAML DSL doc (see `get_dsl_spec`). For a non-CRUD UI the templates don't cover, use a Screen with `kind: freeform` and write the body in `template.body`. Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, next_steps, and (when applicable) collisions. \
 \
 Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) without writing anything. Pass `if_missing: true` to skip primitives whose target leaf file already exists (reported in `collisions`) instead of erroring — makes re-runs during iteration safe."
     )]
@@ -493,6 +508,58 @@ Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) 
         Parameters(p): Parameters<tools::dsl::ExecuteCodeParams>,
     ) -> Result<CallToolResult, McpError> {
         match tools::dsl::execute_code(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Human-in-the-loop alternative to execute_code: submit a DSL doc as a PROPOSAL instead of writing files. It's previewed in the dx-playground cockpit where a human can preview, EDIT the DSL, and Approve or Reject. Blocks up to `wait_secs` (default 300, max 540) for the decision; on timeout returns `{status:\"pending\", proposal_id}` to poll with check_proposal. On approval returns the REAL ScaffoldResult plus `executed_code` — the DSL that ACTUALLY ran, which may differ from yours if the human edited it; treat `executed_code` as ground truth, not your original proposal. Use this when the user asks you to propose changes for their approval / review before writing."
+    )]
+    async fn propose_scaffold(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ProposeScaffoldParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::propose_scaffold(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "List scaffold proposals awaiting a human decision (the cockpit inbox). Returns each proposal's id, created_at, original DSL `code`, and dry-run `preview`. Pass `include_resolved: true` to also see resolved ones. Primarily called by the dx-playground UI."
+    )]
+    async fn list_proposals(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ListProposalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::list_proposals(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Resolve a scaffold proposal (called by the human via the cockpit). action=\"approve\" runs execute_code(dry_run:false) on `edited_code` if given (the round-trip edit) else the original; action=\"reject\" discards it. Wakes any blocked propose_scaffold call with the outcome."
+    )]
+    async fn resolve_proposal(
+        &self,
+        Parameters(p): Parameters<tools::dsl::ResolveProposalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::resolve_proposal(&self.state, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Poll a scaffold proposal's status/result by id — the non-blocking counterpart to propose_scaffold when it returns `pending`. Returns the same applied/rejected/failed/pending shapes (incl. `executed_code` on success)."
+    )]
+    async fn check_proposal(
+        &self,
+        Parameters(p): Parameters<tools::dsl::CheckProposalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::check_proposal(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -608,9 +675,12 @@ impl ServerHandler for DioxusMcp {
                  - Scaffold STRUCTURED slices (model / store / server-fn-backed Resource / \
                    client_crud / whole-app skeleton): `get_dsl_spec` then `execute_code`. \
                    Use `Resource` for a full server-backed slice; `ClientStore` + \
-                   `kind: client_crud` for in-memory state. For one-off handwritten screens \
-                   or single-component edits, skip the DSL and write the file directly — \
-                   `execute_code` is for multi-file, cross-wired primitives, not ad-hoc UI.\n\
+                   `kind: client_crud` for in-memory state. For a non-CRUD screen the \
+                   templates don't cover (markdown editor, dashboard, canvas), use Screen \
+                   `kind: freeform` and author the body in `template.body` — you still get \
+                   the route / module / App wiring. For a single-component edit, skip the \
+                   DSL and write the file directly; `execute_code` is for multi-file, \
+                   cross-wired primitives.\n\
                  - UI primitive widgets (button / dialog / date-picker / drag-to-reorder / \
                    combobox / toast / etc.): BEFORE writing any handler code, \
                    `list_components` (or `suggest_components { prompt: \"...\" }` with the \

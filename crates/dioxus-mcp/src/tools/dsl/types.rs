@@ -6,6 +6,11 @@ use serde::Deserialize;
 pub struct DslDoc {
     /// Spec version. Must equal "1".
     pub version: String,
+    /// Optional theme id naming a registry `ThemeDescriptor` (e.g. `solarized`).
+    /// Drives the previewed and generated app's styling. The cockpit can
+    /// override it per-review; absent = the default unstyled look.
+    #[serde(default)]
+    pub theme: Option<String>,
     #[serde(default)]
     pub models: Vec<DslModel>,
     #[serde(default)]
@@ -313,7 +318,9 @@ pub struct DslResource {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DslScreenTemplate {
-    /// One of: empty (default), resource_list, resource_form.
+    /// One of: empty (default), resource_list, resource_form,
+    /// resource_edit_form, client_crud, freeform. `freeform` is the escape
+    /// hatch for non-CRUD UIs the other kinds can't express — see `body`.
     pub kind: String,
     /// Server-fn name (snake_case) the screen calls. Required for resource_list
     /// and resource_form.
@@ -354,13 +361,26 @@ pub struct DslScreenTemplate {
     /// every screen template kind.
     #[serde(default)]
     pub class: Option<String>,
-    /// Body shape switch. Currently only `kind: empty` honors this:
-    ///   - unset (default): emits the historical placeholder `div { h1 { ... } }`
-    ///   - `"empty"` / `"stub"`: emits a bare `rsx! {}` with the imports and
-    ///     `use_<store>()` wiring intact, dropping the throwaway demo markup
-    ///
-    /// Use when you're about to rewrite the screen body anyway and don't want
-    /// the placeholder to flash before your edit lands.
+    /// Screen body source. Its meaning depends on `kind`:
+    ///   - `kind: empty` — a *shape switch*: unset (default) emits the
+    ///     historical placeholder `div { h1 { ... } }`; `"empty"` / `"stub"`
+    ///     emits a bare `rsx! {}` with the imports and `use_<store>()` wiring
+    ///     intact (use when you're about to rewrite the body anyway and don't
+    ///     want the placeholder to flash before your edit lands).
+    ///   - `kind: freeform` — the *full component body*: any setup statements
+    ///     (e.g. `let mut text = use_signal(String::new);`) followed by a
+    ///     trailing `rsx! { ... }`. Omit it to get a titled placeholder shell.
+    ///     This is how you scaffold a non-CRUD UI (a markdown editor, a
+    ///     dashboard, a custom form) the closed template set can't express: the
+    ///     route variant, component file + mod.rs entry, and App wiring are
+    ///     still generated — you just supply the markup. With an explicit body
+    ///     you own the `rsx!`, so `wrap_with`/`class` apply only to the shell.
+    ///     SCOPE: only `use dioxus::prelude::*;` is in scope — no external
+    ///     crates and no extra `use` lines. For browser capabilities (saving /
+    ///     opening a file, clipboard, downloads) call `document::eval` with a
+    ///     small JS snippet rather than reaching for a native crate like `rfd`
+    ///     (which doesn't exist on a web target anyway). Need a crate? Scaffold
+    ///     the shell here, then add the dep + import in a follow-up edit.
     #[serde(default)]
     pub body: Option<String>,
     /// Optional design-system preset that overrides the default unstyled
@@ -505,8 +525,9 @@ pub struct DslScreen {
     /// Optional component name (e.g. a ProtectedRoute guard) that wraps the
     /// screen body. Imported from `src/components` AND rendered as the outer
     /// element of the screen's rsx body — every template kind (empty,
-    /// resource_list, resource_form, client_crud, resource_edit_form, and the
-    /// no-template stub) honors it. When you hand-edit the body afterwards,
+    /// resource_list, resource_form, client_crud, resource_edit_form, freeform's
+    /// shell default, and the no-template stub) honors it. When you hand-edit
+    /// the body afterwards,
     /// keep `{wrap_with} { ... }` as the outermost rsx element or move the
     /// guard to `#[layout(...)]` in the Routable enum and drop this field.
     #[serde(default)]

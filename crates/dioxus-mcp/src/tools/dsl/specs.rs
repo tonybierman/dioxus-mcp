@@ -80,6 +80,11 @@ pub(super) const CORE_PREAMBLE: &str = r#"# Dioxus-MCP DSL spec
 #     `resource_form`. The `crud` extension exposes Form/List/Table component
 #     templates that pair with those server fns; do NOT load the `crud`
 #     extension for a client-only app — `client_crud` already covers it.
+#   - Non-CRUD / custom UIs (a markdown editor, a dashboard, a canvas, a
+#     wizard — anything that isn't a list/form over a data type): use a
+#     `screens:` entry with `template.kind: freeform` and write the component
+#     body yourself in `template.body` (setup statements + a trailing `rsx!`).
+#     Do NOT force these into `client_crud` — that yields a todo-shaped app.
 #
 # Official component catalog (READ BEFORE scaffolding any UI widget):
 #   45 production-ready Dioxus 0.7 components ship via `dx components add
@@ -197,14 +202,14 @@ pub(super) const CORE_COMPONENT: &str = r#"  Component:
 "#;
 
 pub(super) const CORE_SCREEN: &str = r#"  Screen:
-    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=empty with `store:` set wires `use_<store>()` so you get the context plumbing without committing to the stock UI; kind=resource_list / kind=resource_form bind to server fns (use these for backend-backed CRUD); kind=client_crud binds to a `client_stores:` entry and emits add/toggle/delete handlers entirely client-side (no server fn needed — ideal for in-memory apps like todo lists). All template kinds accept `class:` to override the root `div`'s class string when the host project uses a design system (e.g. Tailwind) that conflicts with the default `\"screen {name}\"` pair. WORKFLOW: scaffolding the Screen is still net-positive even when you plan to redesign the rsx! body — the route variant insert, the component file + mod.rs entry, the App-body provide_*/Router wiring, and (for resource templates) the server-fn binding are the bulk of the work. After running execute_code, open the file (next_steps gives `src/components/{snake}.rs:LINE` for the rsx! block) and rewrite the markup in place; the wiring stays correct. Use dry_run: true to preview the body via `previews:` before deciding."
+    description: "A top-level routed view. Generates a component file and inserts a route variant in src/router.rs. The `wrap_with` field lets a guard like ProtectedRoute sit at the route layer. The `template` field selects the emitted body — omit it for an empty placeholder; kind=empty with `store:` set wires `use_<store>()` so you get the context plumbing without committing to the stock UI; kind=resource_list / kind=resource_form bind to server fns (use these for backend-backed CRUD); kind=client_crud binds to a `client_stores:` entry and emits add/toggle/delete handlers entirely client-side (no server fn needed — ideal for in-memory apps like todo lists); kind=freeform is the escape hatch for non-CRUD UIs the other kinds can't express — set `body:` to the full component body (setup statements + a trailing `rsx! {...}`) to scaffold a markdown editor, dashboard, or custom canvas (or omit `body:` for a titled shell you flesh out later). The freeform body is prelude-only — only `use dioxus::prelude::*;` is in scope, no external crates — so for browser capabilities (file save/open, clipboard, downloads) use `document::eval` with a JS snippet, NOT a native crate like rfd (which doesn't exist on a web target). All template kinds accept `class:` to override the root `div`'s class string when the host project uses a design system (e.g. Tailwind) that conflicts with the default `\"screen {name}\"` pair. WORKFLOW: scaffolding the Screen is still net-positive even when you plan to redesign the rsx! body — the route variant insert, the component file + mod.rs entry, the App-body provide_*/Router wiring, and (for resource templates) the server-fn binding are the bulk of the work. After running execute_code, open the file (next_steps gives `src/components/{snake}.rs:LINE` for the rsx! block) and rewrite the markup in place; the wiring stays correct. Use dry_run: true to preview the body via `previews:` before deciding."
     fields:
       - {name: name, type: string, required: true}
       - {name: route, type: string, required: true}
       - {name: wrap_with, type: "ComponentName (e.g. a ProtectedRoute guard)", required: false}
-      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?, class?, body?, styled?}. `body: empty` (alias `body: stub`) on kind=empty drops the placeholder div+h1, emitting a bare `rsx! {}` so you can immediately rewrite the body without churn — imports and `use_<store>()` wiring stay intact. `styled: tailwind` on kind=client_crud emits Tailwind utility-classed defaults instead of the bare class names — pick this in projects where Tailwind is already wired up.", required: false}
+      - {name: template, type: "ScreenTemplate {kind, endpoint?, item_type?, on_submit?, redirect_to?, fields?, store?, label_field?, checkbox_field?, class?, body?, styled?}. `body: empty` (alias `body: stub`) on kind=empty drops the placeholder div+h1, emitting a bare `rsx! {}` so you can immediately rewrite the body without churn — imports and `use_<store>()` wiring stay intact. On kind=freeform, `body` is the FULL component body (setup statements then a trailing `rsx! {...}`, with ONLY `use dioxus::prelude::*;` in scope — no external crates) spliced into the generated `#[component]` — this is how you build a non-CRUD screen. For browser file save/open/clipboard, call `document::eval` with a JS snippet (rfd and other native crates don't work on a web target). `styled: tailwind` on kind=client_crud emits Tailwind utility-classed defaults instead of the bare class names — pick this in projects where Tailwind is already wired up.", required: false}
       - {name: replace_route, type: "bool — when true, if `route:` is already mapped by a different variant in the on-disk Routable enum, that variant is removed first (as if you had added a matching `remove: [{kind: remove_route, ...}]` entry). Lets a fresh Screen take over a route from a `dx new` demo without a two-step edit.", required: false}
-    template_kinds: [empty, resource_list, resource_form, client_crud]
+    template_kinds: [empty, resource_list, resource_form, resource_edit_form, client_crud, freeform]
     client_crud_fields:
       - {name: store, type: "ClientStore name in this doc", required: true}
       - {name: item_type, type: "Rust item type (Model in this doc or a built-in like String)", required: true}
@@ -232,6 +237,20 @@ pub(super) const CORE_SCREEN: &str = r#"  Screen:
             item_type: Todo
             label_field: title
             checkbox_field: done
+        - name: MarkdownEditor
+          route: /editor
+          template:
+            kind: freeform
+            body: |
+              let mut src = use_signal(String::new);
+              rsx! {
+                  div { class: "editor",
+                      textarea {
+                          value: "{src}",
+                          oninput: move |e| src.set(e.value())
+                      }
+                  }
+              }
 "#;
 
 pub(super) const CORE_SERVER_FN: &str = r#"  ServerFn:

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<!-- DIOXUS_MCP_UI_PLACEHOLDER: committed stand-in so the crate compiles on a
+     fresh clone (include_dir! needs ui-dist/index.html to exist). The real
+     hashed bundle lives in the gitignored ui-dist/assets/ and is built in by
+     scripts/build-ui.sh. ui_built() keys off this marker to warn at startup. -->
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>dx-playground</title>
+    </head>
+    <body>
+        <main style="font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5;">
+            <h1>dx-playground cockpit</h1>
+            <p>The UI bundle hasn't been built into this server — this is the committed placeholder.</p>
+            <p>To build and embed the real cockpit UI, then rebuild the server:</p>
+            <pre>crates/dioxus-mcp/scripts/build-ui.sh
+cargo build -p dioxus-mcp</pre>
+            <p>For UI iteration without rebuilding the server, run the playground with
+               <code>dx serve</code> and point the server at its output via the
+               <code>DIOXUS_MCP_UI_DIR</code> environment variable.</p>
+        </main>
+    </body>
+</html>

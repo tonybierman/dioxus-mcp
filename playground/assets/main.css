@@ -1,0 +1,405 @@
+:root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #d8dee9;
+    --muted: #8a92a3;
+    --accent: #6aa9ff;
+    --error: #ff6b6b;
+    --code: #11141a;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.pg-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.pg-header h1 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.pg-header p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.pg-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    height: calc(100vh - 64px);
+}
+
+/* The Proposals inbox has only two panes (list + review), so it uses a single
+ * full-height row instead of the Author tab's 2×2 — otherwise the bottom row
+ * is dead space. */
+.pg-grid-inbox {
+    grid-template-rows: 1fr;
+    /* Narrow the inbox list to a quarter (half its prior 1fr/1fr width) and
+     * give the rest to the review pane. */
+    grid-template-columns: 1fr 3fr;
+}
+
+/* Stack the review pane so the navigator fills the remaining height rather
+ * than shrink-wrapping to its content. */
+.inbox-review {
+    display: flex;
+    flex-direction: column;
+}
+
+.inbox-review .preview-with-nav {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* DSL editor pinned at the bottom keeps its fixed height; the navigator above
+ * absorbs the slack instead of the textarea collapsing. */
+.inbox-review .pg-editor-short {
+    flex: none;
+}
+
+.pg-editor {
+    width: 100%;
+    height: calc(100% - 28px);
+    resize: none;
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    tab-size: 2;
+    outline: none;
+}
+
+.pg-editor:focus {
+    border-color: var(--accent);
+}
+
+.pg-parse-banner {
+    background: rgba(255, 107, 107, 0.08);
+    border: 1px solid var(--error);
+    color: var(--error);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+}
+
+.pg-ok {
+    color: #7ee787;
+    font-family: ui-monospace, monospace;
+    font-size: 12.5px;
+}
+
+.pg-warn {
+    color: #ffd479;
+    font-size: 12.5px;
+}
+
+.pg-tree {
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.pg-pane {
+    background: var(--panel);
+    padding: 16px;
+    overflow: auto;
+}
+
+.pg-pane h2 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.pg-code {
+    background: var(--code);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre;
+    overflow-x: auto;
+}
+
+.pg-status {
+    color: var(--muted);
+}
+
+.pg-error {
+    background: rgba(255, 107, 107, 0.08);
+    border: 1px solid var(--error);
+    color: var(--error);
+    border-radius: 6px;
+    padding: 12px;
+    white-space: pre-wrap;
+}
+
+.pg-result h3 {
+    font-size: 13px;
+    margin: 18px 0 8px;
+    color: var(--accent);
+}
+
+.pg-result ul {
+    margin: 0;
+    padding-left: 18px;
+    font-family: ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--text);
+}
+
+.pg-meta {
+    color: var(--muted);
+    font-size: 12.5px;
+    font-family: ui-monospace, monospace;
+}
+
+.pg-result details {
+    margin-bottom: 10px;
+}
+
+.pg-result summary {
+    cursor: pointer;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+}
+
+/* presets in the header */
+.pg-presets {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.pg-presets button {
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.pg-presets button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* preview tabs */
+.pg-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 12px;
+}
+
+.pg-tabs .tab {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 4px 10px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+}
+
+.pg-tabs .tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+}
+
+/* compiled tab: apply controls + iframe */
+.compiled-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.apply-btn {
+    background: var(--accent);
+    color: #07101f;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.apply-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.url-input {
+    flex: 1;
+    min-width: 180px;
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+}
+
+.apply-ok {
+    color: #7ee787;
+    font-size: 12.5px;
+}
+
+.apply-err {
+    color: var(--error);
+    font-size: 12.5px;
+}
+
+.compiled-frame {
+    width: 100%;
+    height: calc(100% - 80px);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+}
+
+/* mode bar (Author | Proposals) */
+.pg-modebar {
+    display: flex;
+    gap: 4px;
+    padding: 6px 20px;
+    background: #0b0d11;
+    border-bottom: 1px solid var(--border);
+}
+
+.modetab {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 4px 12px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+}
+
+.modetab.active {
+    color: var(--text);
+    border-color: var(--accent);
+}
+
+/* registry-driven theme selector, pushed to the right of the mode bar */
+.theme-select {
+    margin-left: auto;
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 12px;
+}
+
+/* per-preview "preview theme" override (Author + Inbox panes) */
+.preview-theme-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.preview-theme-bar select {
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-size: 12px;
+}
+
+/* proposals inbox */
+.inbox-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+
+.inbox-item.active {
+    border-color: var(--accent);
+}
+
+.inbox-id {
+    font-family: ui-monospace, monospace;
+    font-size: 12.5px;
+}
+
+.inbox-files {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 3px;
+}
+
+.pg-editor-short {
+    height: 220px;
+}
+
+.pg-subhead {
+    font-size: 13px;
+    margin: 16px 0 8px;
+    color: var(--accent);
+}
+
+.reject-btn {
+    background: transparent;
+    color: var(--error);
+    border: 1px solid var(--error);
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+}

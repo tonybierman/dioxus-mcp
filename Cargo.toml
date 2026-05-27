@@ -1,7 +1,13 @@
 [workspace]
 members = [
     "crates/dioxus-mcp",
+    "crates/dioxus-mcp-registry",
     "crates/probe",
     "examples/smoke-app",
 ]
+# The playground UI is a wasm bin crate kept in-repo for cohesion but NOT a
+# workspace member: as a member, a root `cargo build` would build it for the
+# host target and it would share Cargo.lock/target. It builds standalone via
+# `dx build` inside playground/; the server embeds its built dist.
+exclude = ["playground"]
 resolver = "2"

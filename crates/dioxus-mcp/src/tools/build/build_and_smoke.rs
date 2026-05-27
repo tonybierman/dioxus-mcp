@@ -691,7 +691,7 @@ not-json garbage
     /// failed AND there are more legs to run AND quick is set, skip.
     #[test]
     fn quick_short_circuits_on_failed_first_leg() {
-        let legs = vec![BuildLegResult {
+        let legs = [BuildLegResult {
             target: "host",
             invocation: "cargo check".into(),
             duration_ms: 1,
@@ -716,7 +716,7 @@ not-json garbage
     /// already opted into a single-leg run via `target_wasm`).
     #[test]
     fn quick_does_not_apply_when_single_leg() {
-        let legs = vec![BuildLegResult {
+        let legs = [BuildLegResult {
             target: "host",
             invocation: "cargo check".into(),
             duration_ms: 1,

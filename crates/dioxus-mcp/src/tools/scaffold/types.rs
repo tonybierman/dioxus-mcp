@@ -43,7 +43,22 @@ pub struct ScaffoldResult {
     /// predict the output); other primitives stay path-only.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub previews: std::collections::BTreeMap<PathBuf, String>,
+    /// Structured, already-resolved render models for screens a client can't
+    /// reconstruct on its own — specifically the server-synthesized resource
+    /// screens (a `resources:` block expands into list/new/edit screens that
+    /// never appear in the user's `screens:`). Populated by `execute_code` in
+    /// `dry_run: true` mode alongside `previews`. Additive: empty for docs
+    /// without resource slices, so existing clients are unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render_models: Vec<RenderModel>,
 }
+
+/// Re-exported from the shared `dioxus-mcp-registry` crate so the server and the
+/// wasm playground share one definition instead of hand-mirroring it. The shared
+/// type adds `Deserialize`/`PartialEq` plus the additive generic-preview fields
+/// (`layout`, `theme`, `nodes`, `behavior`); existing fields and their
+/// serialization (`skip_serializing_if`) are unchanged.
+pub use dioxus_mcp_registry::{RenderField, RenderModel};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PropSpec {

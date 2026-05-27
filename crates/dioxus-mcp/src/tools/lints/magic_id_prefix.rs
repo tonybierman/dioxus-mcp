@@ -215,19 +215,17 @@ fn first_str_lit_in_macro(m: &syn::Macro) -> Option<String> {
 }
 
 fn matches_placeholder(s: &str) -> bool {
-    PLACEHOLDER_PREFIXES.iter().any(|p| *p == s)
+    PLACEHOLDER_PREFIXES.contains(&s)
 }
 
 /// Return the placeholder prefix iff `s` starts with one of the
 /// recognised placeholders. We want strict matches at the START so a
 /// random message containing `"tmp-"` mid-string doesn't false-positive.
 fn placeholder_at_start(s: &str) -> Option<&'static str> {
-    for p in PLACEHOLDER_PREFIXES {
-        if s.starts_with(p) {
-            return Some(p);
-        }
-    }
-    None
+    PLACEHOLDER_PREFIXES
+        .iter()
+        .find(|&p| s.starts_with(p))
+        .map(|v| v as _)
 }
 
 #[cfg(test)]

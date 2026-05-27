@@ -2079,16 +2079,14 @@ fn collect_rsx_if_signal_calls(block: &syn::Block) -> std::collections::HashSet<
     fn scan_if_calls(tokens: &[TokenTree], out: &mut std::collections::HashSet<String>) {
         let mut i = 0;
         while i + 2 < tokens.len() {
-            if let TokenTree::Ident(kw) = &tokens[i] {
-                if kw == "if" {
-                    if let (TokenTree::Ident(name), TokenTree::Group(args)) =
-                        (&tokens[i + 1], &tokens[i + 2])
-                        && args.delimiter() == Delimiter::Parenthesis
-                        && args.stream().is_empty()
-                    {
-                        out.insert(name.to_string());
-                    }
-                }
+            if let TokenTree::Ident(kw) = &tokens[i]
+                && kw == "if"
+                && let (TokenTree::Ident(name), TokenTree::Group(args)) =
+                    (&tokens[i + 1], &tokens[i + 2])
+                && args.delimiter() == Delimiter::Parenthesis
+                && args.stream().is_empty()
+            {
+                out.insert(name.to_string());
             }
             if let TokenTree::Group(g) = &tokens[i] {
                 let inner: Vec<TokenTree> = g.stream().into_iter().collect();

@@ -19,7 +19,7 @@ pub use route::create_route;
 pub use server_fn::create_server_fn;
 pub use types::{
     ArgSpec, CreateComponentParams, CreateRouteParams, CreateServerFnParams, ModUpsert, PropSpec,
-    ScaffoldResult,
+    RenderField, RenderModel, ScaffoldResult,
 };
 
 pub(crate) async fn crate_root(

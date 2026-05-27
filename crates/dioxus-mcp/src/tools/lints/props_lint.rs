@@ -87,7 +87,7 @@ pub async fn props_lint(state: &Arc<State>, p: PropsLintParams) -> Result<PropsL
                             continue;
                         }
                         let line = pt.pat.span().start().line;
-                        let names = unknown.iter().cloned().collect::<Vec<_>>().join(", ");
+                        let names = unknown.to_vec().join(", ");
                         issues.push(PropsIssue {
                             code: "missing_partial_eq_on_prop_type",
                             message: format!(
@@ -167,15 +167,15 @@ fn collect_partial_eq_types(files: &[crate::tools::ast::ScannedFile]) -> HashSet
         let Ok(ast) = &sf.ast else { continue };
         for item in &ast.items {
             match item {
-                syn::Item::Struct(s) => {
-                    if collect_derives(&s.attrs).iter().any(|d| d == "PartialEq") {
-                        out.insert(s.ident.to_string());
-                    }
+                syn::Item::Struct(s)
+                    if collect_derives(&s.attrs).iter().any(|d| d == "PartialEq") =>
+                {
+                    out.insert(s.ident.to_string());
                 }
-                syn::Item::Enum(e) => {
-                    if collect_derives(&e.attrs).iter().any(|d| d == "PartialEq") {
-                        out.insert(e.ident.to_string());
-                    }
+                syn::Item::Enum(e)
+                    if collect_derives(&e.attrs).iter().any(|d| d == "PartialEq") =>
+                {
+                    out.insert(e.ident.to_string());
                 }
                 syn::Item::Impl(i) => {
                     let Some((_, trait_path, _)) = &i.trait_ else {
@@ -185,10 +185,10 @@ fn collect_partial_eq_types(files: &[crate::tools::ast::ScannedFile]) -> HashSet
                     if last.as_deref() != Some("PartialEq") {
                         continue;
                     }
-                    if let syn::Type::Path(tp) = &*i.self_ty {
-                        if let Some(seg) = tp.path.segments.last() {
-                            out.insert(seg.ident.to_string());
-                        }
+                    if let syn::Type::Path(tp) = &*i.self_ty
+                        && let Some(seg) = tp.path.segments.last()
+                    {
+                        out.insert(seg.ident.to_string());
                     }
                 }
                 _ => {}

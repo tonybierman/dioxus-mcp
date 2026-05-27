@@ -1,0 +1,270 @@
+/* Scoped styling for the interpreter's rendered preview. Everything lives
+ * under `.preview-root` so it never leaks into the playground chrome and the
+ * chrome never leaks in. These mirror the generator's unstyled/default markup
+ * (`screen`, `add`, `{snake}-items`, `delete`). */
+
+.preview-root {
+    background: var(--p-bg, #ffffff);
+    color: var(--p-text, #1a1d24);
+    border-radius: 8px;
+    padding: 20px;
+    min-height: 200px;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.preview-root .screen {
+    max-width: 480px;
+}
+
+.preview-root h1 {
+    font-size: 20px;
+    margin: 0 0 16px;
+}
+
+/* client_crud + resource_form share input/button look */
+.preview-root form.add {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.preview-root form.add input {
+    flex: 1;
+    padding: 8px 10px;
+    border: 1px solid var(--p-border, #c7ccd6);
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+.preview-root button {
+    padding: 8px 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--p-accent, #3b82f6);
+    color: var(--p-accent-text, #fff);
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.preview-root button:hover {
+    background: #2f6fe0;
+}
+
+.preview-root ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.preview-root li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: var(--p-surface, #f4f6fa);
+    border: 1px solid var(--p-border, #e2e6ee);
+    border-radius: 6px;
+}
+
+.preview-root li span {
+    flex: 1;
+}
+
+.preview-root li span.done {
+    text-decoration: line-through;
+    color: var(--p-muted, #8a92a3);
+}
+
+.preview-root button.delete {
+    background: transparent;
+    color: #d04a4a;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 8px;
+}
+
+.preview-root button.delete:hover {
+    background: #fbe9e9;
+}
+
+/* resource_form */
+.preview-root form.resource-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.preview-root form.resource-form label {
+    font-size: 13px;
+    font-weight: 600;
+    margin-top: 8px;
+}
+
+.preview-root form.resource-form input,
+.preview-root form.resource-form textarea {
+    padding: 8px 10px;
+    border: 1px solid var(--p-border, #c7ccd6);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: inherit;
+}
+
+.preview-root form.resource-form input[type="checkbox"] {
+    width: auto;
+    align-self: flex-start;
+}
+
+.preview-root form.resource-form button {
+    margin-top: 14px;
+    align-self: flex-start;
+}
+
+/* hints / banners */
+.preview-root .preview-hint {
+    color: var(--p-muted, #8a92a3);
+    font-size: 12.5px;
+    margin-top: 12px;
+}
+
+.preview-root .preview-banner {
+    background: #fff7e6;
+    border: 1px solid #ffd479;
+    color: #8a6d2f;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12.5px;
+    margin-bottom: 12px;
+}
+
+.preview-root .preview-banner code {
+    font-family: ui-monospace, monospace;
+}
+
+.preview-unknown {
+    color: var(--p-muted, #8a92a3);
+    font-style: italic;
+}
+
+/* resource_list table */
+.preview-root .toolbar-link {
+    display: inline-block;
+    margin-bottom: 12px;
+    padding: 6px 12px;
+    background: #eef3ff;
+    color: #2f6fe0;
+    border: 1px solid #cfe0ff;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 13px;
+}
+
+.preview-root .preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-bottom: 12px;
+}
+
+.preview-root .preview-table th,
+.preview-root .preview-table td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--p-border, #e2e6ee);
+}
+
+.preview-root .preview-table th {
+    color: #5a6172;
+    font-weight: 600;
+    border-bottom: 2px solid #d4dae6;
+}
+
+.preview-root .preview-table tbody tr:hover {
+    background: var(--p-surface, #f4f6fa);
+}
+
+/* clickable rows/items wired to the fake router */
+.preview-root .clickable-row {
+    cursor: pointer;
+}
+
+.preview-root li.clickable-row:hover {
+    background: #eef3ff;
+    border-color: #cfe0ff;
+}
+
+/* Screen navigator: a dark left rail (chrome, lives OUTSIDE .preview-root so it
+ * keeps the playground theme) + a stage holding the single active screen. */
+.preview-with-nav {
+    display: flex;
+    min-height: 240px;
+}
+
+.preview-nav {
+    flex: 0 0 180px;
+    background: var(--code);
+    border: 1px solid var(--border);
+    border-radius: 8px 0 0 8px;
+    padding: 10px 0;
+    overflow-y: auto;
+}
+
+.preview-nav-group {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 10px 14px 4px;
+}
+
+.preview-nav-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    border-left: 2px solid transparent;
+    padding: 6px 14px;
+    cursor: pointer;
+    font: inherit;
+}
+
+.preview-nav-item:hover {
+    background: rgba(106, 169, 255, 0.08);
+}
+
+.preview-nav-item.active {
+    border-left-color: var(--accent);
+    color: var(--accent);
+    background: rgba(106, 169, 255, 0.1);
+}
+
+.preview-nav-item .nav-item-label {
+    display: block;
+    font-size: 13px;
+}
+
+.preview-nav-item .nav-item-route {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    font-family: ui-monospace, monospace;
+}
+
+/* min-width:0 is required or a wide .preview-table blows out the flex track */
+.preview-stage {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.preview-with-nav .preview-stage .preview-root {
+    border-radius: 0 8px 8px 0;
+    /* fill the stage vertically so the white box doesn't shrink-wrap a short
+     * screen (e.g. an empty Dashboard) and leave the pane half-empty */
+    height: 100%;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
