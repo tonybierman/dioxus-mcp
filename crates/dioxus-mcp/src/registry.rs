@@ -1,8 +1,22 @@
 //! Loads the theme/component/layout [`Registry`]: embedded built-in defaults,
 //! overlaid by runtime descriptors found on disk. The defaults seed today's
 //! hardcoded catalogs (5 layouts, the `dx` component catalog, a handful of
-//! themes); a project can override or add entries by dropping `*.toml`
-//! descriptors under `target/dioxus-mcp/registry/{themes,components,layouts}/`.
+//! themes).
+//!
+//! Where descriptors live (later overrides earlier, per id/name):
+//! 1. embedded built-ins (always present);
+//! 2. **global** `~/.config/dioxus-mcp/registry/{themes,components,layouts}/` —
+//!    the **canonical** place for descriptors you want in *every* project. The
+//!    `dioxus` MCP is stdio with no `--project-root`, so `project_root` defaults
+//!    to each session's launch cwd (`lib.rs`); the global dir sidesteps that and
+//!    is read regardless of cwd;
+//! 3. **project** `<project_root>/.dioxus-mcp/registry/...` — persistent (NOT
+//!    under `target/`, so `cargo clean` won't wipe it; commit it to share with
+//!    the team) and highest precedence; or point `DIOXUS_MCP_REGISTRY_DIR`
+//!    anywhere to replace this search root.
+//!
+//! `State::registry()` calls this on demand (not cached), so descriptors
+//! **hot-reload** — add or edit a file and the next call sees it.
 //!
 //! Loading is best-effort and mirrors the proposals store (see `proposal.rs`):
 //! a missing dir is empty, a malformed file is logged at debug and skipped, and
@@ -29,11 +43,13 @@ pub fn load(project_root: &Path) -> Registry {
 }
 
 /// `DIOXUS_MCP_REGISTRY_DIR` overrides the per-project search root (mirrors the
-/// `DIOXUS_MCP_UI_DIR` idiom); otherwise `<project>/target/dioxus-mcp/registry`.
+/// `DIOXUS_MCP_UI_DIR` idiom); otherwise `<project>/.dioxus-mcp/registry` — a
+/// persistent, committable location (NOT under `target/`, which `cargo clean`
+/// wipes).
 fn project_dir(project_root: &Path) -> PathBuf {
     std::env::var_os("DIOXUS_MCP_REGISTRY_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| project_root.join("target/dioxus-mcp/registry"))
+        .unwrap_or_else(|| project_root.join(".dioxus-mcp/registry"))
 }
 
 /// `~/.config/dioxus-mcp/registry` (XDG_CONFIG_HOME, else HOME/.config).
@@ -246,6 +262,27 @@ mod tests {
         assert!(reg.layouts.contains_key("kanban"), "new layout added");
         assert_eq!(reg.layouts["empty"].label, "Blank", "existing layout overridden");
         assert_eq!(reg.layouts.len(), 6);
+    }
+
+    #[test]
+    fn reload_reflects_descriptors_added_after_a_first_load() {
+        // Hot-reload: `State::registry()` calls `load()` on every access (no
+        // cache), so a descriptor written after one load shows up on the next.
+        // Presence assertions (unique ids) keep this robust to any real global
+        // descriptors on the host.
+        let root = tempfile::tempdir().unwrap();
+        let layouts = root.path().join(".dioxus-mcp/registry/layouts");
+        std::fs::create_dir_all(&layouts).unwrap();
+        std::fs::write(layouts.join("a.toml"), "id = \"hot_alpha\"\ncomplex = false\n").unwrap();
+
+        let first = load(root.path());
+        assert!(first.layouts.contains_key("hot_alpha"), "project dir is .dioxus-mcp/registry");
+        assert!(!first.layouts.contains_key("hot_beta"));
+
+        std::fs::write(layouts.join("b.toml"), "id = \"hot_beta\"\ncomplex = false\n").unwrap();
+        let second = load(root.path());
+        assert!(second.layouts.contains_key("hot_alpha"));
+        assert!(second.layouts.contains_key("hot_beta"), "reload picks up the new file");
     }
 
     #[test]

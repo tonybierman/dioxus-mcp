@@ -13,8 +13,8 @@ use crate::state::State;
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct GetRegistryParams {}
 
-/// Clone of the server's loaded registry (built-ins overlaid by runtime
-/// descriptors). Cheap relative to a tool round-trip and static for the session.
+/// The server's registry, loaded fresh from disk (built-ins overlaid by runtime
+/// descriptors). Reflects any descriptor added/edited since the server started.
 pub async fn get_registry(state: &State, _p: GetRegistryParams) -> Result<Registry, String> {
-    Ok(state.registry.clone())
+    Ok(state.registry())
 }

@@ -139,7 +139,8 @@ pub(crate) async fn generate_screen(
     let snake = sc.name.to_snake_case();
     let wrap_pascal = sc.wrap_with.as_ref().map(|w| w.to_pascal_case());
 
-    let body = build_screen_body(crate_root, sc, client_stores, &state.registry.layouts)?;
+    let registry = state.registry();
+    let body = build_screen_body(crate_root, sc, client_stores, &registry.layouts)?;
     // Locate the first `rsx!` macro in the generated body so the response can
     // point the agent straight at the markup it'll most likely want to edit.
     // The line number is computed pre-write and matches the on-disk file

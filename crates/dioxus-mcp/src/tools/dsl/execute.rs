@@ -140,13 +140,18 @@ pub async fn execute_code(
         // agents can inspect template output before committing. Skipped for
         // entries whose target path collides (the existing file wins).
         let collision_set: BTreeSet<&std::path::PathBuf> = plan.collisions.iter().collect();
+        // Snapshot the registry once for this dry-run (it's loaded fresh from
+        // disk so runtime layouts are current).
+        let registry = state.registry();
         for sc in &doc.screens {
             let snake = sc.name.to_snake_case();
             let leaf = leaf_for(&crate_root, "src/components", &snake);
             if collision_set.contains(&leaf) {
                 continue;
             }
-            if let Ok(body) = build_screen_body(&crate_root, sc, &doc.client_stores, &state.registry.layouts) {
+            if let Ok(body) =
+                build_screen_body(&crate_root, sc, &doc.client_stores, &registry.layouts)
+            {
                 plan.previews.insert(leaf, body);
             }
         }
@@ -156,8 +161,7 @@ pub async fn execute_code(
         // Structured render models for the server-synthesized resource screens
         // (list/new/edit) so a browser client can preview a `resources:` slice
         // it can't reconstruct from the raw doc.
-        plan.render_models =
-            super::render_model::build_render_models(&doc, &state.registry.layouts);
+        plan.render_models = super::render_model::build_render_models(&doc, &registry.layouts);
         return Ok(plan);
     }
 

@@ -438,14 +438,15 @@ impl DioxusMcp {
         &self,
         Parameters(p): Parameters<tools::dsl::ListComponentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::dsl::list_components(&self.state.registry.components, p).await {
+        let reg = self.state.registry();
+        match tools::dsl::list_components(&reg.components, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
     }
 
     #[tool(
-        description = "Return the merged theme/component/layout registry (built-in defaults overlaid by any project/global descriptors) as JSON. Primarily for the embedded cockpit: drives the theme selector, the navigator's per-layout labels/ranks, and the generic screen preview. Reflects runtime-loaded descriptors under `target/dioxus-mcp/registry/` (or `DIOXUS_MCP_REGISTRY_DIR`)."
+        description = "Return the merged theme/component/layout registry (built-in defaults overlaid by runtime descriptors) as JSON. Primarily for the embedded cockpit: drives the theme selector, the navigator's per-layout labels/ranks, and the generic screen preview. Loaded fresh from disk on every call, so descriptors hot-reload (no server restart). Add `*.toml` descriptors under `~/.config/dioxus-mcp/registry/{themes,components,layouts}/` (canonical — applies to every project regardless of cwd) or `<project_root>/.dioxus-mcp/registry/...` (project-specific, highest precedence; or set `DIOXUS_MCP_REGISTRY_DIR`)."
     )]
     async fn get_registry(
         &self,
@@ -464,7 +465,8 @@ impl DioxusMcp {
         &self,
         Parameters(p): Parameters<tools::dsl::SuggestComponentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::dsl::suggest_components(&self.state.registry.components, p).await {
+        let reg = self.state.registry();
+        match tools::dsl::suggest_components(&reg.components, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
