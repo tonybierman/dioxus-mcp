@@ -242,9 +242,26 @@ enum Mode {
 #[component]
 pub fn Cockpit() -> Element {
     let mut mode = use_signal(|| Mode::Inbox);
-    // Fetch the registry once (static per session). `None` while pending or on
-    // error — the cockpit just keeps its default dark theme until it arrives.
-    let registry = use_resource(|| async move { mcp_client::get_registry().await.ok() });
+    // Re-fetch the registry whenever the window regains focus, so descriptors
+    // edited outside the cockpit (the server hot-reloads them) show up without
+    // a manual reload. The server load is cheap and `Registry: PartialEq` means
+    // an unchanged re-fetch dedupes — no re-render or theme flicker. No idle
+    // polling: it only fires on focus.
+    let mut reg_tick = use_signal(|| 0u32);
+    use_future(move || async move {
+        let mut eval = document::eval(
+            "window.addEventListener('focus', () => dioxus.send('focus'));",
+        );
+        while eval.recv::<String>().await.is_ok() {
+            reg_tick += 1;
+        }
+    });
+    // `None` while pending or on error — the cockpit keeps its default dark
+    // theme until the registry arrives.
+    let registry = use_resource(move || async move {
+        let _ = reg_tick();
+        mcp_client::get_registry().await.ok()
+    });
     let mut theme_id = use_signal(|| "dark".to_string());
 
     // Palette themes (those carrying color tokens) offered in the selector;

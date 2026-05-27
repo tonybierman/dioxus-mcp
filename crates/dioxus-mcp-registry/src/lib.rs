@@ -25,7 +25,7 @@ pub use theme::{ThemeDescriptor, ThemeTokens};
 /// descriptors. String-keyed so entries can be added at runtime. Loading and
 /// the built-in seed live host-side (they touch the filesystem / host consts);
 /// this type and [`Registry::overlay`] are pure so the playground shares them.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
     pub themes: BTreeMap<String, ThemeDescriptor>,
