@@ -1,17 +1,20 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use dioxus_mcp_registry::LayoutDescriptor;
 use heck::{ToPascalCase, ToSnakeCase};
 use minijinja::context;
 
 use crate::state::State;
 use crate::tools::scaffold::{self, CreateRouteParams, ScaffoldResult};
 
+use super::humanize;
 use super::super::render::*;
 use super::super::templates::*;
 use super::super::types::*;
 use super::super::util::merge;
-use super::screen_templates::{render_screen_template, vanilla_css_starter_for};
+use super::screen_templates::{is_builtin_layout_kind, render_screen_template, vanilla_css_starter_for};
 
 /// Render a screen's source body without writing. Shared between
 /// `generate_screen` (which writes) and `plan_dsl` (which populates dry-run
@@ -20,6 +23,7 @@ pub(crate) fn build_screen_body(
     crate_root: &Path,
     sc: &DslScreen,
     client_stores: &[DslClientStore],
+    layouts: &BTreeMap<String, LayoutDescriptor>,
 ) -> Result<String, String> {
     let pascal = sc.name.to_pascal_case();
     let snake = sc.name.to_snake_case();
@@ -36,7 +40,10 @@ pub(crate) fn build_screen_body(
                 store_snake => None::<String>,
             },
         ),
-        Some(t) => render_screen_template(
+        // Built-in kinds keep their Rust renderers; the registry is the dispatch
+        // table for everything else. A runtime-added simple layout (a descriptor
+        // with a template and `complex: false`) is rendered from its template.
+        Some(t) if is_builtin_layout_kind(&t.kind) => render_screen_template(
             crate_root,
             &pascal,
             &snake,
@@ -44,7 +51,81 @@ pub(crate) fn build_screen_body(
             client_stores,
             t,
         ),
+        Some(t) => render_registry_layout(layouts, &pascal, &snake, wrap_pascal.as_deref(), t),
     }
+}
+
+/// Render a runtime-added layout from its registry descriptor's minijinja
+/// template. v1 supports only `complex: false` layouts (no Rust sub-renderer);
+/// complex runtime layouts are a documented v2 boundary. Unknown kinds error
+/// with the set of layouts the registry actually knows.
+fn render_registry_layout(
+    layouts: &BTreeMap<String, LayoutDescriptor>,
+    pascal: &str,
+    snake: &str,
+    wrap_pascal: Option<&str>,
+    t: &DslScreenTemplate,
+) -> Result<String, String> {
+    let Some(layout) = layouts.get(&t.kind) else {
+        let known: Vec<&str> = layouts.keys().map(String::as_str).collect();
+        return Err(format!(
+            "unknown screen template kind {:?} (known layouts: {})",
+            t.kind,
+            known.join(", ")
+        ));
+    };
+    if layout.complex {
+        return Err(format!(
+            "layout {:?} is marked `complex` — complex runtime layouts need a Rust \
+             sub-renderer and aren't supported yet; only `complex: false` template \
+             layouts can be added at runtime",
+            t.kind
+        ));
+    }
+    let Some(template) = &layout.template else {
+        return Err(format!(
+            "layout {:?} has no codegen `template`; a runtime layout must provide one",
+            t.kind
+        ));
+    };
+    // Generic context available to runtime layout templates. Mirrors the shape
+    // the built-in templates use so descriptors feel familiar.
+    let fields_ctx: Vec<_> = t
+        .fields
+        .iter()
+        .map(|fd| {
+            let is_bool = fd.ty == "checkbox" || fd.rust_type.as_deref() == Some("bool");
+            let input_type = match fd.ty.as_str() {
+                "email" => "email",
+                "password" => "password",
+                "number" => "number",
+                "checkbox" => "checkbox",
+                _ => "text",
+            };
+            context! {
+                name => fd.name.to_snake_case(),
+                label => humanize(&fd.name),
+                input_type => input_type,
+                tag => if fd.ty == "textarea" { "textarea" } else { "input" },
+                is_bool => is_bool,
+            }
+        })
+        .collect();
+    render(
+        "registry_layout",
+        template,
+        context! {
+            pascal => pascal,
+            snake => snake,
+            wrap_pascal => wrap_pascal,
+            root_class => t.class.clone().unwrap_or_else(|| default_screen_class(snake)),
+            item_type => t.item_type.clone(),
+            endpoint => t.endpoint.clone(),
+            on_submit => t.on_submit.clone(),
+            redirect_to => t.redirect_to.clone(),
+            fields => fields_ctx,
+        },
+    )
 }
 
 pub(crate) async fn generate_screen(
@@ -58,7 +139,7 @@ pub(crate) async fn generate_screen(
     let snake = sc.name.to_snake_case();
     let wrap_pascal = sc.wrap_with.as_ref().map(|w| w.to_pascal_case());
 
-    let body = build_screen_body(crate_root, sc, client_stores)?;
+    let body = build_screen_body(crate_root, sc, client_stores, &state.registry.layouts)?;
     // Locate the first `rsx!` macro in the generated body so the response can
     // point the agent straight at the markup it'll most likely want to edit.
     // The line number is computed pre-write and matches the on-disk file
@@ -130,4 +211,99 @@ pub(crate) fn first_rsx_line(body: &str) -> Option<usize> {
         .enumerate()
         .find(|(_, l)| l.contains("rsx!"))
         .map(|(i, _)| i + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screen(kind: &str) -> DslScreen {
+        DslScreen {
+            name: "BannerScreen".into(),
+            route: "/banner".into(),
+            wrap_with: None,
+            template: Some(DslScreenTemplate {
+                kind: kind.into(),
+                endpoint: None,
+                item_type: Some("Note".into()),
+                on_submit: None,
+                redirect_to: None,
+                fields: vec![],
+                store: None,
+                label_field: None,
+                checkbox_field: None,
+                class: None,
+                body: None,
+                styled: None,
+                compose_style: None,
+                crud: None,
+            }),
+            replace_route: false,
+            route_params: vec![],
+        }
+    }
+
+    fn layouts_with(extra: LayoutDescriptor) -> BTreeMap<String, LayoutDescriptor> {
+        let mut m = crate::registry::builtin().layouts;
+        m.insert(extra.id.clone(), extra);
+        m
+    }
+
+    #[test]
+    fn renders_runtime_simple_layout_from_descriptor_template() {
+        let layout = LayoutDescriptor {
+            id: "banner".into(),
+            label: "Banner".into(),
+            nav_rank: 9,
+            template: Some("// {{ pascal }} banner for {{ item_type }}".into()),
+            complex: false,
+            context_vars: vec![],
+            preview: Default::default(),
+        };
+        let body = build_screen_body(
+            std::env::temp_dir().as_path(),
+            &screen("banner"),
+            &[],
+            &layouts_with(layout),
+        )
+        .unwrap();
+        assert_eq!(body, "// BannerScreen banner for Note");
+    }
+
+    #[test]
+    fn unknown_layout_kind_lists_known_layouts() {
+        let err = build_screen_body(
+            std::env::temp_dir().as_path(),
+            &screen("nonexistent_kind"),
+            &[],
+            &crate::registry::builtin().layouts,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown screen template kind"), "got: {err}");
+        assert!(
+            err.contains("resource_list"),
+            "error should list known layouts, got: {err}"
+        );
+    }
+
+    #[test]
+    fn complex_runtime_layout_is_rejected_in_v1() {
+        let layout = LayoutDescriptor {
+            id: "fancy".into(),
+            label: "Fancy".into(),
+            nav_rank: 9,
+            template: None,
+            complex: true,
+            context_vars: vec![],
+            preview: Default::default(),
+        };
+        let err = build_screen_body(
+            std::env::temp_dir().as_path(),
+            &screen("fancy"),
+            &[],
+            &layouts_with(layout),
+        )
+        .unwrap_err();
+        assert!(err.contains("complex"), "got: {err}");
+    }
 }

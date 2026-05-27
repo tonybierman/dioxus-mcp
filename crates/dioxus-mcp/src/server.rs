@@ -438,7 +438,20 @@ impl DioxusMcp {
         &self,
         Parameters(p): Parameters<tools::dsl::ListComponentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::dsl::list_components(p).await {
+        match tools::dsl::list_components(&self.state.registry.components, p).await {
+            Ok(r) => ok_json(&r),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    #[tool(
+        description = "Return the merged theme/component/layout registry (built-in defaults overlaid by any project/global descriptors) as JSON. Primarily for the embedded cockpit: drives the theme selector, the navigator's per-layout labels/ranks, and the generic screen preview. Reflects runtime-loaded descriptors under `target/dioxus-mcp/registry/` (or `DIOXUS_MCP_REGISTRY_DIR`)."
+    )]
+    async fn get_registry(
+        &self,
+        Parameters(p): Parameters<tools::dsl::GetRegistryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tools::dsl::get_registry(&self.state, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }
@@ -451,7 +464,7 @@ impl DioxusMcp {
         &self,
         Parameters(p): Parameters<tools::dsl::SuggestComponentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::dsl::suggest_components(p).await {
+        match tools::dsl::suggest_components(&self.state.registry.components, p).await {
             Ok(r) => ok_json(&r),
             Err(e) => Err(err(e)),
         }

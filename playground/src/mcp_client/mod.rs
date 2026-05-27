@@ -141,6 +141,15 @@ pub async fn apply(code: &str) -> Result<ScaffoldResult, McpError> {
     parse_scaffold(v)
 }
 
+/// Fetch the merged theme/component/layout registry. Static per session, so
+/// the cockpit fetches it once and drives the theme selector + (later) the
+/// navigator labels/ranks and generic preview from it.
+pub async fn get_registry() -> Result<dioxus_mcp_registry::Registry, McpError> {
+    let v = call_tool("get_registry", json!({})).await?;
+    serde_json::from_value(v)
+        .map_err(|e| McpError::Protocol(format!("could not parse registry: {e}")))
+}
+
 /// List scaffold proposals awaiting a human decision (the cockpit inbox).
 pub async fn list_proposals() -> Result<Vec<Proposal>, McpError> {
     let v = call_tool("list_proposals", json!({})).await?;

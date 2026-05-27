@@ -166,6 +166,22 @@ pub(crate) fn render_screen_template(
     }
 }
 
+/// The screen kinds whose codegen lives in Rust here (`render_screen_template`).
+/// Anything else is a runtime-added layout, rendered from its registry
+/// descriptor's minijinja template by `build_screen_body`.
+pub(crate) const BUILTIN_LAYOUT_KINDS: &[&str] = &[
+    "empty",
+    "resource_list",
+    "resource_form",
+    "resource_edit_form",
+    "client_crud",
+];
+
+/// Is `kind` one of the built-in layouts handled by `render_screen_template`?
+pub(crate) fn is_builtin_layout_kind(kind: &str) -> bool {
+    BUILTIN_LAYOUT_KINDS.contains(&kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::super::render::render;

@@ -65,37 +65,11 @@ pub struct FieldDef {
     pub validation: Option<String>,
 }
 
-/// A server-resolved render model for a screen the client can't reconstruct
-/// locally — i.e. the resource-synthesized list/new/edit screens. Mirrors
-/// `dioxus-mcp`'s `RenderModel`; arrives in `ScaffoldResult.render_models`.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
-pub struct RenderModel {
-    pub screen: String,
-    pub kind: String,
-    #[serde(default)]
-    pub route: String,
-    #[serde(default)]
-    pub item_type: String,
-    #[serde(default)]
-    pub root_class: Option<String>,
-    /// Table columns for `resource_list` (`ty` is the Rust type, for mock cells).
-    #[serde(default)]
-    pub columns: Vec<RenderField>,
-    /// Form inputs for `resource_form` / `resource_edit_form` (`ty` is the input kind).
-    #[serde(default)]
-    pub fields: Vec<RenderField>,
-    #[serde(default)]
-    pub list_endpoint: Option<String>,
-    #[serde(default)]
-    pub new_route: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
-pub struct RenderField {
-    pub name: String,
-    pub label: String,
-    pub ty: String,
-}
+/// `RenderModel`/`RenderField` now live in the shared `dioxus-mcp-registry`
+/// crate (one definition shared with the server, ending the hand-mirror);
+/// re-exported here so existing `crate::model::RenderModel` paths keep working.
+/// Arrives in `ScaffoldResult.render_models`.
+pub use dioxus_mcp_registry::{RenderField, RenderModel};
 
 /// Parse a DSL doc from YAML text. Errors are stringified for display in the
 /// editor's error pane.

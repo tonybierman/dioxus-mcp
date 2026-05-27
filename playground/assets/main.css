@@ -325,6 +325,17 @@ body {
     border-color: var(--accent);
 }
 
+/* registry-driven theme selector, pushed to the right of the mode bar */
+.theme-select {
+    margin-left: auto;
+    background: var(--code);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 12px;
+}
+
 /* proposals inbox */
 .inbox-item {
     display: block;

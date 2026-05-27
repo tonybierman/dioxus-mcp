@@ -23,6 +23,7 @@ pub(crate) mod http_cors;
 pub(crate) mod http_router;
 pub(crate) mod project;
 pub(crate) mod proposal;
+pub(crate) mod registry;
 pub(crate) mod server;
 pub(crate) mod state;
 pub(crate) mod tools;

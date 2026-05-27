@@ -611,6 +611,7 @@ dependencies = [
  "bytes",
  "cargo_toml",
  "clap",
+ "dioxus-mcp-registry",
  "heck",
  "http",
  "http-body-util",
@@ -656,6 +657,13 @@ dependencies = [
  "dioxus",
  "dioxus-mcp-probe",
  "tracing",
+]
+
+[[package]]
+name = "dioxus-mcp-registry"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

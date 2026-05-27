@@ -1,0 +1,12 @@
+[package]
+name = "dioxus-mcp-registry"
+version = "0.1.0"
+edition = "2021"
+description = "Shared, dependency-light descriptor schema for dioxus-mcp's theme/component/layout registry. Pure serde data so both the host server and the wasm playground can depend on it."
+license = "MIT OR Apache-2.0"
+
+# Intentionally serde-only: this crate is `path`-depended by the wasm-only
+# playground, so it must compile to wasm32. No toml/yaml parser, no syn/tokio —
+# each consumer parses with its own loader and exchanges JSON.
+[dependencies]
+serde = { version = "1", features = ["derive"] }

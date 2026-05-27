@@ -236,11 +236,40 @@ enum Mode {
 }
 
 /// Root: a mode toggle between the Author playground and the Proposals inbox
-/// (the human side of the M6 approval gate).
+/// (the human side of the M6 approval gate), plus a registry-driven theme
+/// selector that recolors the whole cockpit by overriding the CSS custom
+/// properties `main.css`/`preview.css` read.
 #[component]
 pub fn Cockpit() -> Element {
-    let mut mode = use_signal(|| Mode::Author);
+    let mut mode = use_signal(|| Mode::Inbox);
+    // Fetch the registry once (static per session). `None` while pending or on
+    // error — the cockpit just keeps its default dark theme until it arrives.
+    let registry = use_resource(|| async move { mcp_client::get_registry().await.ok() });
+    let mut theme_id = use_signal(|| "dark".to_string());
+
+    // Palette themes (those carrying color tokens) offered in the selector;
+    // styling-family themes like tailwind/vanilla-css aren't cockpit palettes.
+    let palettes = use_memo(move || match &*registry.read() {
+        Some(Some(reg)) => reg
+            .themes
+            .values()
+            .filter(|t| !t.tokens.color.is_empty())
+            .map(|t| (t.id.clone(), t.label.clone()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
+
+    // CSS for the active theme: `:root { --bg: …; }` overriding main.css's
+    // defaults. Empty until the registry resolves / a palette is found.
+    let theme_css = use_memo(move || match &*registry.read() {
+        Some(Some(reg)) => reg.themes.get(&theme_id()).map(theme_vars_css).unwrap_or_default(),
+        _ => String::new(),
+    });
+
     rsx! {
+        if !theme_css().is_empty() {
+            document::Style { "{theme_css}" }
+        }
         nav { class: "pg-modebar",
             button {
                 class: if mode() == Mode::Author { "modetab active" } else { "modetab" },
@@ -252,12 +281,42 @@ pub fn Cockpit() -> Element {
                 onclick: move |_| mode.set(Mode::Inbox),
                 "Proposals"
             }
+            if !palettes().is_empty() {
+                select {
+                    class: "theme-select",
+                    value: "{theme_id}",
+                    onchange: move |e| theme_id.set(e.value()),
+                    for (id , label) in palettes() {
+                        option { value: "{id}", "{label}" }
+                    }
+                }
+            }
         }
         match mode() {
             Mode::Author => rsx! { Playground {} },
             Mode::Inbox => rsx! { ProposalsInbox {} },
         }
     }
+}
+
+/// Emit `:root { --token: value; … }` from a theme's tokens. Colors map to
+/// `--<name>` (matching the names main.css/preview.css read: bg/panel/border/
+/// text/muted/accent/error/code); space/radius/font get prefixed vars.
+fn theme_vars_css(theme: &dioxus_mcp_registry::ThemeDescriptor) -> String {
+    let mut vars = String::new();
+    for (k, v) in &theme.tokens.color {
+        vars.push_str(&format!("--{k}: {v}; "));
+    }
+    for (k, v) in &theme.tokens.space {
+        vars.push_str(&format!("--space-{k}: {v}; "));
+    }
+    for (k, v) in &theme.tokens.radius {
+        vars.push_str(&format!("--radius-{k}: {v}; "));
+    }
+    for (k, v) in &theme.tokens.font {
+        vars.push_str(&format!("--font-{k}: {v}; "));
+    }
+    format!(":root {{ {vars}}}")
 }
 
 /// The human side of the approval gate: poll pending proposals, review/edit the

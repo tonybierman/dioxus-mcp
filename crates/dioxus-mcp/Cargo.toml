@@ -12,6 +12,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1.0"
+dioxus-mcp-registry = { path = "../dioxus-mcp-registry" }
 anyhow = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }

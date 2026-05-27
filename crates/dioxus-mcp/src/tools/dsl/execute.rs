@@ -146,7 +146,7 @@ pub async fn execute_code(
             if collision_set.contains(&leaf) {
                 continue;
             }
-            if let Ok(body) = build_screen_body(&crate_root, sc, &doc.client_stores) {
+            if let Ok(body) = build_screen_body(&crate_root, sc, &doc.client_stores, &state.registry.layouts) {
                 plan.previews.insert(leaf, body);
             }
         }

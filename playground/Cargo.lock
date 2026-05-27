@@ -845,6 +845,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dioxus-mcp-registry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "dioxus-router"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -996,6 +1003,7 @@ name = "dx-playground"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "dioxus-mcp-registry",
  "gloo-net",
  "gloo-timers",
  "serde",

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/dioxus-mcp",
+    "crates/dioxus-mcp-registry",
     "crates/probe",
     "examples/smoke-app",
 ]

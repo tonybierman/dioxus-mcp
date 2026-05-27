@@ -8,10 +8,11 @@
 //! to pick a component," that wrapping is dead weight — this tool returns
 //! just the catalog as JSON so it's cheap to scan and easy to filter.
 
+use std::collections::BTreeMap;
+
+use dioxus_mcp_registry::ComponentDescriptor;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use super::dx_components::DX_COMPONENT_CATALOG_ENTRIES;
 
 /// Per-catalog-entry caveats — known shape limitations the agent should weigh
 /// BEFORE running `dx components add`. Only listed when the widget materially
@@ -85,26 +86,29 @@ pub struct ListComponentsResult {
     pub components: Vec<ComponentEntry>,
 }
 
-pub async fn list_components(p: ListComponentsParams) -> Result<ListComponentsResult, String> {
+pub async fn list_components(
+    catalog: &BTreeMap<String, ComponentDescriptor>,
+    p: ListComponentsParams,
+) -> Result<ListComponentsResult, String> {
     let needle = p.query.as_deref().map(|s| s.trim().to_ascii_lowercase());
-    let total = DX_COMPONENT_CATALOG_ENTRIES.len();
-    let components: Vec<ComponentEntry> = DX_COMPONENT_CATALOG_ENTRIES
-        .iter()
-        .filter(|(name, desc, hint)| match &needle {
+    let total = catalog.len();
+    let components: Vec<ComponentEntry> = catalog
+        .values()
+        .filter(|c| match &needle {
             None => true,
             Some(q) if q.is_empty() => true,
             Some(q) => {
-                name.to_ascii_lowercase().contains(q)
-                    || desc.to_ascii_lowercase().contains(q)
-                    || hint.to_ascii_lowercase().contains(q)
+                c.name.to_ascii_lowercase().contains(q)
+                    || c.description.to_ascii_lowercase().contains(q)
+                    || c.prop_hint.to_ascii_lowercase().contains(q)
             }
         })
-        .map(|(name, desc, hint)| ComponentEntry {
-            name: (*name).to_string(),
-            description: (*desc).to_string(),
-            prop_hint: (*hint).to_string(),
-            import: format!("use crate::components::{name}::{};", to_pascal(name)),
-            limitations: limitations_for(name).map(str::to_string),
+        .map(|c| ComponentEntry {
+            name: c.name.clone(),
+            description: c.description.clone(),
+            prop_hint: c.prop_hint.clone(),
+            import: format!("use crate::components::{}::{};", c.name, to_pascal(&c.name)),
+            limitations: limitations_for(&c.name).map(str::to_string),
         })
         .collect();
     Ok(ListComponentsResult {
@@ -186,6 +190,7 @@ const KEYWORD_HINTS: &[(&str, &[&str])] = &[
 ];
 
 pub async fn suggest_components(
+    catalog: &BTreeMap<String, ComponentDescriptor>,
     p: SuggestComponentsParams,
 ) -> Result<SuggestComponentsResult, String> {
     let prompt_lc = p.prompt.to_ascii_lowercase();
@@ -203,16 +208,13 @@ pub async fn suggest_components(
     }
     let mut components: Vec<ComponentEntry> = Vec::new();
     for name in &catalog_names {
-        if let Some((n, desc, hint)) = DX_COMPONENT_CATALOG_ENTRIES
-            .iter()
-            .find(|(n, _, _)| n == name)
-        {
+        if let Some(c) = catalog.get(*name) {
             components.push(ComponentEntry {
-                name: (*n).to_string(),
-                description: (*desc).to_string(),
-                prop_hint: (*hint).to_string(),
-                import: format!("use crate::components::{n}::{};", to_pascal(n)),
-                limitations: limitations_for(n).map(str::to_string),
+                name: c.name.clone(),
+                description: c.description.clone(),
+                prop_hint: c.prop_hint.clone(),
+                import: format!("use crate::components::{}::{};", c.name, to_pascal(&c.name)),
+                limitations: limitations_for(&c.name).map(str::to_string),
             });
         }
     }
@@ -255,13 +257,19 @@ fn to_pascal(snake: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The built-in catalog, as the tools see it via `state.registry.components`.
+    fn catalog() -> BTreeMap<String, ComponentDescriptor> {
+        crate::registry::builtin().components
+    }
+
     #[tokio::test]
     async fn list_components_returns_full_catalog_when_unfiltered() {
-        let r = list_components(ListComponentsParams { query: None })
+        let cat = catalog();
+        let r = list_components(&cat, ListComponentsParams { query: None })
             .await
             .unwrap();
-        assert_eq!(r.total, DX_COMPONENT_CATALOG_ENTRIES.len());
-        assert_eq!(r.components.len(), DX_COMPONENT_CATALOG_ENTRIES.len());
+        assert_eq!(r.total, cat.len());
+        assert_eq!(r.components.len(), cat.len());
         let names: Vec<&str> = r.components.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"button"));
         assert!(names.contains(&"dropdown_menu"));
@@ -269,9 +277,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_components_filter_matches_name_or_description() {
-        let r = list_components(ListComponentsParams {
-            query: Some("date".into()),
-        })
+        let r = list_components(
+            &catalog(),
+            ListComponentsParams {
+                query: Some("date".into()),
+            },
+        )
         .await
         .unwrap();
         let names: Vec<&str> = r.components.iter().map(|c| c.name.as_str()).collect();
@@ -291,9 +302,12 @@ mod tests {
 
     #[tokio::test]
     async fn suggest_components_maps_drag_keyword_to_drag_and_drop_list() {
-        let r = suggest_components(SuggestComponentsParams {
-            prompt: "I want to build drag-to-reorder cards in this Kanban".into(),
-        })
+        let r = suggest_components(
+            &catalog(),
+            SuggestComponentsParams {
+                prompt: "I want to build drag-to-reorder cards in this Kanban".into(),
+            },
+        )
         .await
         .unwrap();
         let names: Vec<&str> = r.components.iter().map(|c| c.name.as_str()).collect();
@@ -309,9 +323,12 @@ mod tests {
 
     #[tokio::test]
     async fn suggest_components_returns_empty_for_unrelated_prompt() {
-        let r = suggest_components(SuggestComponentsParams {
-            prompt: "add a new field to my SQL schema".into(),
-        })
+        let r = suggest_components(
+            &catalog(),
+            SuggestComponentsParams {
+                prompt: "add a new field to my SQL schema".into(),
+            },
+        )
         .await
         .unwrap();
         assert!(
@@ -324,9 +341,12 @@ mod tests {
 
     #[tokio::test]
     async fn drag_and_drop_list_surface_includes_limitations() {
-        let r = list_components(ListComponentsParams {
-            query: Some("drag_and_drop_list".into()),
-        })
+        let r = list_components(
+            &catalog(),
+            ListComponentsParams {
+                query: Some("drag_and_drop_list".into()),
+            },
+        )
         .await
         .unwrap();
         let entry = r
@@ -346,9 +366,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_components_omits_limitations_when_none() {
-        let r = list_components(ListComponentsParams {
-            query: Some("button".into()),
-        })
+        let r = list_components(
+            &catalog(),
+            ListComponentsParams {
+                query: Some("button".into()),
+            },
+        )
         .await
         .unwrap();
         let entry = r
@@ -365,9 +388,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_components_import_uses_pascal_case() {
-        let r = list_components(ListComponentsParams {
-            query: Some("dropdown_menu".into()),
-        })
+        let r = list_components(
+            &catalog(),
+            ListComponentsParams {
+                query: Some("dropdown_menu".into()),
+            },
+        )
         .await
         .unwrap();
         let entry = r
@@ -379,5 +405,31 @@ mod tests {
             entry.import,
             "use crate::components::dropdown_menu::DropdownMenu;"
         );
+    }
+
+    #[tokio::test]
+    async fn project_added_component_surfaces_in_list() {
+        // A descriptor not in the built-in catalog still appears once it's in
+        // the registry the tool reads from.
+        let mut cat = catalog();
+        cat.insert(
+            "fancy_widget".into(),
+            ComponentDescriptor {
+                name: "fancy_widget".into(),
+                description: "a project-local widget".into(),
+                prop_hint: "inline props".into(),
+                ..Default::default()
+            },
+        );
+        let r = list_components(
+            &cat,
+            ListComponentsParams {
+                query: Some("fancy".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = r.components.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"fancy_widget"), "got: {names:?}");
     }
 }
