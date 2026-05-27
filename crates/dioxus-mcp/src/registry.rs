@@ -126,10 +126,12 @@ fn builtin_components() -> BTreeMap<String, ComponentDescriptor> {
         .collect()
 }
 
-/// The 5 built-in layout kinds. In v1 the resource/crud kinds stay `complex`
-/// (they keep their Rust sub-renderers); `empty` is the only purely
-/// template-driven one. `label`/`nav_rank` mirror the navigator's current
-/// hardcoded `label_for`/`kind_rank`. Preview skeletons are filled in Phase 6.
+/// The built-in layout kinds. The resource/crud kinds stay `complex` (they keep
+/// their Rust sub-renderers); `empty` is purely template-driven. `label`/
+/// `nav_rank` mirror the navigator's current hardcoded `label_for`/`kind_rank`.
+/// On top of these, the structural [`layout_library`](crate::tools::dsl::layout_library)
+/// (holy-grail, bento, split-screen, …) is seeded as `complex: false`
+/// template-driven layouts so every project can scaffold a structural screen.
 fn builtin_layouts() -> BTreeMap<String, LayoutDescriptor> {
     fn layout(id: &str, label: &str, nav_rank: u8, complex: bool) -> LayoutDescriptor {
         LayoutDescriptor {
@@ -152,6 +154,7 @@ fn builtin_layouts() -> BTreeMap<String, LayoutDescriptor> {
         layout("empty", "", 3, false),
     ]
     .into_iter()
+    .chain(crate::tools::dsl::layout_library::library_layouts())
     .map(|l| (l.id.clone(), l))
     .collect()
 }
@@ -233,9 +236,12 @@ mod tests {
             reg.components.len(),
             crate::tools::dsl::dx_components::DX_COMPONENT_CATALOG_ENTRIES.len()
         );
-        assert_eq!(reg.layouts.len(), 5);
+        // 5 historical kinds + the 12 structural library layouts.
+        assert_eq!(reg.layouts.len(), 17);
         assert_eq!(reg.themes.len(), 4);
         assert!(reg.layouts.contains_key("resource_list"));
+        assert!(reg.layouts.contains_key("holy_grail"));
+        assert!(reg.layouts.contains_key("drawer"));
         assert!(reg.themes.contains_key("dark"));
         assert!(reg.components.contains_key("button"));
     }
@@ -264,7 +270,9 @@ mod tests {
             reg.layouts["empty"].label, "Blank",
             "existing layout overridden"
         );
-        assert_eq!(reg.layouts.len(), 6);
+        // 17 built-ins (5 historical + 12 structural library) + the new
+        // `kanban` overlay; the `empty` override replaces in place.
+        assert_eq!(reg.layouts.len(), 18);
     }
 
     #[test]

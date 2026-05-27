@@ -24,6 +24,7 @@ pub(crate) mod dx_components;
 mod execute;
 mod generate;
 mod get_registry;
+pub(crate) mod layout_library;
 mod list_components;
 mod modify;
 mod plan;
