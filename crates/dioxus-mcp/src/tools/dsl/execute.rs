@@ -162,6 +162,15 @@ pub async fn execute_code(
         // (list/new/edit) so a browser client can preview a `resources:` slice
         // it can't reconstruct from the raw doc.
         plan.render_models = super::render_model::build_render_models(&doc, &registry.layouts);
+        // Surface the doc-level theme stylesheet in the dry-run, so a proposal
+        // review shows the generated themed CSS alongside the screens.
+        if let Some(theme_id) = &doc.theme
+            && let Some(css) = registry.themes.get(theme_id).and_then(theme_stylesheet)
+        {
+            let css_path = crate_root.join("assets/theme.css");
+            plan.previews.insert(css_path.clone(), css);
+            plan.would_create.push(css_path);
+        }
         return Ok(plan);
     }
 
@@ -598,6 +607,31 @@ pub async fn execute_code(
         merge(&mut result, r);
     }
 
+    // Doc-level theme: emit a token-driven stylesheet the scaffolded app mounts.
+    if let Some(theme_id) = &doc.theme {
+        let reg = state.registry();
+        match reg.themes.get(theme_id).and_then(theme_stylesheet) {
+            Some(css) => {
+                let assets = crate_root.join("assets");
+                std::fs::create_dir_all(&assets).map_err(|e| e.to_string())?;
+                let css_path = assets.join("theme.css");
+                let existed = css_path.exists();
+                std::fs::write(&css_path, css).map_err(|e| e.to_string())?;
+                if existed {
+                    result.files_modified.push(css_path);
+                } else {
+                    result.files_created.push(css_path);
+                }
+                result.next_steps.push(format!(
+                    "theme `{theme_id}`: mount the generated stylesheet in your App body — `document::Stylesheet {{ href: asset!(\"/assets/theme.css\") }}`"
+                ));
+            }
+            None => result.next_steps.push(format!(
+                "theme `{theme_id}` has no color tokens or isn't in the registry — no theme stylesheet emitted"
+            )),
+        }
+    }
+
     for m in &doc.modify {
         apply_modify(&crate_root, m, p.if_missing, &mut result)?;
     }
@@ -810,6 +844,36 @@ pub async fn execute_code(
     Ok(result)
 }
 
+/// Build a token-driven stylesheet for a doc-level `theme:` — a `:root` block of
+/// CSS vars from the theme's color tokens plus a small baseline that styles the
+/// common generated markup (body / .screen / table / inputs / buttons) through
+/// those vars. Switching the doc's theme changes only the values, so the
+/// scaffolded app recolors. `None` when the theme carries no color tokens.
+fn theme_stylesheet(theme: &dioxus_mcp_registry::ThemeDescriptor) -> Option<String> {
+    let c = &theme.tokens.color;
+    if c.is_empty() {
+        return None;
+    }
+    let v = |k: &str, d: &str| c.get(k).map(String::as_str).unwrap_or(d).to_string();
+    Some(format!(
+        ":root {{\n  --bg: {bg};\n  --panel: {panel};\n  --border: {border};\n  --text: {text};\n  --muted: {muted};\n  --accent: {accent};\n}}\n\
+         body {{ background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; margin: 0; }}\n\
+         .screen {{ max-width: 760px; margin: 2rem auto; padding: 0 1rem; }}\n\
+         table {{ width: 100%; border-collapse: collapse; }}\n\
+         th, td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }}\n\
+         th {{ color: var(--muted); }}\n\
+         input, textarea, select {{ background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }}\n\
+         button {{ background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 8px 14px; cursor: pointer; }}\n\
+         a {{ color: var(--accent); }}\n",
+        bg = v("bg", "#ffffff"),
+        panel = v("panel", "#f4f6fa"),
+        border = v("border", "#d4dae6"),
+        text = v("text", "#1a1d24"),
+        muted = v("muted", "#5a6172"),
+        accent = v("accent", "#2f6fe0"),
+    ))
+}
+
 /// True when the doc scaffolds enough that compile-time errors are plausible
 /// and a `cargo check` is worth surfacing. Used to gate the `cargo_check: true`
 /// discoverability hint — we don't want to nag callers for trivial one-primitive
@@ -873,5 +937,25 @@ fn append_todo_next_steps(result: &mut ScaffoldResult, crate_root: &Path) {
             hotspots.len()
         ));
         result.next_steps.extend(hotspots);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_stylesheet_emits_root_vars_and_baseline() {
+        let reg = crate::registry::builtin();
+        let css = theme_stylesheet(reg.themes.get("dark").unwrap())
+            .expect("dark theme has color tokens");
+        assert!(css.contains(":root"));
+        assert!(css.contains("--accent: #6aa9ff"), "tokens become CSS vars");
+        assert!(
+            css.contains("background: var(--bg)"),
+            "baseline rules reference the vars"
+        );
+        // A styling-family theme with no color tokens emits nothing.
+        assert!(theme_stylesheet(reg.themes.get("tailwind").unwrap()).is_none());
     }
 }
