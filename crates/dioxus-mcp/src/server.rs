@@ -419,7 +419,7 @@ impl DioxusMcp {
     // by `execute_code` internally to materialize each DSL primitive.
 
     #[tool(
-        description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, ClientStore, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for server-backed features. ClientStore + Screen `kind: client_crud` covers client-only in-memory state with no server fn round-trip."
+        description = "Call this BEFORE `execute_code` whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Returns the YAML DSL vocabulary used by `execute_code`. Pass `extensions: [\"crud\", \"realtime\", \"auth\"]` to include extra primitive groups; empty / omitted returns core only (Model, Store, ClientStore, Resource, Component, Screen, ServerFn). Each primitive lists its fields and a runnable example. The Resource primitive expands into a model+store+server-fn+screens slice in one entry — prefer it for server-backed features. ClientStore + Screen `kind: client_crud` covers client-only in-memory state with no server fn round-trip. For a non-CRUD screen the templates don't cover (markdown editor, dashboard, custom canvas), use Screen `kind: freeform` and write the rsx body in `template.body` — don't shoehorn it into `client_crud` (that yields a todo-shaped app)."
     )]
     async fn get_dsl_spec(
         &self,
@@ -499,7 +499,7 @@ impl DioxusMcp {
     }
 
     #[tool(
-        description = "Use this whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Materializes a file set from a single YAML DSL doc (see `get_dsl_spec`). Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, next_steps, and (when applicable) collisions. \
+        description = "Use this whenever the user asks to build, scaffold, add, or create anything in a Dioxus 0.7 project — a model, a screen, a server fn, a full CRUD slice, or a whole app. Materializes a file set from a single YAML DSL doc (see `get_dsl_spec`). For a non-CRUD UI the templates don't cover, use a Screen with `kind: freeform` and write the body in `template.body`. Pre-flights name collisions across the whole doc; rejects unknown fields, multi-document YAML, and missing cross-refs (List/Table → ServerFn, Feed → Socket). On success returns the merged ScaffoldResult with files_created, files_modified, next_steps, and (when applicable) collisions. \
 \
 Flags: pass `dry_run: true` to compute a plan (`would_create` / `would_modify`) without writing anything. Pass `if_missing: true` to skip primitives whose target leaf file already exists (reported in `collisions`) instead of erroring — makes re-runs during iteration safe."
     )]
@@ -675,9 +675,12 @@ impl ServerHandler for DioxusMcp {
                  - Scaffold STRUCTURED slices (model / store / server-fn-backed Resource / \
                    client_crud / whole-app skeleton): `get_dsl_spec` then `execute_code`. \
                    Use `Resource` for a full server-backed slice; `ClientStore` + \
-                   `kind: client_crud` for in-memory state. For one-off handwritten screens \
-                   or single-component edits, skip the DSL and write the file directly — \
-                   `execute_code` is for multi-file, cross-wired primitives, not ad-hoc UI.\n\
+                   `kind: client_crud` for in-memory state. For a non-CRUD screen the \
+                   templates don't cover (markdown editor, dashboard, canvas), use Screen \
+                   `kind: freeform` and author the body in `template.body` — you still get \
+                   the route / module / App wiring. For a single-component edit, skip the \
+                   DSL and write the file directly; `execute_code` is for multi-file, \
+                   cross-wired primitives.\n\
                  - UI primitive widgets (button / dialog / date-picker / drag-to-reorder / \
                    combobox / toast / etc.): BEFORE writing any handler code, \
                    `list_components` (or `suggest_components { prompt: \"...\" }` with the \

@@ -40,6 +40,37 @@ pub fn {{ pascal }}() -> Element {
 }
 "#;
 
+/// `kind: freeform` — the non-CRUD escape hatch. With `body` set, it's spliced
+/// verbatim as the full component body (setup statements + a trailing `rsx!`).
+/// Without `body`, a titled placeholder shell is emitted (honoring
+/// `wrap_pascal`/`root_class`). The body has `use dioxus::prelude::*;` in scope.
+pub(super) const FREEFORM_SCREEN_TPL: &str = r#"use dioxus::prelude::*;
+{%- if wrap_pascal %}
+use crate::components::{{ wrap_pascal }};
+{%- endif %}
+
+#[component]
+pub fn {{ pascal }}() -> Element {
+{%- if body %}
+    {{ body }}
+{%- else %}
+    rsx! {
+{%- if wrap_pascal %}
+        {{ wrap_pascal }} {
+            div { class: "{{ root_class }}",
+                h1 { "{{ pascal }}" }
+            }
+        }
+{%- else %}
+        div { class: "{{ root_class }}",
+            h1 { "{{ pascal }}" }
+        }
+{%- endif %}
+    }
+{%- endif %}
+}
+"#;
+
 pub(super) const FORM_TPL: &str = r#"use dioxus::prelude::*;
 {%- if needs_handler_import %}
 use crate::server::{{ handler }};

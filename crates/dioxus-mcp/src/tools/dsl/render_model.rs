@@ -10,11 +10,13 @@
 //!    node-walker can preview a layout the playground has no bespoke code for.
 //!
 //! Built-in `client_crud`/`empty` handwritten screens still get no model — the
-//! client renders those from its own local parse.
+//! client renders those from its own local parse. `freeform` is the exception:
+//! its inline RSX body can't be rendered in wasm, so it gets a static shell
+//! model (a titled placeholder + hint) to stay visible in the navigator.
 
 use std::collections::BTreeMap;
 
-use dioxus_mcp_registry::{LayoutDescriptor, PreviewSkeleton, RenderNode, Slot};
+use dioxus_mcp_registry::{Behavior, LayoutDescriptor, PreviewSkeleton, RenderNode, Slot};
 use heck::{ToSnakeCase, ToTitleCase};
 
 use super::generate::is_builtin_layout_kind;
@@ -78,6 +80,44 @@ pub(super) fn build_render_models(
                 _ => {}
             }
             models.push(model);
+            continue;
+        }
+
+        // Freeform: the inline RSX body can't be rendered in the wasm preview,
+        // so emit a static shell model — the screen still appears in the
+        // navigator and renders a titled placeholder + a "see source" hint
+        // rather than being absent or flagged unsupported.
+        if template.kind == "freeform" {
+            let fclass = template.class.clone().unwrap_or_else(|| root_class.clone());
+            models.push(RenderModel {
+                screen: screen.name.clone(),
+                kind: "freeform".into(),
+                layout: "freeform".into(),
+                route: screen.route.clone(),
+                item_type: template.item_type.clone().unwrap_or_default(),
+                root_class: Some(fclass),
+                theme: doc.theme.clone(),
+                nodes: vec![
+                    RenderNode::Element {
+                        tag: "h1".into(),
+                        class: None,
+                        attrs: Default::default(),
+                        children: vec![RenderNode::Text {
+                            text: screen.name.clone(),
+                        }],
+                    },
+                    RenderNode::Element {
+                        tag: "p".into(),
+                        class: Some("preview-hint".into()),
+                        attrs: Default::default(),
+                        children: vec![RenderNode::Text {
+                            text: "freeform screen — see the generated source / Compiled tab".into(),
+                        }],
+                    },
+                ],
+                behavior: Some(Behavior::Static),
+                ..Default::default()
+            });
             continue;
         }
 
@@ -259,6 +299,53 @@ resources:
             .expect("a resource_form render model");
         assert!(!form.fields.is_empty());
         assert!(form.fields.iter().all(|f| f.name != "id"));
+    }
+
+    #[test]
+    fn emits_static_shell_for_a_freeform_screen() {
+        let doc: DslDoc = serde_yml::from_str(
+            r#"version: "1"
+screens:
+  - name: MarkdownEditor
+    route: /editor
+    template:
+      kind: freeform
+      body: |
+        rsx! { div { "hi" } }
+"#,
+        )
+        .unwrap();
+
+        let models = build_render_models(&doc, &BTreeMap::new());
+        let m = models
+            .iter()
+            .find(|m| m.screen == "MarkdownEditor")
+            .expect("a freeform render model");
+        assert_eq!(m.kind, "freeform");
+        assert_eq!(m.layout, "freeform");
+        assert_eq!(m.behavior, Some(Behavior::Static));
+        assert_eq!(m.route, "/editor");
+        assert_eq!(m.root_class.as_deref(), Some("screen markdown_editor"));
+        // A titled shell: h1 with the screen name + a hint paragraph. The inline
+        // rsx body is deliberately NOT rendered (can't be, in wasm).
+        assert!(
+            matches!(
+                &m.nodes[0],
+                RenderNode::Element { tag, children, .. }
+                    if tag == "h1"
+                    && matches!(&children[0], RenderNode::Text { text } if text == "MarkdownEditor")
+            ),
+            "first node should be the titled h1, got {:?}",
+            m.nodes
+        );
+        assert!(
+            m.nodes.iter().any(|n| matches!(
+                n,
+                RenderNode::Element { class: Some(c), .. } if c == "preview-hint"
+            )),
+            "expected a preview-hint node, got {:?}",
+            m.nodes
+        );
     }
 
     #[test]
