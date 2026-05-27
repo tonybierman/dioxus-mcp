@@ -98,7 +98,18 @@ pub fn build_groups(screens: &[Screen], models: &[RenderModel]) -> Vec<PreviewGr
         by_key.entry(key).or_default().push(entry);
     };
 
+    // A screen may appear in BOTH sources: a handwritten runtime-layout screen
+    // is parsed locally AND gets a server `RenderModel` (with generic nodes).
+    // The server model wins — it carries the resolved preview — so skip the
+    // local entry to avoid a duplicate rail item. Built-in handwritten screens
+    // get no model, so they're unaffected.
+    let model_ids: std::collections::HashSet<&str> =
+        models.iter().map(|m| m.screen.as_str()).collect();
+
     for s in screens {
+        if model_ids.contains(s.name.as_str()) {
+            continue;
+        }
         // Mirror ScreenPreview's dispatch: a screen with no template is "empty".
         let kind = s
             .template
@@ -353,5 +364,21 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].heading, "Todo");
         assert_eq!(groups[1].heading, "Product");
+    }
+
+    #[test]
+    fn server_model_wins_when_a_screen_appears_in_both_sources() {
+        // A runtime-layout screen is parsed locally AND has a server model of
+        // the same name. It should appear once, as the Model (resolved nodes).
+        let screens = vec![screen("Callout", "/callout", "callout", Some("Note"))];
+        let models = vec![model("Callout", "callout", "Note", "/callout")];
+        let groups = build_groups(&screens, &models);
+
+        let entries: Vec<&PreviewEntry> = groups.iter().flat_map(|g| g.entries.iter()).collect();
+        assert_eq!(entries.len(), 1, "deduped to a single entry");
+        assert!(
+            matches!(entries[0].item, PreviewItem::Model(_)),
+            "the server model should win over the local parse"
+        );
     }
 }

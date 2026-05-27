@@ -5,6 +5,7 @@
 //! inputs from the resolved fields.
 
 use dioxus::prelude::*;
+use dioxus_mcp_registry::RenderNode;
 
 use super::{input_type, PreviewNav};
 use crate::model::{RenderField, RenderModel};
@@ -14,8 +15,78 @@ pub fn RenderModelView(model: RenderModel) -> Element {
     match model.kind.as_str() {
         "resource_list" => rsx! { ResourceListModel { model } },
         "resource_form" | "resource_edit_form" => rsx! { ResourceFormModel { model } },
-        other => rsx! { div { class: "preview-unknown", "render model kind: {other}" } },
+        // Runtime layouts (registry-defined, no bespoke component) arrive with a
+        // server-instantiated generic node tree. Render it directly. Built-in
+        // kinds never carry `nodes`, so this only fires for runtime layouts.
+        other => {
+            if model.nodes.is_empty() {
+                rsx! { div { class: "preview-unknown", "render model kind: {other}" } }
+            } else {
+                let class = model.root_class.clone().unwrap_or_else(|| "screen".into());
+                let html = nodes_to_html(&model.nodes);
+                rsx! { div { class: "{class}", dangerous_inner_html: "{html}" } }
+            }
+        }
     }
+}
+
+/// Serialize a generic preview node tree to an HTML string. We go through
+/// `dangerous_inner_html` because Dioxus rsx! can't take a dynamic element tag,
+/// and a runtime-layout preview is approximate/static — interactivity isn't
+/// expected here (the `Compiled` tab is the real thing).
+fn nodes_to_html(nodes: &[RenderNode]) -> String {
+    let mut s = String::new();
+    for n in nodes {
+        node_html(n, &mut s);
+    }
+    s
+}
+
+fn node_html(node: &RenderNode, out: &mut String) {
+    match node {
+        RenderNode::Text { text } => out.push_str(&escape_text(text)),
+        RenderNode::Element {
+            tag,
+            class,
+            attrs,
+            children,
+        } => {
+            out.push('<');
+            out.push_str(tag);
+            if let Some(c) = class {
+                out.push_str(" class=\"");
+                out.push_str(&escape_attr(c));
+                out.push('"');
+            }
+            for (k, v) in attrs {
+                out.push(' ');
+                out.push_str(k);
+                out.push_str("=\"");
+                out.push_str(&escape_attr(v));
+                out.push('"');
+            }
+            out.push('>');
+            for c in children {
+                node_html(c, out);
+            }
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+        }
+        // Live, behavior-driven content (e.g. a client_crud list). Static
+        // preview placeholder for now — a fuller behavior port is follow-up.
+        RenderNode::Slot { .. } => {
+            out.push_str("<p class=\"preview-hint\">live content — compile to see</p>")
+        }
+    }
+}
+
+fn escape_text(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn escape_attr(s: &str) -> String {
+    escape_text(s).replace('"', "&quot;")
 }
 
 #[component]

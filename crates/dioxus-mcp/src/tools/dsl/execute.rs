@@ -156,7 +156,8 @@ pub async fn execute_code(
         // Structured render models for the server-synthesized resource screens
         // (list/new/edit) so a browser client can preview a `resources:` slice
         // it can't reconstruct from the raw doc.
-        plan.render_models = super::render_model::build_render_models(&doc);
+        plan.render_models =
+            super::render_model::build_render_models(&doc, &state.registry.layouts);
         return Ok(plan);
     }
 
