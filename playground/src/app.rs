@@ -147,7 +147,12 @@ pub fn Playground() -> Element {
                             div { class: "pg-parse-banner", "YAML: {e}" }
                         }
                         if !preview_decls().is_empty() {
-                            document::Style { ".preview-root {{ {preview_decls} }}" }
+                            // A plain <style>, not document::Style: the hoisted
+                            // head variant injects once in use_hook and ignores
+                            // later prop changes, so switching themes was a no-op
+                            // after the first pick. A normal element re-renders
+                            // its text reactively (and is removed on unmount).
+                            style { ".preview-root {{ {preview_decls} }}" }
                         }
                         PreviewThemePicker { reg: reg_ctx, selected: preview_theme, doc_theme: last_good().theme }
                         ScreenNavigator { groups }
@@ -301,7 +306,10 @@ pub fn Cockpit() -> Element {
 
     rsx! {
         if !theme_css().is_empty() {
-            document::Style { "{theme_css}" }
+            // Plain <style>, not document::Style: same reason as the preview
+            // theme — the chrome theme picker must re-apply on every change,
+            // and the hoisted variant freezes after the first mount.
+            style { "{theme_css}" }
         }
         nav { class: "pg-modebar",
             button {
@@ -548,7 +556,10 @@ fn ProposalsInbox() -> Element {
                     }
                     h3 { class: "pg-subhead", "Preview of your edited DSL" }
                     if !preview_decls().is_empty() {
-                        document::Style { ".preview-root {{ {preview_decls} }}" }
+                        // Plain <style>, not document::Style — see the Author
+                        // pane's note: the hoisted variant won't update on a
+                        // theme change after first mount.
+                        style { ".preview-root {{ {preview_decls} }}" }
                     }
                     PreviewThemePicker { reg: reg_ctx, selected: preview_theme, doc_theme: doc_theme() }
                     ScreenNavigator { groups: inbox_groups }
