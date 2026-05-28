@@ -126,10 +126,12 @@ fn builtin_components() -> BTreeMap<String, ComponentDescriptor> {
         .collect()
 }
 
-/// The 5 built-in layout kinds. In v1 the resource/crud kinds stay `complex`
-/// (they keep their Rust sub-renderers); `empty` is the only purely
-/// template-driven one. `label`/`nav_rank` mirror the navigator's current
-/// hardcoded `label_for`/`kind_rank`. Preview skeletons are filled in Phase 6.
+/// The built-in layout kinds. The resource/crud kinds stay `complex` (they keep
+/// their Rust sub-renderers); `empty` is purely template-driven. `label`/
+/// `nav_rank` mirror the navigator's current hardcoded `label_for`/`kind_rank`.
+/// On top of these, the structural [`layout_library`](crate::tools::dsl::layout_library)
+/// (holy-grail, bento, split-screen, …) is seeded as `complex: false`
+/// template-driven layouts so every project can scaffold a structural screen.
 fn builtin_layouts() -> BTreeMap<String, LayoutDescriptor> {
     fn layout(id: &str, label: &str, nav_rank: u8, complex: bool) -> LayoutDescriptor {
         LayoutDescriptor {
@@ -152,6 +154,7 @@ fn builtin_layouts() -> BTreeMap<String, LayoutDescriptor> {
         layout("empty", "", 3, false),
     ]
     .into_iter()
+    .chain(crate::tools::dsl::layout_library::library_layouts())
     .map(|l| (l.id.clone(), l))
     .collect()
 }
@@ -209,6 +212,115 @@ fn builtin_themes() -> BTreeMap<String, ThemeDescriptor> {
                 ("code", "#eef1f6"),
             ]),
         ),
+        // Palettes imported from the dx_standup project's board themes (its
+        // `[data-board-theme="…"]` token blocks). All dark; mapped onto the
+        // cockpit's color keys: surface→panel, text-muted→muted, bg-subtle→code.
+        // error has no dx_standup source token, so a shared red is used.
+        theme(
+            "sunny-oasis",
+            "Sunny Oasis",
+            "unstyled",
+            colors(&[
+                ("bg", "#1a1410"),
+                ("panel", "#3d2e1f"),
+                ("border", "#4a3826"),
+                ("text", "#fbe9c8"),
+                ("muted", "#c9a472"),
+                ("accent", "#f59e0b"),
+                ("error", "#f87171"),
+                ("code", "#2d2218"),
+            ]),
+        ),
+        theme(
+            "deep-forest",
+            "Deep Forest",
+            "unstyled",
+            colors(&[
+                ("bg", "#0c1410"),
+                ("panel", "#23402f"),
+                ("border", "#2c4a3a"),
+                ("text", "#d9ecd8"),
+                ("muted", "#88b39a"),
+                ("accent", "#34d399"),
+                ("error", "#f87171"),
+                ("code", "#162a20"),
+            ]),
+        ),
+        theme(
+            "midnight-plum",
+            "Midnight Plum",
+            "unstyled",
+            colors(&[
+                ("bg", "#140e1c"),
+                ("panel", "#36284a"),
+                ("border", "#3f2c5a"),
+                ("text", "#ece4f5"),
+                ("muted", "#b69bd3"),
+                ("accent", "#a855f7"),
+                ("error", "#f87171"),
+                ("code", "#221833"),
+            ]),
+        ),
+        theme(
+            "arctic-frost",
+            "Arctic Frost",
+            "unstyled",
+            colors(&[
+                ("bg", "#0e151c"),
+                ("panel", "#2c3d52"),
+                ("border", "#324559"),
+                ("text", "#e2eef8"),
+                ("muted", "#97b3cd"),
+                ("accent", "#38bdf8"),
+                ("error", "#f87171"),
+                ("code", "#1c2836"),
+            ]),
+        ),
+        theme(
+            "ember-glow",
+            "Ember Glow",
+            "unstyled",
+            colors(&[
+                ("bg", "#1a100d"),
+                ("panel", "#422820"),
+                ("border", "#50332a"),
+                ("text", "#fbe2d6"),
+                ("muted", "#d39e89"),
+                ("accent", "#f97316"),
+                ("error", "#f87171"),
+                ("code", "#2e1c17"),
+            ]),
+        ),
+        theme(
+            "sandstone",
+            "Sandstone",
+            "unstyled",
+            colors(&[
+                ("bg", "#1a1612"),
+                ("panel", "#40392c"),
+                ("border", "#4b4131"),
+                ("text", "#f0e6d2"),
+                ("muted", "#b6a785"),
+                ("accent", "#d6a25e"),
+                ("error", "#f87171"),
+                ("code", "#2c261d"),
+            ]),
+        ),
+        theme(
+            "ocean-depths",
+            "Ocean Depths",
+            "unstyled",
+            colors(&[
+                ("bg", "#0a141a"),
+                ("panel", "#224252"),
+                ("border", "#265063"),
+                ("text", "#d8eef3"),
+                ("muted", "#84b6c4"),
+                ("accent", "#14b8a6"),
+                ("error", "#f87171"),
+                ("code", "#142934"),
+            ]),
+        ),
         theme("tailwind", "Tailwind", "tailwind", ThemeTokens::default()),
         theme(
             "vanilla-css",
@@ -233,10 +345,15 @@ mod tests {
             reg.components.len(),
             crate::tools::dsl::dx_components::DX_COMPONENT_CATALOG_ENTRIES.len()
         );
-        assert_eq!(reg.layouts.len(), 5);
-        assert_eq!(reg.themes.len(), 4);
+        // 5 historical kinds + the 12 structural library layouts.
+        assert_eq!(reg.layouts.len(), 17);
+        // dark, light, tailwind, vanilla-css + 7 imported dx_standup palettes.
+        assert_eq!(reg.themes.len(), 11);
         assert!(reg.layouts.contains_key("resource_list"));
+        assert!(reg.layouts.contains_key("holy_grail"));
+        assert!(reg.layouts.contains_key("drawer"));
         assert!(reg.themes.contains_key("dark"));
+        assert!(reg.themes.contains_key("ocean-depths"));
         assert!(reg.components.contains_key("button"));
     }
 
@@ -264,7 +381,9 @@ mod tests {
             reg.layouts["empty"].label, "Blank",
             "existing layout overridden"
         );
-        assert_eq!(reg.layouts.len(), 6);
+        // 17 built-ins (5 historical + 12 structural library) + the new
+        // `kanban` overlay; the `empty` override replaces in place.
+        assert_eq!(reg.layouts.len(), 18);
     }
 
     #[test]

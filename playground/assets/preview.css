@@ -268,3 +268,120 @@
     box-sizing: border-box;
     overflow-y: auto;
 }
+
+/* ---------------------------------------------------------------------------
+ * Structural layout skeletons (registry layout library: holy_grail, masonry,
+ * bento_grid, …). The navigator renders each layout's coarse box model — the
+ * semantic hook classes below with labeled filler regions. Without these rules
+ * the boxes just stack and read as "col col col"; here we arrange each into its
+ * characteristic shape so the Approximate tab is recognizable as the layout.
+ * Wireframe-grade by design, not the real markup — the Compiled tab is faithful.
+ * ------------------------------------------------------------------------- */
+
+/* These are full-page layouts; drop the CRUD card's 480px width clamp. */
+.preview-root .screen:has(> .holy-grail),
+.preview-root .screen:has(> .bento),
+.preview-root .screen:has(> .masonry),
+.preview-root .screen:has(> .full-bleed),
+.preview-root .screen:has(> .sticky-sidebar),
+.preview-root .screen:has(> .mega-menu),
+.preview-root .screen:has(> .drawer),
+.preview-root .screen:has(> .card-grid),
+.preview-root .screen:has(> .editorial),
+.preview-root .screen:has(> .hero-scroll),
+.preview-root .screen:has(> .split-screen),
+.preview-root .screen:has(> .scroll-sticky) {
+    max-width: none;
+}
+
+/* Shared filler-region look. Colors blend the active preview theme's text into
+ * its background via color-mix, so a region reads on both light and dark themes
+ * without hard-coding a palette. */
+.preview-root .hg-header, .preview-root .hg-nav, .preview-root .hg-main, .preview-root .hg-aside, .preview-root .hg-footer,
+.preview-root .bento-feature, .preview-root .bento-tile, .preview-root .bento-wide,
+.preview-root .masonry-col,
+.preview-root .fb-hero, .preview-root .fb-body,
+.preview-root .ss-nav, .preview-root .ss-main,
+.preview-root .mm-bar, .preview-root .mm-col, .preview-root .mm-main,
+.preview-root .drawer-header, .preview-root .drawer-panel, .preview-root .drawer-main,
+.preview-root .card,
+.preview-root .ed-headline, .preview-root .ed-copy, .preview-root .ed-quote,
+.preview-root .hs-hero, .preview-root .hs-body,
+.preview-root .split-left, .preview-root .split-right,
+.preview-root .sticky-steps, .preview-root .sticky-visual {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 12px;
+    box-sizing: border-box;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--p-text, #1a1d24) 6%, var(--p-bg, #ffffff));
+    border: 1px solid color-mix(in srgb, var(--p-text, #1a1d24) 16%, var(--p-bg, #ffffff));
+    color: color-mix(in srgb, var(--p-text, #1a1d24) 55%, var(--p-bg, #ffffff));
+    font-size: 11px;
+    letter-spacing: 0.02em;
+}
+
+/* Holy Grail: header / (nav · main · aside) / footer. */
+.preview-root .holy-grail { display: grid; gap: 8px; }
+.preview-root .hg-body { display: grid; gap: 8px; grid-template-columns: 80px 1fr 100px; }
+.preview-root .hg-main { min-height: 120px; }
+
+/* Bento: a feature tile spanning 2×2, two unit tiles, one wide tile. */
+.preview-root .bento { display: grid; gap: 8px; grid-template-columns: repeat(4, 1fr); grid-auto-rows: 56px; }
+.preview-root .bento-feature { grid-column: span 2; grid-row: span 2; }
+.preview-root .bento-wide { grid-column: span 2; }
+
+/* Masonry: side-by-side columns of uneven height. */
+.preview-root .masonry { display: grid; gap: 8px; grid-template-columns: repeat(3, 1fr); align-items: start; }
+.preview-root .masonry-col:nth-child(1) { min-height: 90px; }
+.preview-root .masonry-col:nth-child(2) { min-height: 60px; }
+.preview-root .masonry-col:nth-child(3) { min-height: 120px; }
+
+/* Full-bleed: tall hero over a body band. */
+.preview-root .full-bleed { display: flex; flex-direction: column; gap: 8px; }
+.preview-root .fb-hero { min-height: 110px; }
+
+/* Sticky sidebar: narrow rail + main column. */
+.preview-root .sticky-sidebar { display: grid; gap: 8px; grid-template-columns: 100px 1fr; }
+.preview-root .ss-main { min-height: 140px; }
+
+/* Mega menu: top bar, a dropped panel of columns, then the page body. */
+.preview-root .mega-menu { display: flex; flex-direction: column; gap: 8px; }
+.preview-root .mm-bar { min-height: 28px; }
+.preview-root .mm-panel { display: grid; gap: 8px; grid-template-columns: repeat(2, 1fr); }
+.preview-root .mm-main { min-height: 100px; }
+
+/* Drawer: full-width header, then a side panel beside the main column. */
+.preview-root .drawer {
+    display: grid; gap: 8px; grid-template-columns: 90px 1fr;
+    grid-template-areas: "header header" "panel main";
+}
+.preview-root .drawer-header { grid-area: header; min-height: 28px; }
+.preview-root .drawer-panel { grid-area: panel; min-height: 120px; }
+.preview-root .drawer-main { grid-area: main; min-height: 120px; }
+
+/* Card grid: equal cards in a responsive-ish row. */
+.preview-root .card-grid { display: grid; gap: 8px; grid-template-columns: repeat(3, 1fr); }
+.preview-root .card { min-height: 70px; }
+
+/* Editorial: headline over a wide copy column with a narrow pull-quote rail. */
+.preview-root .editorial { display: flex; flex-direction: column; gap: 8px; }
+.preview-root .ed-headline { min-height: 44px; font-size: 13px; }
+.preview-root .ed-body { display: grid; gap: 8px; grid-template-columns: 2fr 1fr; }
+.preview-root .ed-copy { min-height: 120px; }
+
+/* Hero scroll: hero above the fold, body below. */
+.preview-root .hero-scroll { display: flex; flex-direction: column; gap: 8px; }
+.preview-root .hs-hero { min-height: 110px; }
+.preview-root .hs-body { min-height: 80px; }
+
+/* Split screen: two equal panes. */
+.preview-root .split-screen { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+.preview-root .split-left, .preview-root .split-right { min-height: 140px; }
+
+/* Scroll-sticky: scrolling steps beside a pinned visual. */
+.preview-root .scroll-sticky { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; align-items: start; }
+.preview-root .sticky-steps { min-height: 160px; }
+.preview-root .sticky-visual { min-height: 100px; position: sticky; top: 8px; }
