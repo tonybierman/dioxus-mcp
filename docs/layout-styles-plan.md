@@ -65,11 +65,28 @@ redundant global `~/.config/dioxus-mcp/registry/layouts/admin_console.toml` was
 removed so the in-repo definition is the single source of truth (a same-id
 global overlay would otherwise shadow the built-in).
 
+### D — make the whole structural library self-contained
+Following on from B, all twelve remaining library shells (holy_grail, bento,
+masonry, full_bleed, sticky_sidebar, mega_menu, drawer, card_grid, editorial,
+hero_scroll, split_screen, scroll_sticky) were converted from Tailwind-utility
+markup to semantic class names + carried, responsive CSS — so the entire library
+is now toolchain-independent and no layout declares `requires`. Each sheet is
+mobile-first with a 48rem breakpoint (card_grid also steps at 40/64rem;
+`drawer` is intentionally breakpoint-free since an off-canvas overlay is the same
+at every size). The sheets share a documented neutral token vocabulary
+(`--border`, `--surface`, `--surface-sunken`, `--text`, `--text-strong`,
+`--text-muted`, `--accent`, `--invert-bg`, `--invert-text`, `--invert-muted`) read
+via `var(--token, <fallback>)`. The `descriptor()` helper now takes the CSS and
+sets `styles: Some(..)`, `requires: None` for every layout.
+
 ## Tests
 - `registry.rs::project_overlay_adds_and_overrides_by_id` — a `styles`-bearing
   overlay descriptor survives the TOML parse with `requires == None`.
-- `layout_library.rs::every_library_layout_declares_its_tailwind_dependency` —
-  built-ins declare `requires = tailwind` and carry no `styles`.
+- `layout_library.rs::every_library_layout_is_self_contained` — every built-in
+  carries non-empty `styles`, declares no `requires`, and (except `drawer`) is
+  responsive (`@media`).
+- `layout_library.rs::every_library_layout_renders_a_valid_component` — all 13
+  templates render to valid component bodies.
 - `tests/client_crud.rs::registry_layout_with_styles_emits_sibling_stylesheet` —
   end-to-end: a registry layout with `styles` writes `assets/{snake}.css` with
   the structural rules and surfaces the mount hint.
