@@ -39,6 +39,22 @@ pub struct LayoutDescriptor {
     /// `template` (crud table, edit form, client_crud body builder).
     #[serde(default)]
     pub complex: bool,
+    /// Raw CSS the layout's markup depends on, written alongside the screen as
+    /// `assets/{snake}.css` on scaffold. This is what makes a layout
+    /// *structurally reproducible* in any project: a layout that styles via
+    /// semantic class names (rather than Tailwind utilities) carries the rules
+    /// that define those classes here, so the structure survives regardless of
+    /// the target project's CSS toolchain. Empty for utility-class layouts that
+    /// declare `requires` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub styles: Option<String>,
+    /// The styling family the layout's markup needs to *look* structural when it
+    /// ships no `styles` of its own (`tailwind` | `vanilla_css`). A hint, not a
+    /// gate: scaffold surfaces it as an advisory so a utility-class layout
+    /// dropped into a project without that toolchain fails loudly instead of
+    /// rendering as unstyled divs. `None` means self-contained (see `styles`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<String>,
     /// Documentation of the context variables `template`/sub-renderer expects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_vars: Vec<String>,

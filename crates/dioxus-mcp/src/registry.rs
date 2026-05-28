@@ -142,6 +142,7 @@ fn builtin_layouts() -> BTreeMap<String, LayoutDescriptor> {
             complex,
             context_vars: Vec::new(),
             preview: PreviewSkeleton::default(),
+            ..Default::default()
         }
     }
     [
@@ -345,13 +346,23 @@ mod tests {
             reg.components.len(),
             crate::tools::dsl::dx_components::DX_COMPONENT_CATALOG_ENTRIES.len()
         );
-        // 5 historical kinds + the 12 structural library layouts.
-        assert_eq!(reg.layouts.len(), 17);
+        // 5 historical kinds + the 13 structural library layouts.
+        assert_eq!(reg.layouts.len(), 18);
         // dark, light, tailwind, vanilla-css + 7 imported dx_standup palettes.
         assert_eq!(reg.themes.len(), 11);
         assert!(reg.layouts.contains_key("resource_list"));
         assert!(reg.layouts.contains_key("holy_grail"));
         assert!(reg.layouts.contains_key("drawer"));
+        // The self-contained admin console ships its CSS with the binary.
+        assert_eq!(
+            reg.layouts["admin_console"]
+                .styles
+                .as_deref()
+                .map(str::is_empty),
+            Some(false),
+            "admin_console must carry its structural CSS as a built-in"
+        );
+        assert_eq!(reg.layouts["admin_console"].requires, None);
         assert!(reg.themes.contains_key("dark"));
         assert!(reg.themes.contains_key("ocean-depths"));
         assert!(reg.components.contains_key("button"));
@@ -372,18 +383,35 @@ mod tests {
             "id = \"empty\"\nlabel = \"Blank\"\n",
         )
         .unwrap();
+        // A self-contained layout: its structural CSS rides along in `styles`
+        // and must survive the TOML overlay parse, so the structure travels
+        // with the descriptor into any project.
+        std::fs::write(
+            layouts.join("panel.toml"),
+            "id = \"panel\"\nnav_rank = 30\ncomplex = false\nstyles = \".panel { display: grid; }\"\n",
+        )
+        .unwrap();
 
         let mut reg = builtin();
         overlay_dir(&mut reg, dir.path());
 
         assert!(reg.layouts.contains_key("kanban"), "new layout added");
         assert_eq!(
+            reg.layouts["panel"].styles.as_deref(),
+            Some(".panel { display: grid; }"),
+            "a layout's carried CSS must survive the overlay parse"
+        );
+        assert_eq!(
+            reg.layouts["panel"].requires, None,
+            "a self-contained layout declares no toolchain dependency"
+        );
+        assert_eq!(
             reg.layouts["empty"].label, "Blank",
             "existing layout overridden"
         );
-        // 17 built-ins (5 historical + 12 structural library) + the new
-        // `kanban` overlay; the `empty` override replaces in place.
-        assert_eq!(reg.layouts.len(), 18);
+        // 18 built-ins (5 historical + 13 structural library) + the `kanban`
+        // and `panel` overlays; the `empty` override replaces in place.
+        assert_eq!(reg.layouts.len(), 20);
     }
 
     #[test]

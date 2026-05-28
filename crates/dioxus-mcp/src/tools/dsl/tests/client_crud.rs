@@ -757,6 +757,103 @@ screens:
     );
 }
 
+#[tokio::test]
+async fn registry_layout_with_styles_emits_sibling_stylesheet() {
+    // A `complex: false` registry layout that carries its own CSS in `styles`
+    // ships that CSS as `assets/{snake}.css` on scaffold, so the structure
+    // reproduces without any Tailwind toolchain. Mirrors the `vanilla-css`
+    // starter path.
+    use crate::tools::dsl::ExecuteCodeParams;
+    use crate::tools::dsl::execute_code;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        cargo_toml_with_fullstack("registry_layout_styles_test"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "use dioxus::prelude::*;\n\nfn main() {}\n",
+    )
+    .unwrap();
+
+    // Drop a self-contained layout into the project's persistent overlay; the
+    // registry hot-reloads from disk on the next `state.registry()` call.
+    let layouts = root.join(".dioxus-mcp/registry/layouts");
+    std::fs::create_dir_all(&layouts).unwrap();
+    std::fs::write(
+        layouts.join("panel.toml"),
+        r#"id = "panel"
+label = "Panel"
+nav_rank = 30
+complex = false
+template = '''
+use dioxus::prelude::*;
+
+#[component]
+pub fn {{ pascal }}() -> Element {
+    rsx! {
+        div { class: "{{ root_class }} panel", "{{ pascal }}" }
+    }
+}
+'''
+styles = '''
+.panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1.5rem;
+}
+'''
+"#,
+    )
+    .unwrap();
+
+    let state = std::sync::Arc::new(State::new(root.to_path_buf()).unwrap());
+    let r = execute_code(
+        &state,
+        ExecuteCodeParams {
+            code: r#"version: "1"
+screens:
+  - name: Console
+    route: /console
+    template:
+      kind: panel
+"#
+            .into(),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            if_missing: false,
+            dry_run: false,
+            cargo_check: false,
+            format_after: false,
+        },
+    )
+    .await
+    .expect("registry layout scaffold should succeed");
+
+    let css = root.join("assets/console.css");
+    assert!(
+        css.exists(),
+        "layout `styles` must be written to assets/{{snake}}.css"
+    );
+    assert!(
+        r.files_created.iter().any(|p| p == &css),
+        "files_created must include the layout CSS path: {:?}",
+        r.files_created
+    );
+    let body = std::fs::read_to_string(&css).unwrap();
+    assert!(
+        body.contains(".panel") && body.contains("display: grid"),
+        "the emitted sheet must carry the layout's structural rules:\n{body}"
+    );
+    assert!(
+        r.next_steps.iter().any(|s| s.contains("console.css")),
+        "missing stylesheet mount hint in next_steps: {:?}",
+        r.next_steps
+    );
+}
+
 #[test]
 fn client_crud_styled_rejects_unknown_value() {
     let cs = DslClientStore {

@@ -180,6 +180,41 @@ pub(crate) async fn generate_screen(
              (file at `assets/{snake}.css`)"
         ));
     }
+    // A registry layout can carry the CSS its markup depends on (`styles`), so
+    // it reproduces structurally in *any* project regardless of toolchain. Emit
+    // it as a sibling sheet, mirroring the `vanilla-css` path (skip-if-exists,
+    // never overwrite). If the layout ships no styles but declares a `requires`
+    // toolchain hint, surface it as an advisory so a utility-class layout in a
+    // project without that toolchain fails loudly instead of as unstyled divs.
+    if let Some(t) = sc.template.as_ref()
+        && let Some(layout) = registry.layouts.get(&t.kind)
+    {
+        match (&layout.styles, &layout.requires) {
+            (Some(styles), _) if !styles.trim().is_empty() => {
+                let css_dir = crate_root.join("assets");
+                let css_path = css_dir.join(format!("{snake}.css"));
+                if !css_path.exists() {
+                    std::fs::create_dir_all(&css_dir).map_err(|e| e.to_string())?;
+                    std::fs::write(&css_path, styles).map_err(|e| e.to_string())?;
+                    r.files_created.push(css_path.clone());
+                }
+                r.next_steps.push(format!(
+                    "this layout ships its own structural CSS — mount it in your App body: \
+                     `document::Stylesheet {{ href: asset!(\"/assets/{snake}.css\") }}` \
+                     (file at `assets/{snake}.css`)"
+                ));
+            }
+            (_, Some(requires)) => {
+                r.next_steps.push(format!(
+                    "layout `{}` styles via `{requires}` utility classes and ships no CSS of its \
+                     own — make sure this project has a working `{requires}` setup whose content \
+                     scan reaches `src/components/{snake}.rs`, or the screen renders unstyled",
+                    t.kind
+                ));
+            }
+            _ => {}
+        }
+    }
     let route = scaffold::create_route(
         state,
         CreateRouteParams {
@@ -260,6 +295,8 @@ mod tests {
             nav_rank: 9,
             template: Some("// {{ pascal }} banner for {{ item_type }}".into()),
             complex: false,
+            styles: None,
+            requires: None,
             context_vars: vec![],
             preview: Default::default(),
         };
@@ -297,6 +334,8 @@ mod tests {
             nav_rank: 9,
             template: None,
             complex: true,
+            styles: None,
+            requires: None,
             context_vars: vec![],
             preview: Default::default(),
         };

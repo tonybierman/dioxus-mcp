@@ -393,6 +393,197 @@ pub fn {{ pascal }}() -> Element {
 "#;
 
 // ---------------------------------------------------------------------------
+// `admin_console` is the library's *self-contained* layout: unlike the twelve
+// Tailwind-utility shells above, it styles via semantic class names and carries
+// the CSS that defines them in `ADMIN_CONSOLE_CSS`, emitted alongside the screen
+// as `assets/{snake}.css` on scaffold. That makes it structurally reproducible
+// in any project regardless of CSS toolchain — the reference example of a
+// `styles`-bearing layout (`requires: None`). Responsive: a slide-in drawer on
+// phones that becomes a sticky sidebar column from the 48rem breakpoint up, with
+// in-page section state (single route, active-nav highlighting, pane swaps).
+// ---------------------------------------------------------------------------
+
+const ADMIN_CONSOLE_TPL: &str = r#"use dioxus::prelude::*;
+{%- if wrap_pascal %}
+use crate::components::{{ wrap_pascal }};
+{%- endif %}
+
+#[component]
+pub fn {{ pascal }}() -> Element {
+    // `open` toggles the mobile drawer; `section` is the selected pane. The
+    // `@media (min-width: 48rem)` rules in the stylesheet win at desktop, so the
+    // sidebar is always a sticky column there regardless of `open` (the drawer
+    // transform only bites on phones).
+    let mut open = use_signal(|| false);
+    let mut section = use_signal(|| 0usize);
+    let nav = ["Overview", "Details", "Settings"];
+    rsx! {
+{%- if wrap_pascal %}
+        {{ wrap_pascal }} {
+{%- endif %}
+        div { class: "{{ root_class }} admin-layout",
+            button {
+                class: "admin-hamburger",
+                onclick: move |_| open.set(!open()),
+                "\u{2630} Menu"
+            }
+            if open() {
+                div { class: "admin-scrim", onclick: move |_| open.set(false) }
+            }
+            aside {
+                class: if open() { "admin-sidebar admin-sidebar--open" } else { "admin-sidebar" },
+                h2 { class: "admin-brand", "{{ pascal }}" }
+                nav { class: "admin-nav",
+                    for (i, label) in nav.iter().enumerate() {
+                        button {
+                            key: "{i}",
+                            class: if section() == i { "admin-nav-item is-active" } else { "admin-nav-item" },
+                            onclick: move |_| { section.set(i); open.set(false); },
+                            "{label}"
+                        }
+                    }
+                }
+            }
+            main { class: "admin-content",
+                match section() {
+                    0 => rsx! { p { "Overview pane" } },
+                    1 => rsx! { p { "Details pane" } },
+                    _ => rsx! { p { "Settings pane" } },
+                }
+            }
+        }
+{%- if wrap_pascal %}
+        }
+{%- endif %}
+    }
+}
+"#;
+
+// The structural CSS the markup depends on. Theme tokens are kept as
+// `var(--token, <neutral>)` so the layout adopts a project's theme when present
+// and falls back to neutral grays standalone. Mobile-first: base rules describe
+// the phone (drawer) state; the >=48rem media query promotes the sidebar to a
+// sticky grid column and hides the mobile-only chrome.
+const ADMIN_CONSOLE_CSS: &str = r#"/* Admin console layout: sticky sidebar on desktop, hamburger-toggled
+   slide-in drawer on phones. */
+.admin-layout {
+  position: relative;
+  max-width: 64rem;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+/* Mobile-only toggle. Hidden at the desktop breakpoint. */
+.admin-hamburger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.875rem;
+  font-size: 0.9375rem;
+  color: var(--secondary-color-2, #374151);
+  background: var(--primary-color-4, #f3f4f6);
+  border: 1px solid var(--primary-color-7, #d1d5db);
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+
+/* Dimmer behind the open drawer (mobile only). */
+.admin-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.admin-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 50;
+  width: 15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.5rem 1rem;
+  background: var(--primary-color-3, #f9fafb);
+  border-right: 1px solid var(--primary-color-7, #d1d5db);
+  overflow-y: auto;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+}
+
+.admin-sidebar--open {
+  transform: translateX(0);
+}
+
+.admin-brand {
+  margin: 0;
+  font-size: 1.125rem;
+  color: var(--secondary-color, #111827);
+}
+
+.admin-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.admin-nav-item {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9375rem;
+  color: var(--secondary-color-3, #4b5563);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+
+.admin-nav-item:hover {
+  background: var(--primary-color-5, #e5e7eb);
+}
+
+.admin-nav-item.is-active {
+  color: var(--secondary-color, #111827);
+  background: var(--primary-color-5, #e5e7eb);
+  border-color: var(--primary-color-7, #d1d5db);
+}
+
+.admin-content {
+  min-width: 0;
+}
+
+@media (min-width: 48rem) {
+  .admin-hamburger,
+  .admin-scrim {
+    display: none;
+  }
+
+  .admin-layout {
+    display: grid;
+    grid-template-columns: 15rem 1fr;
+    gap: 2rem;
+    align-items: start;
+  }
+
+  /* Back into normal flow as a sticky column; the drawer transform and
+     fixed positioning no longer apply. */
+  .admin-sidebar {
+    position: sticky;
+    top: 2rem;
+    z-index: auto;
+    width: auto;
+    transform: none;
+    border-right: none;
+    border: 1px solid var(--primary-color-7, #d1d5db);
+    border-radius: 0.75rem;
+  }
+}
+"#;
+
+// ---------------------------------------------------------------------------
 // Preview-skeleton helpers. These produce the approximate `RenderNode` tree the
 // cockpit navigator renders — a coarse box model of the layout, not the markup.
 // ---------------------------------------------------------------------------
@@ -442,6 +633,12 @@ fn descriptor(
         nav_rank,
         template: Some(template.to_string()),
         complex: false,
+        // Default to the utility-styled convention: Tailwind classes baked into
+        // the template, no CSS carried, the toolchain declared instead. The
+        // self-contained `admin_console` overrides `styles`/`requires` after
+        // construction (it styles via semantic classes + carried CSS).
+        styles: None,
+        requires: Some("tailwind".to_string()),
         context_vars: common_context_vars(),
         preview: PreviewSkeleton {
             nodes: preview_nodes,
@@ -634,7 +831,32 @@ pub(crate) fn library_layouts() -> Vec<LayoutDescriptor> {
                 ],
             )],
         ),
+        admin_console(),
     ]
+}
+
+/// The self-contained admin-console shell. Built like the others but carries its
+/// own structural CSS (`styles`) and so declares no toolchain `requires` — the
+/// scaffold emits `assets/{snake}.css` so the structure survives in any project.
+fn admin_console() -> LayoutDescriptor {
+    let mut d = descriptor(
+        "admin_console",
+        "Admin Console",
+        22,
+        ADMIN_CONSOLE_TPL,
+        vec![el(
+            "div",
+            Some("admin-console"),
+            vec![
+                box_("ac-hamburger", "menu"),
+                box_("ac-sidebar", "nav"),
+                box_("ac-main", "section"),
+            ],
+        )],
+    );
+    d.styles = Some(ADMIN_CONSOLE_CSS.to_string());
+    d.requires = None;
+    d
 }
 
 #[cfg(test)]
@@ -686,7 +908,7 @@ mod tests {
     #[test]
     fn every_library_layout_renders_a_valid_component() {
         let layouts = layouts();
-        assert_eq!(layouts.len(), 12, "expected 12 library layouts");
+        assert_eq!(layouts.len(), 13, "expected 13 library layouts");
         for id in layouts.keys() {
             let body =
                 build_screen_body(std::env::temp_dir().as_path(), &screen(id), &[], &layouts)
@@ -734,6 +956,36 @@ mod tests {
             body.contains("Protected {"),
             "expected wrapper element:\n{body}"
         );
+    }
+
+    #[test]
+    fn every_library_layout_is_style_well_formed() {
+        // Each library layout is styled exactly one way: either it bakes Tailwind
+        // utilities into the markup (so it declares `requires: tailwind` and
+        // carries no CSS), or it styles via semantic classes and carries the CSS
+        // in `styles` (so it needs no toolchain `requires`). Never both, never
+        // neither — that's the contract scaffold relies on to either emit a
+        // sheet or surface a toolchain advisory.
+        for l in library_layouts() {
+            let carries_css = l.styles.as_deref().is_some_and(|s| !s.trim().is_empty());
+            let declares_toolchain = l.requires.is_some();
+            assert!(
+                carries_css ^ declares_toolchain,
+                "{} must either carry `styles` or declare `requires`, not both/neither \
+                 (styles: {carries_css}, requires: {declares_toolchain})",
+                l.id
+            );
+            if l.id == "admin_console" {
+                assert!(carries_css, "admin_console is the self-contained layout");
+            } else {
+                assert_eq!(
+                    l.requires.as_deref(),
+                    Some("tailwind"),
+                    "{} is utility-styled and should declare its Tailwind dependency",
+                    l.id
+                );
+            }
+        }
     }
 
     #[test]
