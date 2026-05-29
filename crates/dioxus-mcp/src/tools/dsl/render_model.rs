@@ -370,6 +370,8 @@ screens:
                 nav_rank: 9,
                 template: Some("// runtime".into()),
                 complex: false,
+                styles: None,
+                requires: None,
                 context_vars: vec![],
                 preview: PreviewSkeleton {
                     nodes: vec![RenderNode::Element {
